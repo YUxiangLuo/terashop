@@ -9,6 +9,7 @@
 bun install
 bunx supabase start        # API :54321 / Studio :54323 / DB :54322
 bunx supabase db reset     # 重放迁移 + 载入演示数据
+bun test                   # 重置数据库并运行 65 个 API 测试（bun test）
 ```
 
 ## 架构总览
@@ -17,7 +18,15 @@ bunx supabase db reset     # 重放迁移 + 载入演示数据
 supabase/migrations/
 ├── 20260829170000_foundation.sql   # 用户、通用函数、Metafield/Metaobject 体系
 ├── 20260829170001_catalog.sql      # 分类、商品、选项、变体、图片、多仓库存
-└── 20260829170002_checkout.sql     # 地址、运费、税、折扣、订单、履约、支付、审计
+├── 20260829170002_checkout.sql     # 地址、运费、税、折扣、订单、履约、支付、审计
+└── 20260829170003_hardening.sql    # 库存流水审计、发货校验、地址管理、评价、审核 RPC
+
+tests/                              # bun test，共 65 例
+├── helpers.ts                      # API/RPC/认证/库存 辅助函数
+├── catalog.test.ts                 # 商品目录与视图
+├── orders.test.ts                  # 下单金额/折扣/运费/税/取消/RLS
+├── admin.test.ts                   # 履约/支付标记/库存管理/权限边界
+└── extensions.test.ts              # Metafield/Metaobject/评价审核流
 ```
 
 ### 商品域（Shopify 变体模型）
@@ -61,20 +70,34 @@ POST /rest/v1/rpc/create_order
  "shipping_method_id":"...",
  "discount_code":"WELCOME10"}
 
-# 取消（仅未支付未发货，回补库存+释放折扣）
+# 取消（仅未支付未发货，回补库存+释放折扣+记流水）
 POST /rest/v1/rpc/cancel_order {"order_id":"...","reason":"..."}
+
+# 未发货前修改收货地址（本人或 admin）
+POST /rest/v1/rpc/update_order_address {"order_id":"...","address":{...}}
 
 # 管理端（admin）
 POST /rest/v1/rpc/mark_order_paid      {"order_id":"...","provider":"manual"}
 POST /rest/v1/rpc/create_fulfillment   {"order_id":"...","items":[...],"carrier":"顺丰","tracking_number":"..."}
+POST /rest/v1/rpc/adjust_inventory     {"variant_id":"...","delta":10,"reason":"restock","note":"补货"}
+POST /rest/v1/rpc/moderate_review      {"review_id":"...","status":"approved"}
+POST /rest/v1/rpc/set_user_role        {"user_id":"...","role":"admin"}
 ```
+
+补充说明：
+- `inventory_movements` 记录每笔库存变动（下单/取消/补货/调整），含变动后结存
+- `product_reviews`：每客每商品一条，需 admin 审核后公开；作者改内容自动回落待审
+- 分类自连接不支持 PostgREST 内嵌查询，前端拉平铺列表自行组树即可
+- admin JWT 与普通用户同属 `authenticated` 数据库角色，所以状态类写操作
+  （审核评价、改角色、改订单内部字段）一律走 security definer RPC，不走直改表
 
 ## 安全模型
 - 全表 RLS；订单只能走 `create_order` RPC 创建（无直插策略）
-- 列级权限：`cost`（成本价）、`admin_note`、`payments.raw` 不对客户端暴露
-- 精确库存数仅 admin 可见，前端用 `product_listing.in_stock`
+- 列级权限：`cost`（成本价）、`admin_note`、`payments.raw`、`profiles.role` 不对客户端暴露
+  （admin 面板需要这些字段时走 service role 或对应 RPC）
+- 精确库存数与库存流水仅 admin 可见，前端用 `product_listing.in_stock`
 - 折扣码不公开，验证只在服务端事务内进行
-- 设置管理员：`update profiles set role='admin' where email='...';`
+- 设置管理员：`select set_user_role('<user-uuid>', 'admin')`（需已有 admin）或首次用 SQL 直改
 
 ## 接入 Stripe/PayPal（预留）
 1. Edge Function 创建支付意图 → 写 `payments`（kind=charge, status=pending, provider_ref=xxx）

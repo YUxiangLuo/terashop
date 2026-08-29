@@ -11,5 +11,9 @@
   },
   "dependencies": {
     "supabase": "^2.116.0"
+  },
+  "scripts": {
+    "setup": "bunx supabase db reset",
+    "test": "bun run setup > /dev/null 2>&1 && bun test"
   }
 }

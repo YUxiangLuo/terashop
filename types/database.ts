@@ -304,6 +304,74 @@ export type Database = {
           },
         ]
       }
+      inventory_movements: {
+        Row: {
+          actor_id: string | null
+          created_at: string
+          delta: number
+          id: number
+          location_id: string
+          note: string | null
+          on_hand_after: number
+          order_id: string | null
+          reason: string
+          variant_id: string
+        }
+        Insert: {
+          actor_id?: string | null
+          created_at?: string
+          delta: number
+          id?: never
+          location_id: string
+          note?: string | null
+          on_hand_after: number
+          order_id?: string | null
+          reason: string
+          variant_id: string
+        }
+        Update: {
+          actor_id?: string | null
+          created_at?: string
+          delta?: number
+          id?: never
+          location_id?: string
+          note?: string | null
+          on_hand_after?: number
+          order_id?: string | null
+          reason?: string
+          variant_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inventory_movements_actor_id_fkey"
+            columns: ["actor_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_movements_location_id_fkey"
+            columns: ["location_id"]
+            isOneToOne: false
+            referencedRelation: "locations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_movements_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "orders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "inventory_movements_variant_id_fkey"
+            columns: ["variant_id"]
+            isOneToOne: false
+            referencedRelation: "product_variants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       locations: {
         Row: {
           address: Json | null
@@ -909,6 +977,64 @@ export type Database = {
           },
         ]
       }
+      product_reviews: {
+        Row: {
+          body: string
+          created_at: string
+          customer_id: string
+          id: string
+          product_id: string
+          rating: number
+          status: string
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          body?: string
+          created_at?: string
+          customer_id?: string
+          id?: string
+          product_id: string
+          rating: number
+          status?: string
+          title?: string
+          updated_at?: string
+        }
+        Update: {
+          body?: string
+          created_at?: string
+          customer_id?: string
+          id?: string
+          product_id?: string
+          rating?: number
+          status?: string
+          title?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "product_reviews_customer_id_fkey"
+            columns: ["customer_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "product_reviews_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "product_listing"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "product_reviews_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       product_variants: {
         Row: {
           barcode: string | null
@@ -1195,6 +1321,27 @@ export type Database = {
       }
     }
     Functions: {
+      adjust_inventory: {
+        Args: {
+          delta: number
+          location_id?: string
+          note?: string
+          reason?: string
+          variant_id: string
+        }
+        Returns: {
+          location_id: string
+          on_hand: number
+          variant_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "inventory_levels"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      assert_metaobject_exists: { Args: { p_ref: string }; Returns: undefined }
       cancel_order: {
         Args: { order_id: string; reason?: string }
         Returns: {
@@ -1309,6 +1456,82 @@ export type Database = {
       is_admin: { Args: never; Returns: boolean }
       mark_order_paid: {
         Args: { order_id: string; provider?: string; provider_ref?: string }
+        Returns: {
+          admin_note: string | null
+          billing_address: Json | null
+          cancel_reason: string | null
+          cancelled_at: string | null
+          completed_at: string | null
+          created_at: string
+          currency: string
+          customer_id: string
+          customer_note: string | null
+          discount_code: string | null
+          discount_id: string | null
+          discount_total: number
+          email: string
+          financial_status: string
+          fulfillment_status: string
+          id: string
+          order_number: number
+          paid_at: string | null
+          shipping_address: Json
+          shipping_method_id: string | null
+          shipping_method_name: string | null
+          shipping_total: number
+          status: string
+          subtotal: number
+          tax_total: number
+          total: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "orders"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      moderate_review: {
+        Args: { review_id: string; status: string }
+        Returns: {
+          body: string
+          created_at: string
+          customer_id: string
+          id: string
+          product_id: string
+          rating: number
+          status: string
+          title: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "product_reviews"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      set_user_role: {
+        Args: { role: string; user_id: string }
+        Returns: {
+          created_at: string
+          email: string
+          full_name: string
+          id: string
+          phone: string | null
+          role: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "profiles"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      update_order_address: {
+        Args: { address?: Json; address_id?: string; order_id: string }
         Returns: {
           admin_note: string | null
           billing_address: Json | null
