@@ -1,5 +1,5 @@
 {
-  "name": "demo",
+  "name": "tera-headless",
   "module": "index.ts",
   "type": "module",
   "private": true,

@@ -1,4 +1,4 @@
-# demo — Headless 电商后端（Supabase）
+# tera-headless — Headless 电商后端（Supabase）
 
 商用级 headless 电商后端，参考 WooCommerce 的功能覆盖面与 Shopify 的扩展体系设计。
 当前实现到完整订单生命周期（下单→支付标记→履约→完成/取消），Stripe/PayPal 支付已留好扩展位。
