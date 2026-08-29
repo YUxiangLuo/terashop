@@ -194,12 +194,12 @@ begin
   insert into public.promotion_targets (promotion_id, category_id) values (promo_apparel, c_apparel);
 
   insert into public.promotions (name, type, params, priority, stackable) values
-    ('马克杯满3件7折', 'item_percentage', '{"percent": 30, "min_quantity": 3}', 100, false)
+    ('马克杯满3件7折', 'item_percentage', '{"percent": 30, "min_quantity": 3}', 100, true)
   returning id into promo_mug;
   insert into public.promotion_targets (promotion_id, product_id) values (promo_mug, p_mug);
 
   insert into public.promotions (name, type, params, priority, stackable) values
-    ('数据线买一送一', 'buy_x_get_y', '{"buy": 1, "get": 1, "get_percent": 100}', 100, false)
+    ('数据线买一送一', 'buy_x_get_y', '{"buy": 1, "get": 1, "get_percent": 100}', 100, true)
   returning id into promo_bogo;
   insert into public.promotion_targets (promotion_id, product_id) values (promo_bogo, p_cable);
 end;

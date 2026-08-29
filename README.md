@@ -20,15 +20,17 @@ supabase/migrations/
 ├── 20260829170001_catalog.sql      # 分类、商品、选项、变体、图片、多仓库存
 ├── 20260829170002_checkout.sql     # 地址、运费、税、订单、履约、支付、审计
 ├── 20260829170003_hardening.sql    # 库存流水审计、发货校验、地址管理、评价、审核 RPC
-└── 20260829170004_promotions.sql   # 促销引擎（自动/输码促销、叠加互斥、预览计价）
+├── 20260829170004_promotions.sql   # 促销引擎（自动/输码促销、叠加互斥、预览计价）
+└── 20260829170005_fixes.sql        # 审查修复：折扣钳制/并发锁/权限收拢/退款/改地址重算
 
-tests/                              # bun test，共 78 例
+tests/                              # bun test，共 110 例
 ├── helpers.ts                      # API/RPC/认证/库存 辅助函数
 ├── catalog.test.ts                 # 商品目录与视图
 ├── orders.test.ts                  # 下单金额/折扣/运费/税/取消/RLS
 ├── admin.test.ts                   # 履约/支付标记/库存管理/权限边界
 ├── extensions.test.ts              # Metafield/Metaobject/评价审核流
-└── promotions.test.ts              # 促销引擎（预览/四类促销/叠加互斥/落账）
+├── promotions.test.ts              # 促销引擎（预览/四类促销/叠加互斥/落账）
+└── fixes.test.ts                   # 审查修复回归（钳制/并发/退款/权限/匿名化）
 ```
 
 ### 商品域（Shopify 变体模型）
@@ -53,8 +55,10 @@ tests/                              # bun test，共 78 例
 - `promotions`：一张表覆盖全部促销类型，`params` JSONB 承载类型参数
   - `order_percentage` 整单折扣 / `order_fixed` 满减 / `item_percentage` 范围打折或满N件X折
   - `buy_x_get_y` 买一送一（支持“买A送B”跨范围，最便宜件优先免）/ `free_shipping`
-  - `code = null` 自动生效；有码 = 输码生效（每客限次、总次数、时间窗）
-  - `priority` 决定求值顺序；`stackable=false` 为独占，生效后阻止后续促销
+  - `code = null` 自动生效；有码 = 输码生效（每客限次、总次数、时间窗）；码统一存大写
+  - `priority` 决定求值顺序；`stackable=false` 为独占，生效后阻止后续促销（含免邮促销）
+  - 行级折扣钳制：任意促销叠加后单行折扣不超过行金额，杜绝负行额/负税
+  - 下单时对涉及的促销行加锁（`for update`），usage_limit / 每客限次并发安全
 - `promotion_targets`：作用范围（商品/分类/变体；分类含子分类闭包；空 = 全场）
 - `price_checkout` RPC：**预览与下单共用的计价引擎**，返回行级折扣与促销明细
 - `order_promotions` 落账快照 + `order_items.discount_total/line_total` 行级分摊（部分退款精度）
@@ -87,10 +91,10 @@ POST /rest/v1/rpc/create_order
  "shipping_method_id":"...",
  "discount_code":"WELCOME10"}
 
-# 取消（仅未支付未发货，回补库存+释放折扣+记流水）
+# 取消（仅未支付未发货，按原扣减仓回补库存+释放促销+记流水）
 POST /rest/v1/rpc/cancel_order {"order_id":"...","reason":"..."}
 
-# 未发货前修改收货地址（本人或 admin）
+# 未发货前修改收货地址（本人或 admin；自动重算税、重校验运法国家限制）
 POST /rest/v1/rpc/update_order_address {"order_id":"...","address":{...}}
 
 # 管理端（admin）
@@ -98,15 +102,28 @@ POST /rest/v1/rpc/mark_order_paid      {"order_id":"...","provider":"manual"}
 POST /rest/v1/rpc/create_fulfillment   {"order_id":"...","items":[...],"carrier":"顺丰","tracking_number":"..."}
 POST /rest/v1/rpc/adjust_inventory     {"variant_id":"...","delta":10,"reason":"restock","note":"补货"}
 POST /rest/v1/rpc/moderate_review      {"review_id":"...","status":"approved"}
-POST /rest/v1/rpc/set_user_role        {"user_id":"...","role":"admin"}
+POST /rest/v1/rpc/set_user_role        {"user_id":"...","role":"admin"}   # 最后一名 admin 不可降级
+
+# 退款（admin）：按行退 / 自定义金额 / 全额退剩余，三选一
+POST /rest/v1/rpc/refund_order {"order_id":"...","items":[{"order_item_id":"...","quantity":1}],
+                                "restock":true,"reason":"破损"}
+POST /rest/v1/rpc/refund_order {"order_id":"..."}                            # 全额退剩余
+# GDPR 匿名化（admin）：清 profile PII + 删地址簿与 customer 域 metafield；
+# 财务记录（orders/payments）依法保留，审计 actor 自动置空
+POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
 ```
 
 补充说明：
-- `inventory_movements` 记录每笔库存变动（下单/取消/补货/调整），含变动后结存
+- `inventory_movements` 记录每笔库存变动（下单/取消/补货/调整/退货），含变动后结存与仓位
 - `product_reviews`：每客每商品一条，需 admin 审核后公开；作者改内容自动回落待审
 - 分类自连接不支持 PostgREST 内嵌查询，前端拉平铺列表自行组树即可
-- admin JWT 与普通用户同属 `authenticated` 数据库角色，所以状态类写操作
-  （审核评价、改角色、改订单内部字段）一律走 security definer RPC，不走直改表
+- 金额口径：`order_items.total` = 行毛额（单价×数量），`line_total` = 行净额（扣行折扣）；
+  `orders.discount_total` 只含商品折扣，免运费优惠记于 `order_promotions.amount` 并把
+  `shipping_total` 置 0；`payments.amount` 恒正，方向由 `kind`（charge/refund）表达
+- `tax_rates.include_shipping` 控制运费是否计入税基（默认否，按需开启）
+- admin JWT 与普通用户同属 `authenticated` 数据库角色，状态类写操作一律走
+  security definer RPC：orders 表 admin 仅能直改 `admin_note` 列，payments / fulfillments /
+  inventory_levels 的写入权限已从客户端角色整体收回（webhook 走 service role）
 
 ## 安全模型
 - 全表 RLS；订单只能走 `create_order` RPC 创建（无直插策略）
@@ -117,8 +134,9 @@ POST /rest/v1/rpc/set_user_role        {"user_id":"...","role":"admin"}
 - 设置管理员：`select set_user_role('<user-uuid>', 'admin')`（需已有 admin）或首次用 SQL 直改
 
 ## 接入 Stripe/PayPal（预留）
-1. Edge Function 创建支付意图 → 写 `payments`（kind=charge, status=pending, provider_ref=xxx）
-2. Webhook Function 验签 → 更新 `payments.status='succeeded'` + `orders.financial_status='paid'` + 写 `order_events`
-3. 退款：`payments` 插 kind=refund 记录 + `financial_status='refunded'/'partially_refunded'`
+1. Edge Function 创建支付意图 → service role 写 `payments`（kind=charge, status=pending, provider_ref=xxx）
+2. Webhook Function 验签 → service role 更新 `payments.status='succeeded'` + `orders.financial_status='paid'` + 写 `order_events`
+   （payments 的客户端写权限已收回，webhook 必须用 service role）
+3. 退款：webhook 同步渠道退款结果后调用 `refund_order`（或 service role 按同结构直写）
 
 前端类型：`bunx supabase gen types typescript --local > types/database.ts`

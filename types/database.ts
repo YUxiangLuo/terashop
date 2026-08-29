@@ -168,6 +168,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
+            foreignKeyName: "discount_redemptions_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "orders"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "discount_redemptions_promotion_id_fkey"
             columns: ["promotion_id"]
             isOneToOne: false
@@ -558,6 +565,8 @@ export type Database = {
           order_id: string
           product_id: string | null
           quantity: number
+          refunded_amount: number
+          refunded_quantity: number
           sku: string | null
           total: number
           unit_price: number
@@ -573,6 +582,8 @@ export type Database = {
           order_id: string
           product_id?: string | null
           quantity: number
+          refunded_amount?: number
+          refunded_quantity?: number
           sku?: string | null
           total: number
           unit_price: number
@@ -588,6 +599,8 @@ export type Database = {
           order_id?: string
           product_id?: string | null
           quantity?: number
+          refunded_amount?: number
+          refunded_quantity?: number
           sku?: string | null
           total?: number
           unit_price?: number
@@ -1327,6 +1340,7 @@ export type Database = {
           country: string
           created_at: string
           id: string
+          include_shipping: boolean
           is_active: boolean
           name: string
           rate: number
@@ -1335,6 +1349,7 @@ export type Database = {
           country?: string
           created_at?: string
           id?: string
+          include_shipping?: boolean
           is_active?: boolean
           name: string
           rate: number
@@ -1343,6 +1358,7 @@ export type Database = {
           country?: string
           created_at?: string
           id?: string
+          include_shipping?: boolean
           is_active?: boolean
           name?: string
           rate?: number
@@ -1457,6 +1473,24 @@ export type Database = {
         SetofOptions: {
           from: "*"
           to: "inventory_levels"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      anonymize_user: {
+        Args: { p_user_id: string }
+        Returns: {
+          created_at: string
+          email: string
+          full_name: string
+          id: string
+          phone: string | null
+          role: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "profiles"
           isOneToOne: true
           isSetofReturn: false
         }
@@ -1637,6 +1671,50 @@ export type Database = {
           shipping_method_id?: string
         }
         Returns: Json
+      }
+      refund_order: {
+        Args: {
+          amount?: number
+          items?: Json
+          order_id: string
+          provider?: string
+          reason?: string
+          restock?: boolean
+        }
+        Returns: {
+          admin_note: string | null
+          billing_address: Json | null
+          cancel_reason: string | null
+          cancelled_at: string | null
+          completed_at: string | null
+          created_at: string
+          currency: string
+          customer_id: string
+          customer_note: string | null
+          discount_code: string | null
+          discount_total: number
+          email: string
+          financial_status: string
+          fulfillment_status: string
+          id: string
+          order_number: number
+          paid_at: string | null
+          shipping_address: Json
+          shipping_method_id: string | null
+          shipping_method_name: string | null
+          shipping_total: number
+          status: string
+          subtotal: number
+          tax_total: number
+          total: number
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "orders"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
       set_user_role: {
         Args: { role: string; user_id: string }
