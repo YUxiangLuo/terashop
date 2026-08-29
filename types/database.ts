@@ -141,23 +141,23 @@ export type Database = {
         Row: {
           created_at: string
           customer_id: string
-          discount_id: string
           id: string
           order_id: string | null
+          promotion_id: string
         }
         Insert: {
           created_at?: string
           customer_id: string
-          discount_id: string
           id?: string
           order_id?: string | null
+          promotion_id: string
         }
         Update: {
           created_at?: string
           customer_id?: string
-          discount_id?: string
           id?: string
           order_id?: string | null
+          promotion_id?: string
         }
         Relationships: [
           {
@@ -168,58 +168,13 @@ export type Database = {
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "discount_redemptions_discount_id_fkey"
-            columns: ["discount_id"]
+            foreignKeyName: "discount_redemptions_promotion_id_fkey"
+            columns: ["promotion_id"]
             isOneToOne: false
-            referencedRelation: "discounts"
+            referencedRelation: "promotions"
             referencedColumns: ["id"]
           },
         ]
-      }
-      discounts: {
-        Row: {
-          code: string
-          created_at: string
-          ends_at: string | null
-          id: string
-          is_active: boolean
-          min_subtotal: number | null
-          starts_at: string | null
-          type: string
-          updated_at: string
-          usage_limit: number | null
-          used_count: number
-          value: number
-        }
-        Insert: {
-          code: string
-          created_at?: string
-          ends_at?: string | null
-          id?: string
-          is_active?: boolean
-          min_subtotal?: number | null
-          starts_at?: string | null
-          type: string
-          updated_at?: string
-          usage_limit?: number | null
-          used_count?: number
-          value?: number
-        }
-        Update: {
-          code?: string
-          created_at?: string
-          ends_at?: string | null
-          id?: string
-          is_active?: boolean
-          min_subtotal?: number | null
-          starts_at?: string | null
-          type?: string
-          updated_at?: string
-          usage_limit?: number | null
-          used_count?: number
-          value?: number
-        }
-        Relationships: []
       }
       fulfillments: {
         Row: {
@@ -595,7 +550,9 @@ export type Database = {
       }
       order_items: {
         Row: {
+          discount_total: number
           id: string
+          line_total: number | null
           name: string
           options: Json
           order_id: string
@@ -608,7 +565,9 @@ export type Database = {
           variant_title: string
         }
         Insert: {
+          discount_total?: number
           id?: string
+          line_total?: number | null
           name: string
           options?: Json
           order_id: string
@@ -621,7 +580,9 @@ export type Database = {
           variant_title?: string
         }
         Update: {
+          discount_total?: number
           id?: string
+          line_total?: number | null
           name?: string
           options?: Json
           order_id?: string
@@ -664,6 +625,48 @@ export type Database = {
           },
         ]
       }
+      order_promotions: {
+        Row: {
+          amount: number
+          code: string | null
+          created_at: string
+          name: string
+          order_id: string
+          promotion_id: string
+        }
+        Insert: {
+          amount: number
+          code?: string | null
+          created_at?: string
+          name: string
+          order_id: string
+          promotion_id: string
+        }
+        Update: {
+          amount?: number
+          code?: string | null
+          created_at?: string
+          name?: string
+          order_id?: string
+          promotion_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "order_promotions_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "orders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "order_promotions_promotion_id_fkey"
+            columns: ["promotion_id"]
+            isOneToOne: false
+            referencedRelation: "promotions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       orders: {
         Row: {
           admin_note: string | null
@@ -676,7 +679,6 @@ export type Database = {
           customer_id: string
           customer_note: string | null
           discount_code: string | null
-          discount_id: string | null
           discount_total: number
           email: string
           financial_status: string
@@ -705,7 +707,6 @@ export type Database = {
           customer_id: string
           customer_note?: string | null
           discount_code?: string | null
-          discount_id?: string | null
           discount_total?: number
           email: string
           financial_status?: string
@@ -734,7 +735,6 @@ export type Database = {
           customer_id?: string
           customer_note?: string | null
           discount_code?: string | null
-          discount_id?: string | null
           discount_total?: number
           email?: string
           financial_status?: string
@@ -758,13 +758,6 @@ export type Database = {
             columns: ["customer_id"]
             isOneToOne: false
             referencedRelation: "profiles"
-            referencedColumns: ["id"]
-          },
-          {
-            foreignKeyName: "orders_discount_id_fkey"
-            columns: ["discount_id"]
-            isOneToOne: false
-            referencedRelation: "discounts"
             referencedColumns: ["id"]
           },
           {
@@ -1170,6 +1163,123 @@ export type Database = {
         }
         Relationships: []
       }
+      promotion_targets: {
+        Row: {
+          category_id: string | null
+          id: string
+          product_id: string | null
+          promotion_id: string
+          role: string
+          variant_id: string | null
+        }
+        Insert: {
+          category_id?: string | null
+          id?: string
+          product_id?: string | null
+          promotion_id: string
+          role?: string
+          variant_id?: string | null
+        }
+        Update: {
+          category_id?: string | null
+          id?: string
+          product_id?: string | null
+          promotion_id?: string
+          role?: string
+          variant_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "promotion_targets_category_id_fkey"
+            columns: ["category_id"]
+            isOneToOne: false
+            referencedRelation: "categories"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "promotion_targets_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "product_listing"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "promotion_targets_product_id_fkey"
+            columns: ["product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "promotion_targets_promotion_id_fkey"
+            columns: ["promotion_id"]
+            isOneToOne: false
+            referencedRelation: "promotions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "promotion_targets_variant_id_fkey"
+            columns: ["variant_id"]
+            isOneToOne: false
+            referencedRelation: "product_variants"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      promotions: {
+        Row: {
+          code: string | null
+          created_at: string
+          ends_at: string | null
+          id: string
+          is_active: boolean
+          name: string
+          params: Json
+          per_customer_limit: number
+          priority: number
+          stackable: boolean
+          starts_at: string | null
+          type: string
+          updated_at: string
+          usage_limit: number | null
+          used_count: number
+        }
+        Insert: {
+          code?: string | null
+          created_at?: string
+          ends_at?: string | null
+          id?: string
+          is_active?: boolean
+          name: string
+          params?: Json
+          per_customer_limit?: number
+          priority?: number
+          stackable?: boolean
+          starts_at?: string | null
+          type: string
+          updated_at?: string
+          usage_limit?: number | null
+          used_count?: number
+        }
+        Update: {
+          code?: string | null
+          created_at?: string
+          ends_at?: string | null
+          id?: string
+          is_active?: boolean
+          name?: string
+          params?: Json
+          per_customer_limit?: number
+          priority?: number
+          stackable?: boolean
+          starts_at?: string | null
+          type?: string
+          updated_at?: string
+          usage_limit?: number | null
+          used_count?: number
+        }
+        Relationships: []
+      }
       shipping_methods: {
         Row: {
           countries: string[]
@@ -1321,6 +1431,16 @@ export type Database = {
       }
     }
     Functions: {
+      _line_in_scope: {
+        Args: {
+          p_category_ids: string[]
+          p_product_id: string
+          p_promotion_id: string
+          p_role: string
+          p_variant_id: string
+        }
+        Returns: boolean
+      }
       adjust_inventory: {
         Args: {
           delta: number
@@ -1355,7 +1475,6 @@ export type Database = {
           customer_id: string
           customer_note: string | null
           discount_code: string | null
-          discount_id: string | null
           discount_total: number
           email: string
           financial_status: string
@@ -1428,7 +1547,6 @@ export type Database = {
           customer_id: string
           customer_note: string | null
           discount_code: string | null
-          discount_id: string | null
           discount_total: number
           email: string
           financial_status: string
@@ -1467,7 +1585,6 @@ export type Database = {
           customer_id: string
           customer_note: string | null
           discount_code: string | null
-          discount_id: string | null
           discount_total: number
           email: string
           financial_status: string
@@ -1512,6 +1629,15 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      price_checkout: {
+        Args: {
+          address?: Json
+          discount_code?: string
+          items: Json
+          shipping_method_id?: string
+        }
+        Returns: Json
+      }
       set_user_role: {
         Args: { role: string; user_id: string }
         Returns: {
@@ -1543,7 +1669,6 @@ export type Database = {
           customer_id: string
           customer_note: string | null
           discount_code: string | null
-          discount_id: string | null
           discount_total: number
           email: string
           financial_status: string

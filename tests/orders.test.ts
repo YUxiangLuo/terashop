@@ -254,9 +254,10 @@ describe('下单：金额计算', () => {
 
 describe('下单：折扣码', () => {
   test('低于门槛', async () => {
-    await api('/rest/v1/discounts', {
+    await api('/rest/v1/promotions', {
       service: true, method: 'POST',
-      body: { code: 'MIN100X', type: 'percentage', value: 10, min_subtotal: 100 },
+      body: { name: '门槛测试码', code: 'MIN100X', type: 'order_percentage',
+              params: { percent: 10, threshold: 100 } },
     });
     const { data } = await rpc(
       'create_order',
@@ -284,9 +285,10 @@ describe('下单：折扣码', () => {
     );
     expect((fake.data as { message: string }).message).toContain('invalid or expired');
 
-    await api('/rest/v1/discounts', {
+    await api('/rest/v1/promotions', {
       service: true, method: 'POST',
-      body: { code: 'EXPIRED', type: 'percentage', value: 50, ends_at: '2020-01-01T00:00:00Z' },
+      body: { name: '过期码', code: 'EXPIRED', type: 'order_percentage',
+              params: { percent: 50 }, ends_at: '2020-01-01T00:00:00Z' },
     });
     const expired = await rpc(
       'create_order',
@@ -296,17 +298,20 @@ describe('下单：折扣码', () => {
     expect((expired.data as { message: string }).message).toContain('invalid or expired');
   });
 
-  test('折扣码不对外公开（匿名/买家查不到列表）', async () => {
-    const anon = await api('/rest/v1/discounts?select=code');
-    expect(anon.data).toEqual([]);
-    const asBuyer = await api('/rest/v1/discounts?select=code', { token: buyer.token });
-    expect(asBuyer.data).toEqual([]);
+  test('折扣码不对外公开（匿名/买家只能看到自动促销，看不到码）', async () => {
+    const anon = await api('/rest/v1/promotions?select=code');
+    const rows = anon.data as { code: string | null }[];
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.code === null)).toBe(true);
+
+    const asBuyer = await api('/rest/v1/promotions?select=code', { token: buyer.token });
+    expect((asBuyer.data as { code: string | null }[]).every((r) => r.code === null)).toBe(true);
   });
 
   test('取消订单释放折扣：used_count 回落且可再次使用', async () => {
-    await api('/rest/v1/discounts', {
+    await api('/rest/v1/promotions', {
       service: true, method: 'POST',
-      body: { code: 'REL50', type: 'fixed_amount', value: 5 },
+      body: { name: '释放测试', code: 'REL50', type: 'order_fixed', params: { amount: 5 } },
     });
     const kbBefore = await stockOf('KB87-RED');
 
@@ -325,7 +330,7 @@ describe('下单：折扣码', () => {
     expect((cancelled as Record<string, unknown>).status).toBe('cancelled');
 
     // used_count 回落 + 库存回补（含流水）
-    const { data: d } = await api('/rest/v1/discounts?code=eq.REL50&select=used_count', { service: true });
+    const { data: d } = await api('/rest/v1/promotions?code=eq.REL50&select=used_count', { service: true });
     expect((d as { used_count: number }[])[0].used_count).toBe(0);
     expect(await stockOf('KB87-RED')).toBe(kbBefore);
 

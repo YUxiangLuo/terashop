@@ -8,6 +8,7 @@ let customer: TestUser;
 let teeId: string;
 let orderId: string;
 let orderItemId: string;
+let orderTotal: number;
 
 beforeAll(async () => {
   admin = await signup();
@@ -15,13 +16,14 @@ beforeAll(async () => {
   await makeAdmin(admin.userId);
   teeId = await variantBySku('TEE-BLK-S');
 
-  // 顾客下一单：T恤 ×3 = 59.70，税 7.76，合计 67.46
+  // 顾客下一单：T恤 ×3（会命中 seed 的“服饰分类8折”自动促销）
   const { data } = await rpc(
     'create_order',
     { items: [{ variant_id: teeId, quantity: 3 }], address: CN_ADDRESS },
     customer.token
   );
   orderId = (data as { id: string }).id;
+  orderTotal = Number((data as { total: number }).total);
   const { data: items } = await api(`/rest/v1/order_items?order_id=eq.${orderId}&select=id`, {
     token: customer.token,
   });
@@ -171,7 +173,7 @@ describe('支付标记与订单完成', () => {
     expect(p.provider).toBe('manual');
     expect(p.kind).toBe('charge');
     expect(p.status).toBe('succeeded');
-    expect(Number(p.amount)).toBeCloseTo(67.46);
+    expect(Number(p.amount)).toBeCloseTo(orderTotal);
   });
 
   test('payments.raw 对买家不可见', async () => {

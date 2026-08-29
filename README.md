@@ -18,15 +18,17 @@ bun test                   # 重置数据库并运行 65 个 API 测试（bun te
 supabase/migrations/
 ├── 20260829170000_foundation.sql   # 用户、通用函数、Metafield/Metaobject 体系
 ├── 20260829170001_catalog.sql      # 分类、商品、选项、变体、图片、多仓库存
-├── 20260829170002_checkout.sql     # 地址、运费、税、折扣、订单、履约、支付、审计
-└── 20260829170003_hardening.sql    # 库存流水审计、发货校验、地址管理、评价、审核 RPC
+├── 20260829170002_checkout.sql     # 地址、运费、税、订单、履约、支付、审计
+├── 20260829170003_hardening.sql    # 库存流水审计、发货校验、地址管理、评价、审核 RPC
+└── 20260829170004_promotions.sql   # 促销引擎（自动/输码促销、叠加互斥、预览计价）
 
-tests/                              # bun test，共 65 例
+tests/                              # bun test，共 78 例
 ├── helpers.ts                      # API/RPC/认证/库存 辅助函数
 ├── catalog.test.ts                 # 商品目录与视图
 ├── orders.test.ts                  # 下单金额/折扣/运费/税/取消/RLS
 ├── admin.test.ts                   # 履约/支付标记/库存管理/权限边界
-└── extensions.test.ts              # Metafield/Metaobject/评价审核流
+├── extensions.test.ts              # Metafield/Metaobject/评价审核流
+└── promotions.test.ts              # 促销引擎（预览/四类促销/叠加互斥/落账）
 ```
 
 ### 商品域（Shopify 变体模型）
@@ -47,6 +49,17 @@ tests/                              # bun test，共 65 例
 - `payments`：Stripe/PayPal 扩展点（provider/kind/provider_ref/raw），webhook 用 service role 直写
 - `order_events`：全链路审计日志
 
+### 促销引擎（自动 + 输码，预览即算）
+- `promotions`：一张表覆盖全部促销类型，`params` JSONB 承载类型参数
+  - `order_percentage` 整单折扣 / `order_fixed` 满减 / `item_percentage` 范围打折或满N件X折
+  - `buy_x_get_y` 买一送一（支持“买A送B”跨范围，最便宜件优先免）/ `free_shipping`
+  - `code = null` 自动生效；有码 = 输码生效（每客限次、总次数、时间窗）
+  - `priority` 决定求值顺序；`stackable=false` 为独占，生效后阻止后续促销
+- `promotion_targets`：作用范围（商品/分类/变体；分类含子分类闭包；空 = 全场）
+- `price_checkout` RPC：**预览与下单共用的计价引擎**，返回行级折扣与促销明细
+- `order_promotions` 落账快照 + `order_items.discount_total/line_total` 行级分摊（部分退款精度）
+- 示例数据：服饰分类8折 / 马克杯满3件7折 / 数据线买一送一（均自动生效）
+
 ### 扩展体系（Shopify Metafields / Metaobjects）
 - `metafield_definitions` + `metafields`：给 product/variant/category/customer/order/shop
   挂类型化自定义字段（text/number/boolean/date/url/json/list/metaobject_reference…），
@@ -62,6 +75,10 @@ GET /rest/v1/product_listing?select=slug,price_from,in_stock
 
 # 商品详情（含变体、选项、图片、metafields）
 GET /rest/v1/products?slug=eq.xxx&select=*,product_variants(*),product_images(*)
+
+# 订单预览（匿名可用；自动促销+输码促销实时计算，结果与下单严格一致）
+POST /rest/v1/rpc/price_checkout
+{"items":[{"variant_id":"...","quantity":3}], "discount_code":"WELCOME10"}
 
 # 下单（登录；价格服务端计算，超卖/折扣/运费/税全自动）
 POST /rest/v1/rpc/create_order

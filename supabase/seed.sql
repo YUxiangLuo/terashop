@@ -178,9 +178,30 @@ insert into public.shipping_methods (name, description, countries, price, free_a
 insert into public.tax_rates (name, country, rate) values
   ('增值税 13%', 'CN', 0.13);
 
--- ---------- 折扣码 ----------
-insert into public.discounts (code, type, value, min_subtotal, usage_limit) values
-  ('WELCOME10', 'percentage',   10, 50.00,  null),   -- 满 50 打 9 折
-  ('SAVE20',    'fixed_amount', 20, 100.00, 100);    -- 满 100 减 20，全店限 100 次
+-- ---------- 促销 ----------
+-- 输码型（半自动）
+insert into public.promotions (name, code, type, params, usage_limit) values
+  ('新客9折',   'WELCOME10', 'order_percentage', '{"percent": 10, "threshold": 50}', null),
+  ('满100减20', 'SAVE20',    'order_fixed',      '{"threshold": 100, "amount": 20}', 100);
+
+-- 自动型（预览/下单自动生效）
+declare
+  promo_apparel uuid; promo_mug uuid; promo_bogo uuid;
+begin
+  insert into public.promotions (name, type, params, priority, stackable) values
+    ('服饰分类8折', 'item_percentage', '{"percent": 20}', 100, false)
+  returning id into promo_apparel;
+  insert into public.promotion_targets (promotion_id, category_id) values (promo_apparel, c_apparel);
+
+  insert into public.promotions (name, type, params, priority, stackable) values
+    ('马克杯满3件7折', 'item_percentage', '{"percent": 30, "min_quantity": 3}', 100, false)
+  returning id into promo_mug;
+  insert into public.promotion_targets (promotion_id, product_id) values (promo_mug, p_mug);
+
+  insert into public.promotions (name, type, params, priority, stackable) values
+    ('数据线买一送一', 'buy_x_get_y', '{"buy": 1, "get": 1, "get_percent": 100}', 100, false)
+  returning id into promo_bogo;
+  insert into public.promotion_targets (promotion_id, product_id) values (promo_bogo, p_cable);
+end;
 
 end $$;
