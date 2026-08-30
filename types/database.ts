@@ -1419,36 +1419,6 @@ export type Database = {
           tags: string[] | null
           vendor: string | null
         }
-        Insert: {
-          categories?: never
-          compare_at_from?: never
-          created_at?: string | null
-          description?: string | null
-          id?: string | null
-          in_stock?: never
-          name?: string | null
-          price_from?: never
-          primary_image?: never
-          product_type?: string | null
-          slug?: string | null
-          tags?: string[] | null
-          vendor?: string | null
-        }
-        Update: {
-          categories?: never
-          compare_at_from?: never
-          created_at?: string | null
-          description?: string | null
-          id?: string | null
-          in_stock?: never
-          name?: string | null
-          price_from?: never
-          primary_image?: never
-          product_type?: string | null
-          slug?: string | null
-          tags?: string[] | null
-          vendor?: string | null
-        }
         Relationships: []
       }
     }
@@ -1502,6 +1472,10 @@ export type Database = {
         }
       }
       assert_metaobject_exists: { Args: { p_ref: string }; Returns: undefined }
+      cancel_checkout_quote: {
+        Args: { quote_id: string; reason?: string }
+        Returns: Json
+      }
       cancel_order: {
         Args: { order_id: string; reason?: string }
         Returns: Json
@@ -1527,6 +1501,19 @@ export type Database = {
           worker_id: string
         }
         Returns: boolean
+      }
+      create_checkout_quote: {
+        Args: {
+          address?: Json
+          address_id?: string
+          discount_code?: string
+          idempotency_key: string
+          items: Json
+          note?: string
+          shipping_method_id?: string
+          ttl_seconds?: number
+        }
+        Returns: Json
       }
       create_fulfillment: {
         Args: {
@@ -1578,6 +1565,7 @@ export type Database = {
         }
         Returns: Json
       }
+      create_order_from_quote: { Args: { quote_id: string }; Returns: Json }
       create_order_v2: {
         Args: {
           address?: Json
@@ -1599,6 +1587,16 @@ export type Database = {
         }
         Returns: Json
       }
+      expire_checkout_quotes: {
+        Args: { as_of?: string; max_quotes?: number }
+        Returns: Json
+      }
+      get_checkout_quote: { Args: { quote_id: string }; Returns: Json }
+      get_inventory_availability: {
+        Args: { location_id?: string; variant_id: string }
+        Returns: Json
+      }
+      get_order_checkout_quote: { Args: { order_id: string }; Returns: Json }
       get_order_ledger: { Args: { order_id: string }; Returns: Json }
       is_admin: { Args: never; Returns: boolean }
       mark_order_paid: {

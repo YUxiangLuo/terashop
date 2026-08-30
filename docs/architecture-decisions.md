@@ -29,11 +29,12 @@ service role 在内的原地改写；订单行只允许受控退款流程单向�
 
 ## ADR-004：库存语义
 
-**状态：目标已采用，迁移中**
+**状态：采用，新流程已落地，V1 兼容保留**
 
-目标模型为 `on_hand - reserved = available`：checkout 创建短时 reservation，支付确认后转为
-正式扣减，超时/失败释放预占。当前 V1 仍在创建待支付订单时直接扣 `on_hand`；在 reservation
-上线前，取消/退款必须以原始 `inventory_movements` 为权威回补依据，不能依赖变体当前配置。
+新 Checkout Quote 流程使用 `on_hand - active reserved = available`：报价时短时预占但不改
+`on_hand`，转单后继续持有，支付确认在同一事务中把预占转为正式扣减，取消/超时仅释放预占。
+V1/V2 `create_order` 暂时保留“下单即扣库存”，但 inventory trigger 会阻止它消耗活跃预占。
+取消/退款继续以原始 `inventory_movements` 为权威回补依据，不能依赖变体当前配置。
 
 ## ADR-005：促销 V2
 
@@ -76,6 +77,17 @@ Tax Quote/Tax Transaction 模块。不得把当前 `tax_rates` 宣称为全球�
 **状态：采用，数据库基础已落地**
 
 支付创建/捕获和 Outbox worker RPC 只授予 `service_role`。Storefront 不持有 service role；渠道
-Webhook 必须先在 Edge Function 验签，再用 provider event id 作为幂等键推进数据库。订单状态、
-交易、审计事件和 Outbox 在同一事务提交，邮件、渠道回调、物流等外部副作用由 worker 使用
-`FOR UPDATE SKIP LOCKED` 租约消费。数据库入口已落地，具体 Stripe/PayPal 验签适配器仍待实现。
+Webhook 必须先在 Edge Function 验签，再用 provider event id 作为幂等键推进数据库。库存预占
+消费、订单状态、交易、审计事件和 Outbox 在同一事务提交，邮件、渠道回调、物流等外部副作用
+由 worker 使用 `FOR UPDATE SKIP LOCKED` 租约消费。数据库入口已落地，具体 Stripe/PayPal 验签
+适配器仍待实现。
+
+## ADR-010：Checkout Quote 的价格与预占边界
+
+**状态：采用，已落地**
+
+Quote 预占库存但不提前占用促销 usage。转单时按固定锁顺序重新锁库存与有限促销并再次计价；
+只有完整 pricing hash 一致才创建订单，否则要求客户端生成新 Quote。Quote 默认 15 分钟、最长
+30 分钟，每客户最多 5 个活跃 Quote，每次最多 50 行/100 件；账号与 IP 级滥用防护仍应由 Edge
+限流承担。支付确认消费预占，定时 worker 释放超时 Quote 并取消未支付订单。Quote 进入 completed、
+cancelled 或 expired 后立即清除临时地址和备注，长期交易快照只保留在订单中。
