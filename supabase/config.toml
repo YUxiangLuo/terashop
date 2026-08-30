@@ -334,19 +334,18 @@ skip_nonce_check = false
 email_optional = false
 
 [auth.external.google]
-enabled = true
+# OAuth is disabled by default. Enable it only after providing a rotated secret through
+# SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET in the local/production environment.
+enabled = false
 client_id = "336825985146-2uju7ackre8uj0fhjjdgsm7t1rfgbend.apps.googleusercontent.com"
-# DO NOT commit your OAuth provider secret to git. Use environment variable substitution instead:
-secret = "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"
+secret = "env(SUPABASE_AUTH_EXTERNAL_GOOGLE_SECRET)"
 # Overrides the default auth callback URL derived from auth.external_url.
 redirect_uri = ""
 # Overrides the default auth provider URL. Used to support self-hosted gitlab, single-tenant Azure,
 # or any other third-party OIDC providers.
 url = ""
-# If enabled, the nonce check will be skipped. Required for local sign in with Google auth.
-# ⚠️ 本地开发必须为 true（Google 与 GoTrue 的 nonce 格式不兼容，关闭会导致登录失败）。
-# ⚠️ 部署上线前必须改回 false！否则将失去防重放保护（偷到的 id_token 可能被重放）。
-skip_nonce_check = true
+# Never disable nonce verification in a committed configuration.
+skip_nonce_check = false
 # If enabled, it will allow the user to successfully authenticate when the provider does not return an email address.
 email_optional = false
 

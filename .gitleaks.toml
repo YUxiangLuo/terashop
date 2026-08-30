@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Supabase CLI generates disposable local credentials under its ignored temp directory"
+paths = ['''(?:^|/)supabase/\.temp/''']

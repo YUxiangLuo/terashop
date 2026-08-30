@@ -1,9 +1,13 @@
-// 测试辅助：本地 Supabase 的固定 dev key（仅本地有效，随 supabase start 不变）
-export const API = 'http://127.0.0.1:54321';
-export const ANON_KEY =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
-export const SERVICE_KEY =
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU';
+// 测试密钥由 `supabase status -o env` 注入，避免在仓库中固化 JWT。
+function requiredEnv(name: 'ANON_KEY' | 'SERVICE_ROLE_KEY'): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing ${name}; run tests with \`bun run test\` or \`bun run test:current\`.`);
+  return value;
+}
+
+export const API = process.env.API_URL ?? 'http://127.0.0.1:54321';
+export const ANON_KEY = requiredEnv('ANON_KEY');
+export const SERVICE_KEY = requiredEnv('SERVICE_ROLE_KEY');
 
 export interface ApiOptions {
   token?: string;        // 用户 JWT；不传 = 匿名
@@ -37,7 +41,6 @@ export async function api(path: string, opts: ApiOptions = {}) {
 export const rpc = (name: string, body: unknown, token?: string, service = false) =>
   api(`/rest/v1/rpc/${name}`, { method: 'POST', body, token, service });
 
-let seq = 0;
 export interface TestUser {
   token: string;
   userId: string;
@@ -45,7 +48,7 @@ export interface TestUser {
 }
 
 export async function signup(): Promise<TestUser> {
-  const email = `t${Date.now()}_${seq++}@test.com`;
+  const email = `t_${crypto.randomUUID()}@test.com`;
   const res = await fetch(`${API}/auth/v1/signup`, {
     method: 'POST',
     headers: { apikey: ANON_KEY, 'Content-Type': 'application/json' },

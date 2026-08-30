@@ -788,8 +788,10 @@ export type Database = {
           created_at: string
           currency: string
           id: string
+          idempotency_key: string | null
           kind: string
           order_id: string
+          payment_intent_id: string | null
           provider: string
           provider_ref: string | null
           raw: Json | null
@@ -801,8 +803,10 @@ export type Database = {
           created_at?: string
           currency?: string
           id?: string
+          idempotency_key?: string | null
           kind?: string
           order_id: string
+          payment_intent_id?: string | null
           provider?: string
           provider_ref?: string | null
           raw?: Json | null
@@ -814,8 +818,10 @@ export type Database = {
           created_at?: string
           currency?: string
           id?: string
+          idempotency_key?: string | null
           kind?: string
           order_id?: string
+          payment_intent_id?: string | null
           provider?: string
           provider_ref?: string | null
           raw?: Json | null
@@ -1498,40 +1504,29 @@ export type Database = {
       assert_metaobject_exists: { Args: { p_ref: string }; Returns: undefined }
       cancel_order: {
         Args: { order_id: string; reason?: string }
-        Returns: {
-          admin_note: string | null
-          billing_address: Json | null
-          cancel_reason: string | null
-          cancelled_at: string | null
-          completed_at: string | null
-          created_at: string
-          currency: string
-          customer_id: string
-          customer_note: string | null
-          discount_code: string | null
-          discount_total: number
-          email: string
-          financial_status: string
-          fulfillment_status: string
-          id: string
-          order_number: number
-          paid_at: string | null
-          shipping_address: Json
-          shipping_method_id: string | null
-          shipping_method_name: string | null
-          shipping_total: number
-          status: string
-          subtotal: number
-          tax_total: number
-          total: number
-          updated_at: string
+        Returns: Json
+      }
+      capture_payment_intent: {
+        Args: {
+          idempotency_key: string
+          payment_intent_id: string
+          provider_reference: string
+          raw?: Json
         }
-        SetofOptions: {
-          from: "*"
-          to: "orders"
-          isOneToOne: true
-          isSetofReturn: false
+        Returns: Json
+      }
+      claim_outbox_events: {
+        Args: { lease_seconds?: number; max_events?: number; worker_id: string }
+        Returns: Json
+      }
+      complete_outbox_event: {
+        Args: {
+          error_message?: string
+          event_id: string
+          succeeded: boolean
+          worker_id: string
         }
+        Returns: boolean
       }
       create_fulfillment: {
         Args: {
@@ -1561,6 +1556,17 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      create_fulfillment_v2: {
+        Args: {
+          carrier?: string
+          idempotency_key: string
+          items: Json
+          order_id: string
+          tracking_number?: string
+          tracking_url?: string
+        }
+        Returns: Json
+      }
       create_order: {
         Args: {
           address?: Json
@@ -1570,41 +1576,30 @@ export type Database = {
           note?: string
           shipping_method_id?: string
         }
-        Returns: {
-          admin_note: string | null
-          billing_address: Json | null
-          cancel_reason: string | null
-          cancelled_at: string | null
-          completed_at: string | null
-          created_at: string
-          currency: string
-          customer_id: string
-          customer_note: string | null
-          discount_code: string | null
-          discount_total: number
-          email: string
-          financial_status: string
-          fulfillment_status: string
-          id: string
-          order_number: number
-          paid_at: string | null
-          shipping_address: Json
-          shipping_method_id: string | null
-          shipping_method_name: string | null
-          shipping_total: number
-          status: string
-          subtotal: number
-          tax_total: number
-          total: number
-          updated_at: string
-        }
-        SetofOptions: {
-          from: "*"
-          to: "orders"
-          isOneToOne: true
-          isSetofReturn: false
-        }
+        Returns: Json
       }
+      create_order_v2: {
+        Args: {
+          address?: Json
+          address_id?: string
+          discount_code?: string
+          idempotency_key: string
+          items: Json
+          note?: string
+          shipping_method_id?: string
+        }
+        Returns: Json
+      }
+      create_payment_intent: {
+        Args: {
+          idempotency_key: string
+          metadata?: Json
+          order_id: string
+          provider: string
+        }
+        Returns: Json
+      }
+      get_order_ledger: { Args: { order_id: string }; Returns: Json }
       is_admin: { Args: never; Returns: boolean }
       mark_order_paid: {
         Args: { order_id: string; provider?: string; provider_ref?: string }
@@ -1681,40 +1676,19 @@ export type Database = {
           reason?: string
           restock?: boolean
         }
-        Returns: {
-          admin_note: string | null
-          billing_address: Json | null
-          cancel_reason: string | null
-          cancelled_at: string | null
-          completed_at: string | null
-          created_at: string
-          currency: string
-          customer_id: string
-          customer_note: string | null
-          discount_code: string | null
-          discount_total: number
-          email: string
-          financial_status: string
-          fulfillment_status: string
-          id: string
-          order_number: number
-          paid_at: string | null
-          shipping_address: Json
-          shipping_method_id: string | null
-          shipping_method_name: string | null
-          shipping_total: number
-          status: string
-          subtotal: number
-          tax_total: number
-          total: number
-          updated_at: string
+        Returns: Json
+      }
+      refund_order_v2: {
+        Args: {
+          amount?: number
+          idempotency_key: string
+          items?: Json
+          order_id: string
+          provider?: string
+          reason?: string
+          restock?: boolean
         }
-        SetofOptions: {
-          from: "*"
-          to: "orders"
-          isOneToOne: true
-          isSetofReturn: false
-        }
+        Returns: Json
       }
       set_user_role: {
         Args: { role: string; user_id: string }
@@ -1736,40 +1710,7 @@ export type Database = {
       }
       update_order_address: {
         Args: { address?: Json; address_id?: string; order_id: string }
-        Returns: {
-          admin_note: string | null
-          billing_address: Json | null
-          cancel_reason: string | null
-          cancelled_at: string | null
-          completed_at: string | null
-          created_at: string
-          currency: string
-          customer_id: string
-          customer_note: string | null
-          discount_code: string | null
-          discount_total: number
-          email: string
-          financial_status: string
-          fulfillment_status: string
-          id: string
-          order_number: number
-          paid_at: string | null
-          shipping_address: Json
-          shipping_method_id: string | null
-          shipping_method_name: string | null
-          shipping_total: number
-          status: string
-          subtotal: number
-          tax_total: number
-          total: number
-          updated_at: string
-        }
-        SetofOptions: {
-          from: "*"
-          to: "orders"
-          isOneToOne: true
-          isSetofReturn: false
-        }
+        Returns: Json
       }
     }
     Enums: {

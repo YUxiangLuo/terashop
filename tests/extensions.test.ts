@@ -58,7 +58,7 @@ describe('Metafields', () => {
       method: 'POST',
       body: {
         owner_type: 'product', owner_id: pid, namespace: 'specs', key: 'size_guide',
-        type: 'metaobject_reference', value: 'not-a-uuid',
+        type: 'list_metaobject_reference', value: ['not-a-uuid'],
       },
     });
     expect((data as { message: string }).message).toContain('invalid metaobject reference');

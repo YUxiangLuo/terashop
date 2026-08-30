@@ -160,7 +160,12 @@ describe('预览 price_checkout', () => {
       name: '杯子9折', type: 'item_percentage', params: { percent: 10 }, priority: 50, stackable: true,
     });
     await api('/rest/v1/promotion_targets', {
-      service: true, method: 'POST', body: { promotion_id: a, product_id: (await api("/rest/v1/products?slug=eq.ceramic-mug-350&select=id")).data[0].id },
+      service: true,
+      method: 'POST',
+      body: {
+        promotion_id: a,
+        product_id: ((await api('/rest/v1/products?slug=eq.ceramic-mug-350&select=id')).data as { id: string }[])[0].id,
+      },
     });
     const b = await createPromo({
       name: '全场95折', type: 'order_percentage', params: { percent: 5 }, priority: 60, stackable: true,
@@ -190,8 +195,12 @@ describe('预览 price_checkout', () => {
 
   test('BOGO 支持不同赠品范围（买A送B）', async () => {
     // 买键盘送数据线：buy 范围=键盘，get 范围=数据线
-    const kbProduct = (await api("/rest/v1/products?slug=eq.mechanical-keyboard-87&select=id")).data[0].id;
-    const cableProduct = (await api("/rest/v1/products?slug=eq.usb-c-cable-1m&select=id")).data[0].id;
+    const kbProduct = (
+      (await api('/rest/v1/products?slug=eq.mechanical-keyboard-87&select=id')).data as { id: string }[]
+    )[0].id;
+    const cableProduct = (
+      (await api('/rest/v1/products?slug=eq.usb-c-cable-1m&select=id')).data as { id: string }[]
+    )[0].id;
     const pid = await createPromo({
       name: '买键盘送数据线', type: 'buy_x_get_y',
       params: { buy: 1, get: 1, get_percent: 100 }, stackable: true,

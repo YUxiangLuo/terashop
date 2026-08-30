@@ -446,10 +446,11 @@ describe('RLS 权限', () => {
   });
 
   test('未登录不能下单', async () => {
-    const { data } = await rpc('create_order', {
+    const { status, data } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 1 }],
       address: CN_ADDRESS,
     });
-    expect((data as { message: string }).message).toBe('not authenticated');
+    expect(status).toBe(401);
+    expect((data as { code: string }).code).toBe('42501');
   });
 });
