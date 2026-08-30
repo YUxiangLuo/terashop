@@ -67,20 +67,21 @@ Tax Quote/Tax Transaction 模块。不得把当前 `tax_rates` 宣称为全球�
 
 `orders` / `payments` / `fulfillments.items` / `order_items.refunded_*` 暂时保留为兼容模型；新交易在
 同一数据库事务内双写到 `commerce.order_adjustments`、`payment_intents`、`payment_transactions`、
-`fulfillment_lines`、`refunds` 和 `refund_lines`。核心账本行 append-only，外键使用
+`fulfillment_lines`、`refunds` 和 `refund_lines`；渠道退款在成功账本之前先进入可变状态受限的
+`refund_requests`。核心账本行 append-only，外键使用
 `ON DELETE RESTRICT`，历史支付和履约在前向 migration 中回填。兼容字段只能在受控 RPC 中推进，不允许
 把双写拆成两个网络请求。订单创建、履约和退款保留 V1 兼容入口，并新增带请求指纹及事务内
 幂等记录的 V2 入口；可重试的新集成必须优先使用 V2。
 
 ## ADR-009：支付信任边界与事务 Outbox
 
-**状态：采用，数据库基础已落地**
+**状态：采用，Stripe 适配已落地**
 
-支付创建/捕获和 Outbox worker RPC 只授予 `service_role`。Storefront 不持有 service role；渠道
-Webhook 必须先在 Edge Function 验签，再用 provider event id 作为幂等键推进数据库。库存预占
-消费、订单状态、交易、审计事件和 Outbox 在同一事务提交，邮件、渠道回调、物流等外部副作用
-由 worker 使用 `FOR UPDATE SKIP LOCKED` 租约消费。数据库入口已落地，具体 Stripe/PayPal 验签
-适配器仍待实现。
+支付创建/捕获和 Outbox worker RPC 只授予 `service_role`。Storefront 不持有 service role；Stripe
+Webhook 在 Edge Function 对未经修改的 raw body、时间窗和 endpoint secret 做 HMAC-SHA256 验签，
+再用 provider event id 推进数据库。库存预占消费、订单状态、交易、审计事件和 Outbox 在同一事务
+提交，外部副作用由租约 worker 消费。同一订单最多一个活跃 PaymentIntent，失败换卡复用该意图，
+避免多个可确认 client secret 造成重复渠道扣款。PayPal 等其他渠道仍需各自的验签与字段归一化适配器。
 
 ## ADR-010：Checkout Quote 的价格与预占边界
 
@@ -91,3 +92,18 @@ Quote 预占库存但不提前占用促销 usage。转单时按固定锁顺序�
 30 分钟，每客户最多 5 个活跃 Quote，每次最多 50 行/100 件；账号与 IP 级滥用防护仍应由 Edge
 限流承担。支付确认消费预占，定时 worker 释放超时 Quote 并取消未支付订单。Quote 进入 completed、
 cancelled 或 expired 后立即清除临时地址和备注，长期交易快照只保留在订单中。
+
+## ADR-011：渠道事件、外部资金事实与异步退款
+
+**状态：采用，Stripe 已落地**
+
+验签后的事件先进入幂等 Provider Event Inbox；数据库只保存 raw payload 的 SHA-256 和 allowlist
+归一化字段，不持久化 card/customer/receipt email 或 client secret。渠道已成功的 capture/refund
+必须先写不可删除的 `provider_money_movements`，再匹配内部交易。若金额不一致、订单已取消或库存
+预占已失效，不得丢弃渠道资金事实，也不得伪造库存扣减；标记 `action_required` 并写事务 Outbox
+等待补偿退款或人工履约。
+
+真实渠道退款采用两阶段：`refund_requests` 先以关系化行预留可退数量和金额，渠道确认前不修改订单、
+库存或成功退款账本；只有签名 Webhook/API 响应确认 `succeeded` 后，才在单事务写 payment/refund、
+推进订单并按原始负库存流水回补。`failed`/`cancelled` 请求释放预留。同步 `refund_order` 只保留给
+手工流程和测试，且不能穿透活跃异步退款请求。

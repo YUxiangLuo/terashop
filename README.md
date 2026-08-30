@@ -2,8 +2,9 @@
 
 面向商用的 headless 电商后端，参考 WooCommerce 的功能覆盖面与 Shopify 的扩展体系设计。
 当前已完成订单生命周期、关键完整性加固、关系化交易账本、事务 Outbox，以及
-`on_hand - reserved = available` 的 Checkout Quote 库存预占流程。数据库已提供 service-only
-Payment Intent 幂等捕获入口；支付渠道验签 Edge Function 和稳定 API schema 仍在演进中。
+`on_hand - reserved = available` 的 Checkout Quote 库存预占流程。Stripe PaymentIntent 创建、
+原始 body Webhook 验签、Provider Event Inbox、外部资金对账和异步退款状态机已经落地；
+稳定 `api` / `admin_api` schema 与其他支付渠道仍在演进中。
 
 ## 快速开始
 
@@ -28,9 +29,15 @@ supabase/migrations/
 ├── 20260829170005_fixes.sql        # 审查修复：折扣钳制/并发锁/权限收拢/退款/改地址重算
 ├── 20260830050000_critical_integrity.sql # 交易不变量/API 边界/并发/RLS 加固
 ├── 20260830060000_transaction_ledgers.sql # 关系化账本/幂等命令/Payment Intent/Outbox
-└── 20260830070000_checkout_reservations.sql # Quote/库存预占/支付确认转换/过期释放
+├── 20260830070000_checkout_reservations.sql # Quote/库存预占/支付确认转换/过期释放
+└── 20260830080000_provider_payments.sql # Provider Inbox/外部资金事实/异步退款请求
 
-tests/                              # bun test，共 145 例
+supabase/functions/
+├── stripe-create-payment-intent/   # 用户鉴权 + Stripe PaymentIntent 创建/恢复
+├── stripe-webhook/                 # 原始 body HMAC-SHA256 验签与事件归一化
+└── stripe-create-refund/           # admin 鉴权 + Stripe 异步退款提交
+
+tests/                              # bun test，共 158 例
 ├── helpers.ts                      # API/RPC/认证/库存 辅助函数
 ├── catalog.test.ts                 # 商品目录与视图
 ├── orders.test.ts                  # 下单金额/折扣/运费/税/取消/RLS
@@ -40,7 +47,9 @@ tests/                              # bun test，共 145 例
 ├── fixes.test.ts                   # 审查修复回归（钳制/并发/退款/权限/匿名化）
 ├── critical-integrity.test.ts      # 资金/履约/库存/RLS/并发攻击性回归
 ├── transaction-ledgers.test.ts     # Adjustment/支付意图/交易/退款行/履约行/Outbox
-└── inventory-reservations.test.ts  # Quote/并发预占/转单/支付消费/取消与过期释放
+├── inventory-reservations.test.ts  # Quote/并发预占/转单/支付消费/取消与过期释放
+├── provider-payments.test.ts       # Provider Inbox/资金异常/异步退款/并发预留
+└── stripe-edge.test.ts             # Stripe 签名、金额转换、PII 归一化与 HTTP 幂等
 ```
 
 ### 商品域（Shopify 变体模型）
@@ -59,8 +68,9 @@ tests/                              # bun test，共 145 例
 - `discounts`（百分比/定额/免运费，门槛、次数上限、每客限一次）+ `discount_redemptions`
 - `fulfillments`：保留兼容 JSON 快照；`commerce.fulfillment_lines` 是关系化履约数量事实
 - `payments`：兼容投影；`commerce.payment_intents` + `payment_transactions` 是幂等支付交易账本
+- `commerce.payment_provider_events` + `provider_money_movements`：验签后事件收件箱与外部资金事实/对账状态
 - `commerce.order_adjustments`：有符号金额调整，数据库持续验证 `subtotal + adjustments = total`
-- `commerce.refunds` + `refund_lines`：退款头、行级金额/数量及实际回补数量
+- `commerce.refunds` + `refund_lines`：成功退款事实；`refund_requests` 在渠道确认前预留可退金额/数量
 - `commerce.checkout_quotes` + `checkout_quote_lines`：限时库存预占，支付确认后原子转正式扣减
 - `order_events`：append-only 业务审计；`commerce.outbox_events` 原子承接外部副作用
 
@@ -131,21 +141,33 @@ POST /rest/v1/rpc/adjust_inventory     {"variant_id":"...","delta":10,"reason":"
 POST /rest/v1/rpc/moderate_review      {"review_id":"...","status":"approved"}
 POST /rest/v1/rpc/set_user_role        {"user_id":"...","role":"admin"}   # 最后一名 admin 不可降级
 
-# 退款（admin）：按行退 / 自定义金额 / 全额退剩余，三选一
+# Stripe 商用退款（admin）：先预留可退额度；仅渠道 succeeded 后才落账、改订单和回补库存
+POST /functions/v1/stripe-create-refund
+Authorization: Bearer <admin-jwt>
+{"order_id":"...","idempotency_key":"refund-command-id",
+ "items":[{"order_item_id":"...","quantity":1}],"restock":true,"reason":"破损"}
+
+# 手工/测试兼容退款：同步成功，不代表真实渠道已确认
 POST /rest/v1/rpc/refund_order {"order_id":"...","items":[{"order_item_id":"...","quantity":1}],
                                 "restock":true,"reason":"破损"}
-POST /rest/v1/rpc/refund_order {"order_id":"..."}                            # 全额退剩余
-# 可重试后台任务使用幂等 V2，避免重复退款/重复回补
-POST /rest/v1/rpc/refund_order_v2 {"order_id":"...","idempotency_key":"refund-command-id","items":[...]}
+POST /rest/v1/rpc/refund_order_v2 {"order_id":"...","idempotency_key":"manual-refund-id","items":[...]}
 # 客户/管理员读取安全交易账本 DTO（只返回订单归属人的账本）
 POST /rest/v1/rpc/get_order_ledger     {"order_id":"..."}
 
-# 下列 RPC 仅授予 service_role，必须由验签后的 Edge Function/Worker 调用，禁止发给浏览器
-POST /rest/v1/rpc/create_payment_intent  {"order_id":"...","provider":"stripe","idempotency_key":"..."}
-POST /rest/v1/rpc/capture_payment_intent {"payment_intent_id":"...","provider_reference":"...","idempotency_key":"webhook-event-id"}
-POST /rest/v1/rpc/claim_outbox_events    {"worker_id":"worker-1","max_events":50,"lease_seconds":300}
-POST /rest/v1/rpc/complete_outbox_event  {"event_id":"...","worker_id":"worker-1","succeeded":true}
-POST /rest/v1/rpc/expire_checkout_quotes {"max_quotes":100}  # 释放超时预占并取消未支付订单
+# Storefront 创建 Stripe PaymentIntent：函数内部校验 JWT，client_secret 不进入数据库
+POST /functions/v1/stripe-create-payment-intent
+Authorization: Bearer <customer-jwt>
+{"order_id":"...","idempotency_key":"payment-attempt-id"}
+
+# Stripe 控制台 Webhook 指向此入口；verify_jwt=false，但函数必须先验 Stripe-Signature
+POST /functions/v1/stripe-webhook
+
+# 下列 RPC 仅授予 service_role，只供 Edge Function/Worker 调用，禁止发给浏览器
+POST /rest/v1/rpc/ingest_payment_provider_event {...verified-normalized-event...}
+POST /rest/v1/rpc/retry_payment_provider_events {"max_events":50}
+POST /rest/v1/rpc/claim_outbox_events           {"worker_id":"worker-1","max_events":50,"lease_seconds":300}
+POST /rest/v1/rpc/complete_outbox_event         {"event_id":"...","worker_id":"worker-1","succeeded":true}
+POST /rest/v1/rpc/expire_checkout_quotes        {"max_quotes":100}
 
 # GDPR 匿名化（admin）：清 profile PII + 删地址簿与 customer 域 metafield；
 # 财务记录依法保留，审计 actor 自动置空
@@ -167,7 +189,9 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
   `order_events` 仅受控 RPC 可追加，客户端角色只读且不可改写
 - `commerce` schema 不在 PostgREST exposed schemas 中，启用无客户端 policy 的 RLS；Storefront
   只通过显式 JSON DTO 读取。Quote 终态会清除临时地址/备注；已支付订单快照、交易金额、
-  预占/履约/退款事实和 Outbox payload 不能被客户端原地改写
+  Provider Event/外部资金、预占/履约/退款事实和 Outbox payload 不能被客户端原地改写
+- Stripe 原始事件只用于验签和 SHA-256 审计哈希；数据库仅保存 allowlist 归一化资金字段，
+  不保存 card、receipt email、customer 对象或 `client_secret`
 
 ## 安全模型
 - 全表 RLS；新表/函数默认不授予客户端权限，Storefront/Admin API 必须显式 allowlist
@@ -181,19 +205,24 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
 - Google OAuth 默认关闭，Secret 只从环境变量读取；历史中已暴露的凭据必须在 Google Cloud 吊销并轮换
 - 设置管理员：`select set_user_role('<user-uuid>', 'admin')`（需已有 admin）或首次用 SQL 直改
 
-## 生产支付接入（数据库基础已落地，渠道适配待实现）
-1. Edge Function 用 service role 调用 `create_payment_intent`，幂等键重复提交返回同一意图。
-2. 只有验签成功的支付渠道 Webhook 才调用 `capture_payment_intent`；数据库原子消费 reservation、
-   扣减 `on_hand`、写 capture transaction、推进订单状态并生成审计/Outbox，重复 webhook 不重复扣款或扣库存。
-3. 定时 Worker 调用 `expire_checkout_quotes` 释放超时预占并取消未支付订单；Outbox Worker 使用
-   `FOR UPDATE SKIP LOCKED` 租约消费外部副作用并确认或退避重试。
-4. 渠道退款意图/异步确认状态机仍待实现；当前 `mark_order_paid` / `refund_order` 仅用于手工流程和测试。
-5. service role 是最高信任凭据，绝不能下发到 Storefront、移动端或其他不可信客户端。
+## 生产 Stripe 接入
+1. 配置 `STRIPE_SECRET_KEY`、`STRIPE_WEBHOOK_SECRET`、`STRIPE_LIVEMODE` 与
+   `PAYMENT_ALLOWED_ORIGINS`；示例和轮换参数见 [`supabase/functions/README.md`](supabase/functions/README.md)。
+2. Storefront 调用 `stripe-create-payment-intent`。Edge Function 验证用户 JWT，数据库再次校验订单归属，
+   Stripe POST 使用本地 intent UUID 作为幂等键；每单只允许一个活跃 PaymentIntent，`client_secret` 只在响应中返回。
+3. `stripe-webhook` 必须使用未经修改的原始 body、`Stripe-Signature`、endpoint secret 和 5 分钟时间窗验签。
+   验签后事件进入幂等 Provider Inbox；成功资金先落外部资金事实，再原子消费 reservation 和推进订单。
+4. 若渠道成功晚于库存预占或金额不匹配，系统不会丢失资金事实或伪造库存，而是生成
+   `payment.reconciliation_required` Outbox 事件供人工退款/履约决策。
+5. Stripe 退款走 `stripe-create-refund`：请求阶段只预留可退金额/数量；只有渠道 `succeeded`
+   才写成功 refund transaction、推进订单、更新行退款并按原始库存流水回补。
+6. 定时 Worker 调用 `expire_checkout_quotes`、`retry_payment_provider_events` 并消费 Outbox。
+   `mark_order_paid` / `refund_order` 仅用于手工流程和测试；service role 和 Stripe Secret 绝不能下发浏览器。
 
 ## 开发检查
 
 ```bash
-bun run test             # reset + 145 个串行 API/并发回归
+bun run test             # reset + 158 个串行 API/并发回归
 bun run db:lint          # public API + commerce 账本 schema lint
 bun run types:check      # 检查生成类型是否漂移
 bun run typecheck        # TypeScript 静态检查

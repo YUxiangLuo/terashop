@@ -400,6 +400,17 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
+# Payment functions validate user JWTs or Stripe signatures inside the handler.
+# The external webhook must never depend on Supabase JWT verification.
+[functions.stripe-create-payment-intent]
+verify_jwt = false
+
+[functions.stripe-webhook]
+verify_jwt = false
+
+[functions.stripe-create-refund]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

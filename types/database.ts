@@ -1472,12 +1472,41 @@ export type Database = {
         }
       }
       assert_metaobject_exists: { Args: { p_ref: string }; Returns: undefined }
+      bind_payment_intent_provider: {
+        Args: {
+          amount: number
+          currency: string
+          payment_intent_id: string
+          provider_reference: string
+          provider_status: string
+        }
+        Returns: Json
+      }
+      bind_refund_request_provider: {
+        Args: {
+          amount: number
+          currency: string
+          provider_reference: string
+          provider_status: string
+          refund_request_id: string
+        }
+        Returns: Json
+      }
       cancel_checkout_quote: {
         Args: { quote_id: string; reason?: string }
         Returns: Json
       }
       cancel_order: {
         Args: { order_id: string; reason?: string }
+        Returns: Json
+      }
+      cancel_refund_request: {
+        Args: {
+          actor_id: string
+          provider_confirmed?: boolean
+          reason?: string
+          refund_request_id: string
+        }
         Returns: Json
       }
       capture_payment_intent: {
@@ -1587,6 +1616,30 @@ export type Database = {
         }
         Returns: Json
       }
+      create_payment_intent_for_customer: {
+        Args: {
+          customer_id: string
+          idempotency_key: string
+          metadata?: Json
+          order_id: string
+          provider: string
+        }
+        Returns: Json
+      }
+      create_refund_request: {
+        Args: {
+          actor_id: string
+          amount?: number
+          idempotency_key: string
+          items?: Json
+          metadata?: Json
+          order_id: string
+          provider: string
+          reason?: string
+          restock?: boolean
+        }
+        Returns: Json
+      }
       expire_checkout_quotes: {
         Args: { as_of?: string; max_quotes?: number }
         Returns: Json
@@ -1598,6 +1651,21 @@ export type Database = {
       }
       get_order_checkout_quote: { Args: { order_id: string }; Returns: Json }
       get_order_ledger: { Args: { order_id: string }; Returns: Json }
+      get_payment_operations: { Args: { order_id: string }; Returns: Json }
+      ingest_payment_provider_event: {
+        Args: {
+          data: Json
+          event_type: string
+          livemode: boolean
+          object_reference: string
+          occurred_at: string
+          payload_hash: string
+          provider: string
+          provider_event_id: string
+          source: string
+        }
+        Returns: Json
+      }
       is_admin: { Args: never; Returns: boolean }
       mark_order_paid: {
         Args: { order_id: string; provider?: string; provider_ref?: string }
@@ -1686,6 +1754,10 @@ export type Database = {
           reason?: string
           restock?: boolean
         }
+        Returns: Json
+      }
+      retry_payment_provider_events: {
+        Args: { max_events?: number }
         Returns: Json
       }
       set_user_role: {
