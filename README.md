@@ -31,15 +31,17 @@ supabase/migrations/
 ├── 20260830060000_transaction_ledgers.sql # 关系化账本/幂等命令/Payment Intent/Outbox
 ├── 20260830070000_checkout_reservations.sql # Quote/库存预占/支付确认转换/过期释放
 ├── 20260830080000_provider_payments.sql # Provider Inbox/外部资金事实/异步退款请求
-└── 20260830090000_paypal_payments.sql # PayPal Order/Capture/reversal/退款轮询边界
+├── 20260830090000_paypal_payments.sql # PayPal Order/Capture/reversal/退款轮询边界
+└── 20260830100000_stripe_best_practices.sql # Stripe 精确资金/乱序状态/退款父引用加固
 
 supabase/functions/
 ├── stripe-create-payment-intent/ / stripe-webhook/ / stripe-create-refund/
+├── stripe-reconcile-payment-intents/ # service-only 过期 PaymentIntent 取消/终态对账
 ├── paypal-create-order/ / paypal-capture-order/ / paypal-webhook/
 ├── paypal-create-refund/           # admin 鉴权 + PayPal Payments v2 退款
 └── paypal-reconcile-refunds/       # service-only pending refund 轮询
 
-tests/                              # bun test，共 170 例
+tests/                              # bun test，共 174 例
 ├── helpers.ts                      # API/RPC/认证/库存 辅助函数
 ├── catalog.test.ts                 # 商品目录与视图
 ├── orders.test.ts                  # 下单金额/折扣/运费/税/取消/RLS
@@ -159,7 +161,7 @@ POST /rest/v1/rpc/refund_order_v2 {"order_id":"...","idempotency_key":"manual-re
 # 客户/管理员读取安全交易账本 DTO（只返回订单归属人的账本）
 POST /rest/v1/rpc/get_order_ledger     {"order_id":"..."}
 
-# Storefront 创建 Stripe PaymentIntent：函数内部校验 JWT，client_secret 不进入数据库
+# Storefront 创建 Stripe PaymentIntent：网关 + 函数双重校验 JWT，client_secret 不进入数据库
 POST /functions/v1/stripe-create-payment-intent
 Authorization: Bearer <customer-jwt>
 {"order_id":"...","idempotency_key":"payment-attempt-id"}
@@ -179,6 +181,7 @@ POST /rest/v1/rpc/retry_payment_provider_events {"max_events":50}
 POST /rest/v1/rpc/claim_outbox_events           {"worker_id":"worker-1","max_events":50,"lease_seconds":300}
 POST /rest/v1/rpc/complete_outbox_event         {"event_id":"...","worker_id":"worker-1","succeeded":true}
 POST /rest/v1/rpc/expire_checkout_quotes        {"max_quotes":100}
+POST /functions/v1/stripe-reconcile-payment-intents {"max_intents":5} # Authorization: service role
 POST /functions/v1/paypal-reconcile-refunds      {"max_events":20}  # Authorization: service role
 
 # GDPR 匿名化（admin）：清 profile PII + 删地址簿与 customer 域 metafield；
@@ -218,18 +221,25 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
 - 设置管理员：`select set_user_role('<user-uuid>', 'admin')`（需已有 admin）或首次用 SQL 直改
 
 ## 生产 Stripe 接入
-1. 配置 `STRIPE_SECRET_KEY`、`STRIPE_WEBHOOK_SECRET`、`STRIPE_LIVEMODE` 与
-   `PAYMENT_ALLOWED_ORIGINS`；示例和轮换参数见 [`supabase/functions/README.md`](supabase/functions/README.md)。
-2. Storefront 调用 `stripe-create-payment-intent`。Edge Function 验证用户 JWT，数据库再次校验订单归属，
-   Stripe POST 使用本地 intent UUID 作为幂等键；每单只允许一个活跃 PaymentIntent，`client_secret` 只在响应中返回。
-3. `stripe-webhook` 必须使用未经修改的原始 body、`Stripe-Signature`、endpoint secret 和 5 分钟时间窗验签。
-   验签后事件进入幂等 Provider Inbox；成功资金先落外部资金事实，再原子消费 reservation 和推进订单。
-4. 若渠道成功晚于库存预占或金额不匹配，系统不会丢失资金事实或伪造库存，而是生成
-   `payment.reconciliation_required` Outbox 事件供人工退款/履约决策。
-5. Stripe 退款走 `stripe-create-refund`：请求阶段只预留可退金额/数量；只有渠道 `succeeded`
-   才写成功 refund transaction、推进订单、更新行退款并按原始库存流水回补。
-6. 定时 Worker 调用 `expire_checkout_quotes`、`retry_payment_provider_events` 并消费 Outbox。
-   `mark_order_paid` / `refund_order` 仅用于手工流程和测试；service role 和 Stripe Secret 绝不能下发浏览器。
+1. 配置 restricted `STRIPE_SECRET_KEY`、`STRIPE_WEBHOOK_SECRET`、严格布尔 `STRIPE_LIVEMODE`、
+   固定 API 版本与 `PAYMENT_ALLOWED_ORIGINS`；完整参数见 [`supabase/functions/README.md`](supabase/functions/README.md)。
+2. Storefront 调用 `stripe-create-payment-intent`。Supabase 网关先验 JWT，函数再通过 Auth `/user` 验证，
+   数据库最终校验订单归属。Stripe POST 使用本地 intent UUID 作为幂等键；同单只允许一个活跃意图，
+   `client_secret` 只在关联、金额、币种、模式和状态均匹配后返回，且绝不入库。
+3. 当前 30 分钟以内的库存 hold 默认配置 `STRIPE_ALLOW_REDIRECTS=never`；启用 redirect/长异步支付方式前，
+   必须先设计兼容的 reservation 延期、取消和资金晚到对账策略。
+4. Stripe Webhook 使用 snapshot events、平台账户 endpoint、未经修改的 raw body、endpoint secret 和 5 分钟验签窗；
+   Connect/organization context 会被拒绝。事件先进入不可变 Provider Inbox；Inbox 已持久化后即使业务处理暂时失败也返回 2xx，
+   由 `retry_payment_provider_events` 接管，不能依赖 Stripe 事件投递顺序。
+5. 成功资金先落外部资金事实，再原子消费 reservation 和推进订单。若资金晚于预占、金额不匹配或内部状态冲突，
+   系统生成 `payment.reconciliation_required`，不会丢弃资金事实、伪造库存或错误标记已支付。
+6. Stripe 退款先预留可退金额/数量；只有渠道 `succeeded` 才写成功账本和回补库存。除本地 Refund UUID 外，
+   还必须核对其父 PaymentIntent/Charge，避免可变 metadata 将真实退款关联到错误订单。
+7. 定时 Worker 先调用 `expire_checkout_quotes`，再调用 `stripe-reconcile-payment-intents` 取消浏览器仍可能持有
+   `client_secret` 的过期渠道意图；同时运行 `retry_payment_provider_events`、消费 Outbox，并告警失败 Inbox、
+   unmatched/action-required money、取消失败和退款延迟。Stripe disputes/chargebacks 与 payout/balance 对账本阶段仍需
+   Dashboard 人工监控和 reconciliation；未建专用账本前不要把 dispute 事件订阅到当前入口。
+   `mark_order_paid` / `refund_order` 仅用于手工流程和测试；service role、Stripe Secret 与 Webhook Secret 绝不能下发浏览器。
 
 ## 生产 PayPal 接入
 1. 配置 `PAYPAL_CLIENT_ID`、`PAYPAL_CLIENT_SECRET`、`PAYPAL_WEBHOOK_ID`、跳转 URL 和
@@ -246,7 +256,7 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
 ## 开发检查
 
 ```bash
-bun run test             # reset + 170 个串行 API/并发回归
+bun run test             # reset + 174 个串行 API/并发回归
 bun run db:lint          # public API + commerce 账本 schema lint
 bun run types:check      # 检查生成类型是否漂移
 bun run typecheck        # TypeScript 静态检查

@@ -78,10 +78,11 @@ Tax Quote/Tax Transaction 模块。不得把当前 `tax_rates` 宣称为全球�
 **状态：采用，Stripe 与 PayPal 适配已落地**
 
 支付创建/捕获和 Outbox worker RPC 只授予 `service_role`。Storefront 不持有 service role；Stripe
-Webhook 对 raw body 做 HMAC-SHA256 验签，PayPal Webhook 使用 OAuth2 调官方
-`verify-webhook-signature` postback 验证 transmission headers；两者都只在验签后用 provider event id
-推进数据库。库存预占消费、订单状态、交易、审计事件和 Outbox 在同一事务提交。同一订单最多一个
-活跃 PaymentIntent，避免多个可确认支付对象造成重复扣款；Stripe 失败换卡复用意图，PayPal Capture
+客户/管理员命令由 Edge 网关先验 JWT，函数再通过 Auth `/user` 校验。Stripe Webhook 对 raw body 做
+HMAC-SHA256 验签，PayPal Webhook 使用 OAuth2 调官方 `verify-webhook-signature` postback 验证
+transmission headers；两者都只在验签后用 provider event id 推进数据库。库存预占消费、订单状态、交易、
+审计事件和 Outbox 在同一事务提交。同一订单最多一个活跃 PaymentIntent，避免多个可确认支付对象造成
+重复扣款；Stripe 失败换卡复用意图，PayPal Capture
 declined 后终结当前意图并允许创建新 Order。其他渠道仍需独立验签与字段归一化适配器。
 
 ## ADR-010：Checkout Quote 的价格与预占边界
@@ -103,12 +104,23 @@ cancelled 或 expired 后立即清除临时地址和备注，长期交易快照�
 必须先写不可删除的 `provider_money_movements`，再匹配内部交易。若金额不一致、订单已取消或库存
 预占已失效，不得丢弃渠道资金事实，也不得伪造库存扣减；标记 `action_required` 并写事务 Outbox
 等待补偿退款或人工履约。即使渠道事件币种超出当前 CNY 结账能力，只要它代表真实成功资金也先作为
-unmatched 外部事实保存；这不等于允许创建非 CNY 订单。
+unmatched 外部事实保存；Stripe 同时保存 provider minor units、Stripe charge exponent 与精确 major amount，
+避免零小数币种误算。这不等于允许创建非 CNY 订单。
+
+Stripe snapshot Webhook 不允许 Connect/organization context。事件可能重复和乱序；处理器按事件
+`occurred_at` 拒绝旧的非资金事件回退新状态，而成功资金始终优先持久化。可信 API 路径绑定的 provider
+reference 优先于可变 metadata；仅有 metadata 的早到事件不得绑定本地意图/退款，只先记 unmatched 并等待绑定后重试。
+Inbox 行一旦持久化，即使业务处理因锁竞争暂时失败也向 Stripe 返回 2xx，由 service-only retry worker 恢复。
+短库存 hold 默认禁用 redirect 支付方式；Quote/订单过期后，租约 worker 还必须用稳定幂等键取消 Stripe
+PaymentIntent，防止浏览器保存的 `client_secret` 在本地取消后继续付款。若取消与成功竞态，则仍按真实成功资金
+入 Inbox/reconciliation。开放长异步支付前必须另行定义 reservation 延期与资金晚到策略。
 
 真实渠道退款采用两阶段：`refund_requests` 先以关系化行预留可退数量和金额，渠道确认前不修改订单、
 库存或成功退款账本；只有签名 Webhook/API 响应确认 `succeeded` 后，才在单事务写 payment/refund、
-推进订单并按原始负库存流水回补。`failed`/`cancelled` 请求释放预留。同步 `refund_order` 只保留给
-手工流程和测试，且不能穿透活跃异步退款请求。
+推进订单并按原始负库存流水回补。`failed`/`cancelled` 请求释放预留。Stripe Refund 的 metadata 可变，
+因此本地 Refund UUID 不能作为唯一关联依据，还必须匹配原捕获的 PaymentIntent/Charge；成功但关联冲突的
+外部退款先记资金事实并进入 reconciliation。同步 `refund_order` 只保留给手工流程和测试，且不能穿透
+活跃异步退款请求。
 
 PayPal Order ID 代表买家批准对象，Capture ID 才代表实际资金，因此内部 PaymentIntent 保留 Order ID，
 成功交易和外部资金事实使用 Capture ID。只有 `COMPLETED` Capture 才消费库存；`PENDING` 等后续事件。
@@ -117,3 +129,6 @@ PayPal Order ID 代表买家批准对象，Capture ID 才代表实际资金，�
 PayPal pending Refund 由 service-only worker 查询具体 Refund 资源；
 `PAYMENT.CAPTURE.REFUNDED` 只作为聚合轮询信号，不能据此猜测某个部分退款已经完成。轮询候选通过
 `FOR UPDATE SKIP LOCKED` 公平 claim，并设置最短重查间隔，避免并发重复查询和老请求饿死新请求。
+
+Stripe disputes/chargebacks、Stripe payout/balance reconciliation 与 PayPal disputes 暂不自动化，统一由渠道
+Dashboard 人工监控并进入 reconciliation。没有专用争议/结算账本前，不把这些事件接入会误写退款或库存的自动状态机。

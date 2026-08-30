@@ -76,6 +76,7 @@ async function providerEvent(input: {
   objectReference: string;
   data: Record<string, unknown>;
   source?: 'webhook' | 'api_response';
+  occurredAt?: string;
 }) {
   const payloadHash = await hash({
     id: input.eventId,
@@ -90,7 +91,7 @@ async function providerEvent(input: {
     event_type: input.eventType,
     object_reference: input.objectReference,
     livemode: false,
-    occurred_at: '2026-08-30T00:00:00.000Z',
+    occurred_at: input.occurredAt ?? '2026-08-30T00:00:00.000Z',
     payload_hash: payloadHash,
     data: input.data,
   }, undefined, true);
@@ -306,6 +307,49 @@ describe('Stripe Provider Event Inbox', () => {
     expect((conflict.data as { message: string }).message).toContain('different facts');
   });
 
+  test('乱序的旧状态事件不会回退较新的 PaymentIntent 状态', async () => {
+    const created = await createQuotedOrder(1);
+    const reference = `pi_${crypto.randomUUID().replaceAll('-', '')}`;
+    await rpc('bind_payment_intent_provider', {
+      payment_intent_id: created.intent.id,
+      provider_reference: reference,
+      provider_status: 'requires_payment_method',
+      amount: created.intent.amount,
+      currency: created.intent.currency,
+    }, undefined, true);
+    const baseData = {
+      amount_minor: minorUnits(created.intent.amount),
+      currency: created.intent.currency.toLowerCase(),
+      metadata: { tera_payment_intent_id: created.intent.id, tera_order_id: created.id },
+    };
+    const newer = await providerEvent({
+      eventId: `evt_newer_failed_${crypto.randomUUID()}`,
+      eventType: 'payment_intent.payment_failed',
+      objectReference: reference,
+      occurredAt: '2026-08-30T00:00:02.000Z',
+      data: { ...baseData, status: 'requires_payment_method', failure_code: 'card_declined' },
+    });
+    const older = await providerEvent({
+      eventId: `evt_older_processing_${crypto.randomUUID()}`,
+      eventType: 'payment_intent.processing',
+      objectReference: reference,
+      occurredAt: '2026-08-30T00:00:01.000Z',
+      data: { ...baseData, status: 'processing' },
+    });
+    const sameSecondLowerPriority = await providerEvent({
+      eventId: `evt_same_second_processing_${crypto.randomUUID()}`,
+      eventType: 'payment_intent.processing',
+      objectReference: reference,
+      occurredAt: '2026-08-30T00:00:02.000Z',
+      data: { ...baseData, status: 'processing' },
+    });
+    expect(newer.data).toMatchObject({ status: 'processed', outcome: 'requires_payment_method' });
+    expect(older.data).toMatchObject({ status: 'ignored', outcome: 'stale_payment_event' });
+    expect(sameSecondLowerPriority.data)
+      .toMatchObject({ status: 'ignored', outcome: 'stale_payment_event' });
+    expect((await operations(created.id)).payment_intents[0].status).toBe('requires_payment_method');
+  });
+
   test('外部成功金额不匹配仍记录资金事实并产生 reconciliation，不误标订单已支付', async () => {
     const created = await createQuotedOrder(1);
     const reference = `pi_${crypto.randomUUID().replaceAll('-', '')}`;
@@ -339,7 +383,45 @@ describe('Stripe Provider Event Inbox', () => {
     expect((order.data as Array<{ financial_status: string }>)[0].financial_status).toBe('pending');
   });
 
-  test('渠道成功晚于 reservation 过期时保留外部资金事实并告警，不伪造库存扣减', async () => {
+  test('非 CNY Stripe 成功资金按币种指数精确保留，但不推进 CNY 订单', async () => {
+    const created = await createQuotedOrder(1);
+    const reference = `pi_${crypto.randomUUID().replaceAll('-', '')}`;
+    await rpc('bind_payment_intent_provider', {
+      payment_intent_id: created.intent.id,
+      provider_reference: reference,
+      provider_status: 'requires_payment_method',
+      amount: created.intent.amount,
+      currency: created.intent.currency,
+    }, undefined, true);
+    const stockBefore = await stockOf(fixture.sku);
+    const event = await providerEvent({
+      eventId: `evt_foreign_currency_${crypto.randomUUID()}`,
+      eventType: 'payment_intent.succeeded',
+      objectReference: reference,
+      data: {
+        amount_minor: '1234',
+        currency: 'jpy',
+        status: 'succeeded',
+        metadata: {
+          tera_payment_intent_id: created.intent.id,
+          tera_order_id: created.id,
+        },
+      },
+    });
+    expect(event.data).toMatchObject({ status: 'processed', outcome: 'action_required' });
+    const state = await operations(created.id, admin.token);
+    expect(state.provider_money_movements).toEqual([
+      expect.objectContaining({
+        amount: 1234,
+        currency: 'JPY',
+        reconciliation_status: 'action_required',
+      }),
+    ]);
+    expect(state.payment_intents[0].status).not.toBe('succeeded');
+    expect(await stockOf(fixture.sku)).toBe(stockBefore);
+  });
+
+  test('过期意图由 service worker 租约取消；若渠道资金抢先成功仍保留事实并告警', async () => {
     const created = await createQuotedOrder(1);
     const reference = `pi_${crypto.randomUUID().replaceAll('-', '')}`;
     await rpc('bind_payment_intent_provider', {
@@ -356,6 +438,37 @@ describe('Stripe Provider Event Inbox', () => {
     }, undefined, true);
     expect(expired.status).toBe(200);
 
+    const deniedClaim = await rpc('claim_expired_stripe_payment_intents', {
+      max_intents: 10,
+    }, buyer.token);
+    expect(deniedClaim.status).toBe(403);
+    const claimed = await rpc('claim_expired_stripe_payment_intents', {
+      max_intents: 10,
+    }, undefined, true);
+    expect(claimed.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: created.intent.id,
+        provider_reference: reference,
+        cancel_attempt: 1,
+      }),
+    ]));
+    const duplicateClaim = await rpc('claim_expired_stripe_payment_intents', {
+      max_intents: 10,
+    }, undefined, true);
+    expect(duplicateClaim.data).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: created.intent.id }),
+    ]));
+    const deferred = await rpc('complete_stripe_payment_intent_cancel', {
+      payment_intent_id: created.intent.id,
+      succeeded: false,
+      error_code: 'provider_payment_raced',
+    }, undefined, true);
+    expect(deferred.data).toMatchObject({
+      id: created.intent.id,
+      cancel_attempts: 1,
+      last_error: 'provider_payment_raced',
+    });
+
     const result = await providerEvent({
       eventId: `evt_expired_${crypto.randomUUID()}`,
       eventType: 'payment_intent.succeeded',
@@ -368,6 +481,20 @@ describe('Stripe Provider Event Inbox', () => {
       },
     });
     expect(result.data).toMatchObject({ status: 'processed', outcome: 'action_required' });
+    const completedClaim = await rpc('complete_stripe_payment_intent_cancel', {
+      payment_intent_id: created.intent.id,
+      succeeded: true,
+      error_code: null,
+      provider_status: 'succeeded',
+    }, undefined, true);
+    expect(completedClaim.data).toMatchObject({ provider_terminal_status: 'succeeded' });
+    const terminalNotReclaimed = await rpc('claim_expired_stripe_payment_intents', {
+      max_intents: 10,
+      as_of: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    }, undefined, true);
+    expect(terminalNotReclaimed.data).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: created.intent.id }),
+    ]));
     const state = await operations(created.id);
     expect(state.provider_money_movements[0]).toMatchObject({
       kind: 'capture', reconciliation_status: 'action_required',
@@ -389,7 +516,10 @@ describe('Stripe Provider Event Inbox', () => {
         amount_minor: minorUnits(created.intent.amount),
         currency: created.intent.currency.toLowerCase(),
         status: 'succeeded',
-        metadata: {},
+        metadata: {
+          tera_payment_intent_id: created.intent.id,
+          tera_order_id: created.id,
+        },
       },
     });
     expect(early.data).toMatchObject({ status: 'received', outcome: 'unmatched_payment_intent' });
@@ -410,6 +540,73 @@ describe('Stripe Provider Event Inbox', () => {
       token: buyer.token,
     });
     expect((order.data as Array<{ financial_status: string }>)[0].financial_status).toBe('paid');
+  });
+
+  test('Stripe Refund 必须同时匹配本地请求与父 PaymentIntent', async () => {
+    const created = await createQuotedOrder(1);
+    const paymentReference = `pi_${crypto.randomUUID().replaceAll('-', '')}`;
+    await rpc('bind_payment_intent_provider', {
+      payment_intent_id: created.intent.id,
+      provider_reference: paymentReference,
+      provider_status: 'requires_payment_method',
+      amount: created.intent.amount,
+      currency: created.intent.currency,
+    }, undefined, true);
+    await providerEvent({
+      eventId: `evt_parent_capture_${crypto.randomUUID()}`,
+      eventType: 'payment_intent.succeeded',
+      objectReference: paymentReference,
+      data: {
+        amount_minor: minorUnits(created.intent.amount),
+        currency: created.intent.currency.toLowerCase(),
+        status: 'succeeded',
+        metadata: {
+          tera_payment_intent_id: created.intent.id,
+          tera_order_id: created.id,
+        },
+      },
+    });
+    const stockAfterCapture = await stockOf(fixture.sku);
+    const requested = await rpc('create_refund_request', {
+      order_id: created.id,
+      actor_id: admin.userId,
+      provider: 'stripe',
+      idempotency_key: `refund-parent-${crypto.randomUUID()}`,
+      items: [{ order_item_id: created.itemId, quantity: 1 }],
+      restock: true,
+    }, undefined, true);
+    const request = requested.data as RefundRequestDto;
+    const refundReference = `re_${crypto.randomUUID().replaceAll('-', '')}`;
+    await rpc('bind_refund_request_provider', {
+      refund_request_id: request.id,
+      provider_reference: refundReference,
+      provider_status: 'pending',
+      amount: request.amount,
+      currency: request.currency,
+    }, undefined, true);
+    const mismatch = await providerEvent({
+      eventId: `evt_wrong_parent_${crypto.randomUUID()}`,
+      eventType: 'refund.updated',
+      objectReference: refundReference,
+      data: {
+        amount_minor: minorUnits(request.amount),
+        currency: request.currency.toLowerCase(),
+        status: 'succeeded',
+        payment_intent_reference: `pi_wrong_${crypto.randomUUID().replaceAll('-', '')}`,
+        metadata: { tera_refund_request_id: request.id, tera_order_id: created.id },
+      },
+    });
+    expect(mismatch.data).toMatchObject({ status: 'processed', outcome: 'action_required' });
+    const state = await operations(created.id, admin.token);
+    expect(state.refund_requests[0].status).toBe('processing');
+    expect(state.provider_money_movements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'refund',
+        reconciliation_status: 'action_required',
+        error: 'provider refund parent reference mismatch',
+      }),
+    ]));
+    expect(await stockOf(fixture.sku)).toBe(stockAfterCapture);
   });
 
   test('陌生人看不到支付运维 DTO', async () => {
@@ -456,6 +653,20 @@ describe('Stripe 异步退款状态机', () => {
     expect((blockedManual.data as { message: string }).message).toContain('active asynchronous refund');
 
     const providerReference = `re_${crypto.randomUUID().replaceAll('-', '')}`;
+    const early = await providerEvent({
+      eventId: `evt_refund_early_${crypto.randomUUID()}`,
+      eventType: 'refund.created',
+      objectReference: providerReference,
+      data: {
+        amount_minor: minorUnits(request.amount),
+        currency: request.currency.toLowerCase(),
+        status: 'pending',
+        payment_intent_reference: providerIntentRef,
+        metadata: { tera_refund_request_id: request.id },
+      },
+    });
+    expect(early.data).toMatchObject({ status: 'received', outcome: 'unbound_refund_event' });
+
     const bound = await rpc('bind_refund_request_provider', {
       refund_request_id: request.id,
       provider_reference: providerReference,
@@ -464,19 +675,53 @@ describe('Stripe 异步退款状态机', () => {
       currency: request.currency,
     }, undefined, true);
     expect(bound.data).toMatchObject({ status: 'processing', provider_reference: providerReference });
+    const retried = await rpc('retry_payment_provider_events', { max_events: 20 }, undefined, true);
+    expect((retried.data as Array<{ outcome: string }>).some((row) => row.outcome === 'pending'))
+      .toBe(true);
 
     const pending = await providerEvent({
       eventId: `evt_refund_pending_${crypto.randomUUID()}`,
       eventType: 'refund.created',
       objectReference: providerReference,
+      occurredAt: '2026-08-30T00:00:01.000Z',
       data: {
         amount_minor: minorUnits(request.amount),
         currency: request.currency.toLowerCase(),
         status: 'pending',
+        payment_intent_reference: providerIntentRef,
         metadata: { tera_refund_request_id: request.id },
       },
     });
     expect(pending.data).toMatchObject({ status: 'processed', outcome: 'pending' });
+
+    const requiresAction = await providerEvent({
+      eventId: `evt_refund_action_${crypto.randomUUID()}`,
+      eventType: 'refund.updated',
+      objectReference: providerReference,
+      occurredAt: '2026-08-30T00:00:03.000Z',
+      data: {
+        amount_minor: minorUnits(request.amount),
+        currency: request.currency.toLowerCase(),
+        status: 'requires_action',
+        payment_intent_reference: providerIntentRef,
+        metadata: { tera_refund_request_id: request.id },
+      },
+    });
+    const stalePending = await providerEvent({
+      eventId: `evt_refund_stale_pending_${crypto.randomUUID()}`,
+      eventType: 'refund.updated',
+      objectReference: providerReference,
+      occurredAt: '2026-08-30T00:00:02.000Z',
+      data: {
+        amount_minor: minorUnits(request.amount),
+        currency: request.currency.toLowerCase(),
+        status: 'pending',
+        payment_intent_reference: providerIntentRef,
+        metadata: { tera_refund_request_id: request.id },
+      },
+    });
+    expect(requiresAction.data).toMatchObject({ status: 'processed', outcome: 'requires_action' });
+    expect(stalePending.data).toMatchObject({ status: 'ignored', outcome: 'stale_refund_event' });
   });
 
   test('渠道 succeeded 后一次性落退款账本、订单状态与回补库存，重放不重复', async () => {
@@ -492,6 +737,7 @@ describe('Stripe 异步退款状态机', () => {
       amount_minor: minorUnits(request.amount),
       currency: request.currency.toLowerCase(),
       status: 'succeeded',
+      payment_intent_reference: providerIntentRef,
       metadata: { tera_refund_request_id: request.id },
     };
     const apiResult = await providerEvent({
@@ -560,8 +806,9 @@ describe('Stripe 异步退款状态机', () => {
         amount_minor: minorUnits(failedRequest.amount),
         currency: failedRequest.currency.toLowerCase(),
         status: 'failed',
+        payment_intent_reference: providerIntentRef,
         failure_code: 'declined',
-        failure_message: 'Refund was declined.',
+        failure_message: null,
         metadata: { tera_refund_request_id: failedRequest.id },
       },
     });

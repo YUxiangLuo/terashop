@@ -15,8 +15,12 @@ import {
 import {
   assertStripeKeyMode,
   decimalToMinorUnits,
-  minorUnitsToDecimal,
+  normalizedStripeRefundData,
+  parseStripeHttpTimeout,
+  parseStripeLivemode,
   sha256Hex,
+  stripeApiBase,
+  stripeApiVersion,
   stripeRequest,
   type StripeRefundResponse,
 } from '../_shared/stripe.ts';
@@ -37,13 +41,19 @@ interface ProviderEventResult {
   outcome: string | null;
 }
 
+function stripeTimeoutMs(): number {
+  return parseStripeHttpTimeout(optionalEnv('STRIPE_HTTP_TIMEOUT_MS', '10000'));
+}
+
 function normalizeItems(value: unknown): Array<{ order_item_id: string; quantity: number }> | null {
   if (value === undefined || value === null) return null;
   if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
     throw new HttpError('items must be a non-empty array with at most 100 lines');
   }
   return value.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new HttpError('Invalid refund item');
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new HttpError('Invalid refund item');
+    }
     const row = item as Record<string, unknown>;
     const id = requireUuid(row.order_item_id, 'order_item_id');
     if (!Number.isSafeInteger(row.quantity) || Number(row.quantity) <= 0) {
@@ -53,24 +63,52 @@ function normalizeItems(value: unknown): Array<{ order_item_id: string; quantity
   });
 }
 
-function normalizedRefundData(refund: StripeRefundResponse, request: RefundRequestDto): Record<string, unknown> {
-  return {
-    object_type: 'refund',
-    status: refund.status,
-    amount_minor: String(refund.amount),
-    currency: refund.currency.toLowerCase(),
-    payment_intent_reference: typeof refund.payment_intent === 'string'
-      ? refund.payment_intent
-      : request.parent_provider_reference,
-    charge_reference: typeof refund.charge === 'string' ? refund.charge : null,
-    failure_code: typeof refund.failure_reason === 'string' ? refund.failure_reason : null,
-    failure_message: typeof refund.failure_reason === 'string' ? refund.failure_reason : null,
-    pending_reason: typeof refund.pending_reason === 'string' ? refund.pending_reason : null,
-    metadata: {
-      tera_refund_request_id: request.id,
-      tera_order_id: request.order_id,
-    },
-  };
+function validateStripeRefund(
+  stripe: StripeRefundResponse,
+  local: RefundRequestDto,
+  expectedLivemode: boolean,
+  enforceCorrelation: boolean,
+): void {
+  const statuses = new Set(['pending', 'requires_action', 'succeeded', 'failed', 'canceled']);
+  const parentMatches = local.parent_provider_reference.startsWith('pi_')
+    ? stripe.payment_intent === local.parent_provider_reference
+    : local.parent_provider_reference.startsWith('ch_')
+      ? stripe.charge === local.parent_provider_reference
+      : false;
+  if (stripe.object !== 'refund'
+      || typeof stripe.id !== 'string' || !/^re_[A-Za-z0-9_]{3,252}$/.test(stripe.id)
+      || !Number.isSafeInteger(stripe.amount) || stripe.amount <= 0
+      || typeof stripe.currency !== 'string' || !/^[A-Za-z]{3}$/.test(stripe.currency)
+      || typeof stripe.status !== 'string' || !statuses.has(stripe.status)
+      || !Number.isSafeInteger(stripe.created)
+      || stripe.created < 1_230_768_000 || stripe.created > 253_402_300_799
+      || typeof stripe.livemode !== 'boolean' || stripe.livemode !== expectedLivemode
+      || (enforceCorrelation && stripe.metadata?.tera_refund_request_id !== local.id)
+      || (enforceCorrelation && stripe.metadata?.tera_order_id !== local.order_id)
+      || (enforceCorrelation && !parentMatches)
+      || (enforceCorrelation && local.provider_reference !== null
+          && local.provider_reference !== stripe.id)) {
+    throw new HttpError('Stripe Refund does not match the local request', 409, 'provider_mismatch');
+  }
+}
+
+async function ingestStripeRefund(
+  stripe: StripeRefundResponse,
+): Promise<ProviderEventResult> {
+  const data = normalizedStripeRefundData(stripe);
+  const occurredAt = new Date(stripe.created * 1000).toISOString();
+  const payloadHash = await sha256Hex(JSON.stringify({ occurred_at: occurredAt, data }));
+  return serviceRpc<ProviderEventResult>('ingest_payment_provider_event', {
+    provider: 'stripe',
+    provider_event_id: `api:refund:${stripe.id}:${stripe.status}:${payloadHash.slice(0, 16)}`,
+    source: 'api_response',
+    event_type: 'refund.api_result',
+    object_reference: stripe.id,
+    livemode: stripe.livemode,
+    occurred_at: occurredAt,
+    payload_hash: payloadHash,
+    data,
+  });
 }
 
 Deno.serve(async (request) => {
@@ -95,7 +133,9 @@ Deno.serve(async (request) => {
       throw new HttpError('reason must be text');
     }
     const reason = typeof body.reason === 'string' ? body.reason : null;
-    if (reason && reason.length > 1000) throw new HttpError('reason must be at most 1000 characters');
+    if (reason && reason.length > 1000) {
+      throw new HttpError('reason must be at most 1000 characters');
+    }
     if (body.restock !== undefined && typeof body.restock !== 'boolean') {
       throw new HttpError('restock must be boolean');
     }
@@ -113,66 +153,84 @@ Deno.serve(async (request) => {
       metadata: { edge_function: 'stripe-create-refund' },
     });
     if (typeof local.parent_provider_reference !== 'string'
-        || !/^(pi|ch)_/.test(local.parent_provider_reference)) {
-      throw new HttpError('Captured Stripe payment has no refundable provider reference', 409, 'provider_reference_missing');
+        || !/^(pi|ch)_[A-Za-z0-9_]{3,252}$/.test(local.parent_provider_reference)) {
+      throw new HttpError(
+        'Captured Stripe payment has no refundable provider reference',
+        409,
+        'provider_reference_missing',
+      );
     }
 
+    const livemode = parseStripeLivemode(optionalEnv('STRIPE_LIVEMODE', 'false'));
     const secretKey = requiredEnv('STRIPE_SECRET_KEY');
-    assertStripeKeyMode(secretKey, optionalEnv('STRIPE_LIVEMODE', 'false') === 'true');
-    const apiBase = optionalEnv('STRIPE_API_BASE', 'https://api.stripe.com');
-    const apiVersion = optionalEnv('STRIPE_API_VERSION', '2026-02-25.clover');
+    assertStripeKeyMode(secretKey, livemode);
+    const apiBase = stripeApiBase(livemode, optionalEnv('STRIPE_API_BASE'));
+    const apiVersion = stripeApiVersion(
+      optionalEnv('STRIPE_API_VERSION', '2026-02-25.clover'),
+    );
     const amountMinor = decimalToMinorUnits(local.amount, local.currency);
     const stripe = local.provider_reference
       ? await stripeRequest<StripeRefundResponse>(
           `/v1/refunds/${encodeURIComponent(local.provider_reference)}`,
-          { secretKey, apiBase, apiVersion, method: 'GET' },
+          {
+            secretKey,
+            apiBase,
+            apiVersion,
+            method: 'GET',
+            timeoutMs: stripeTimeoutMs(),
+          },
         )
       : await stripeRequest<StripeRefundResponse>('/v1/refunds', {
           secretKey,
           apiBase,
           apiVersion,
           idempotencyKey: `tera-refund-request-${local.id}`,
+          timeoutMs: stripeTimeoutMs(),
           form: {
-            payment_intent: local.parent_provider_reference,
+            [local.parent_provider_reference.startsWith('pi_') ? 'payment_intent' : 'charge']:
+              local.parent_provider_reference,
             amount: amountMinor,
             'metadata[tera_refund_request_id]': local.id,
             'metadata[tera_order_id]': local.order_id,
           },
         });
-    if (stripe.object !== 'refund' || typeof stripe.id !== 'string'
-        || String(stripe.amount) !== amountMinor
-        || stripe.currency?.toUpperCase() !== local.currency
-        || stripe.metadata?.tera_refund_request_id !== local.id) {
-      throw new HttpError('Stripe Refund does not match the local request', 409, 'provider_mismatch');
-    }
-    await serviceRpc<RefundRequestDto>('bind_refund_request_provider', {
-      refund_request_id: local.id,
-      provider_reference: stripe.id,
-      provider_status: stripe.status,
-      amount: minorUnitsToDecimal(stripe.amount, stripe.currency),
-      currency: stripe.currency,
-    });
 
-    const normalized = normalizedRefundData(stripe, local);
-    const payload = JSON.stringify(normalized);
-    const payloadHash = await sha256Hex(payload);
-    const providerEventId = `api:refund:${stripe.id}:${stripe.status}:${payloadHash.slice(0, 16)}`;
-    const occurredAt = new Date(
-      Number.isSafeInteger(stripe.created) ? stripe.created * 1000 : Date.now(),
-    ).toISOString();
-    const event = await serviceRpc<ProviderEventResult>('ingest_payment_provider_event', {
-      provider: 'stripe',
-      provider_event_id: providerEventId,
-      source: 'api_response',
-      event_type: 'refund.api_result',
-      object_reference: stripe.id,
-      livemode: stripe.livemode ?? (optionalEnv('STRIPE_LIVEMODE', 'false') === 'true'),
-      occurred_at: occurredAt,
-      payload_hash: payloadHash,
-      data: normalized,
-    });
+    const providerSucceeded = stripe.status === 'succeeded';
+    validateStripeRefund(stripe, local, livemode, !providerSucceeded);
+    if (providerSucceeded) {
+      const parentMatches = local.parent_provider_reference.startsWith('pi_')
+        ? stripe.payment_intent === local.parent_provider_reference
+        : stripe.charge === local.parent_provider_reference;
+      const correlationMatches = stripe.metadata?.tera_refund_request_id === local.id
+        && stripe.metadata?.tera_order_id === local.order_id
+        && parentMatches
+        && (local.provider_reference === null || local.provider_reference === stripe.id);
+      if (correlationMatches) {
+        await serviceRpc<RefundRequestDto>('bind_refund_request_provider', {
+          refund_request_id: local.id,
+          provider_reference: stripe.id,
+          provider_status: stripe.status,
+          amount: local.amount,
+          currency: local.currency,
+        });
+      }
+    } else {
+      await serviceRpc<RefundRequestDto>('bind_refund_request_provider', {
+        refund_request_id: local.id,
+        provider_reference: stripe.id,
+        provider_status: stripe.status,
+        amount: local.amount,
+        currency: local.currency,
+      });
+    }
+
+    const event = await ingestStripeRefund(stripe);
     if (event.status === 'failed') {
-      throw new HttpError('Refund was accepted by Stripe but local reconciliation is pending', 502, 'refund_reconciliation_pending');
+      throw new HttpError(
+        'Refund exists at Stripe but local reconciliation is pending',
+        502,
+        'refund_reconciliation_pending',
+      );
     }
     return jsonResponse({
       refund_request_id: local.id,
@@ -183,6 +241,7 @@ Deno.serve(async (request) => {
       amount: local.amount,
       currency: local.currency,
       processing_status: event.outcome,
+      pending_reconciliation: providerSucceeded && event.outcome !== 'refunded',
     }, 200, cors);
   } catch (error) {
     console.error('stripe-create-refund failed', error instanceof Error ? error.name : 'unknown');

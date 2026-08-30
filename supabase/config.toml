@@ -400,15 +400,20 @@ deno_version = 2
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
-# Payment functions validate user JWTs or Stripe signatures inside the handler.
-# The external webhook must never depend on Supabase JWT verification.
+# Customer/admin Stripe commands use gateway JWT verification as defense in depth,
+# then call Auth /user in the handler. External webhooks must keep this disabled and
+# authenticate only with the provider's signature over the raw body.
 [functions.stripe-create-payment-intent]
-verify_jwt = false
+verify_jwt = true
 
 [functions.stripe-webhook]
 verify_jwt = false
 
 [functions.stripe-create-refund]
+verify_jwt = true
+
+# Scheduled service-role worker; it authenticates the token in the handler.
+[functions.stripe-reconcile-payment-intents]
 verify_jwt = false
 
 # PayPal customer/admin endpoints authenticate the Supabase JWT in the handler;

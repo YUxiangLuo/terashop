@@ -100,16 +100,27 @@ export async function authenticatedUser(request: Request): Promise<SupabaseUser>
   }
   const supabaseUrl = requiredEnv('SUPABASE_URL');
   const anonKey = requiredEnv('SUPABASE_ANON_KEY');
-  const response = await fetch(`${supabaseUrl}/auth/v1/user`, {
-    headers: { apikey: anonKey, Authorization: authorization },
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${supabaseUrl}/auth/v1/user`, {
+      headers: { apikey: anonKey, Authorization: authorization },
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    throw new HttpError('Authentication service unavailable', 503, 'auth_unavailable');
+  }
   if (!response.ok) {
     if (response.status >= 500) {
       throw new HttpError('Authentication service unavailable', 503, 'auth_unavailable');
     }
     throw new HttpError('Authentication required', 401, 'unauthorized');
   }
-  const user = await response.json() as Partial<SupabaseUser>;
+  let user: Partial<SupabaseUser>;
+  try {
+    user = await response.json() as Partial<SupabaseUser>;
+  } catch {
+    throw new HttpError('Authentication service unavailable', 503, 'auth_unavailable');
+  }
   if (typeof user.id !== 'string') throw new HttpError('Authentication required', 401, 'unauthorized');
   return { id: user.id, email: user.email };
 }
@@ -133,16 +144,34 @@ export async function serviceRpc<T>(name: string, body: Record<string, unknown>)
   if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new HttpError('Invalid RPC name', 500, 'server_misconfigured');
   const supabaseUrl = requiredEnv('SUPABASE_URL');
   const serviceKey = requiredEnv('SUPABASE_SERVICE_ROLE_KEY');
-  const response = await fetch(`${supabaseUrl}/rest/v1/rpc/${name}`, {
-    method: 'POST',
-    headers: {
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  const text = await response.text();
+  let response: Response;
+  try {
+    response = await fetch(`${supabaseUrl}/rest/v1/rpc/${name}`, {
+      method: 'POST',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch {
+    throw new HttpError('Database payment operation unavailable', 502, 'database_unavailable');
+  }
+  const declaredLength = Number(response.headers.get('Content-Length') ?? 0);
+  if (Number.isFinite(declaredLength) && declaredLength > 1_048_576) {
+    throw new HttpError('Database payment response is too large', 502, 'database_bad_response');
+  }
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    throw new HttpError('Database payment operation unavailable', 502, 'database_unavailable');
+  }
+  if (new TextEncoder().encode(text).byteLength > 1_048_576) {
+    throw new HttpError('Database payment response is too large', 502, 'database_bad_response');
+  }
   let parsed: unknown = null;
   try {
     parsed = text ? JSON.parse(text) : null;
