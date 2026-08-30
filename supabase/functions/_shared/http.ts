@@ -114,6 +114,21 @@ export async function authenticatedUser(request: Request): Promise<SupabaseUser>
   return { id: user.id, email: user.email };
 }
 
+export function requireServiceRoleRequest(request: Request): void {
+  const authorization = request.headers.get('Authorization');
+  const expected = `Bearer ${requiredEnv('SUPABASE_SERVICE_ROLE_KEY')}`;
+  if (!authorization || authorization.length !== expected.length) {
+    throw new HttpError('Service role authentication required', 401, 'unauthorized');
+  }
+  let difference = 0;
+  for (let index = 0; index < expected.length; index += 1) {
+    difference |= authorization.charCodeAt(index) ^ expected.charCodeAt(index);
+  }
+  if (difference !== 0) {
+    throw new HttpError('Service role authentication required', 401, 'unauthorized');
+  }
+}
+
 export async function serviceRpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
   if (!/^[a-z][a-z0-9_]*$/.test(name)) throw new HttpError('Invalid RPC name', 500, 'server_misconfigured');
   const supabaseUrl = requiredEnv('SUPABASE_URL');

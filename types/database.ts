@@ -1651,6 +1651,14 @@ export type Database = {
       }
       get_order_checkout_quote: { Args: { order_id: string }; Returns: Json }
       get_order_ledger: { Args: { order_id: string }; Returns: Json }
+      get_payment_intent_for_customer: {
+        Args: {
+          customer_id: string
+          payment_intent_id: string
+          provider: string
+        }
+        Returns: Json
+      }
       get_payment_operations: { Args: { order_id: string }; Returns: Json }
       ingest_payment_provider_event: {
         Args: {
@@ -1667,6 +1675,10 @@ export type Database = {
         Returns: Json
       }
       is_admin: { Args: never; Returns: boolean }
+      list_pending_provider_refunds: {
+        Args: { max_requests?: number; provider: string }
+        Returns: Json
+      }
       mark_order_paid: {
         Args: { order_id: string; provider?: string; provider_ref?: string }
         Returns: {

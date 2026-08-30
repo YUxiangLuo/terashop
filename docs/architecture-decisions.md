@@ -75,13 +75,14 @@ Tax Quote/Tax Transaction 模块。不得把当前 `tax_rates` 宣称为全球�
 
 ## ADR-009：支付信任边界与事务 Outbox
 
-**状态：采用，Stripe 适配已落地**
+**状态：采用，Stripe 与 PayPal 适配已落地**
 
 支付创建/捕获和 Outbox worker RPC 只授予 `service_role`。Storefront 不持有 service role；Stripe
-Webhook 在 Edge Function 对未经修改的 raw body、时间窗和 endpoint secret 做 HMAC-SHA256 验签，
-再用 provider event id 推进数据库。库存预占消费、订单状态、交易、审计事件和 Outbox 在同一事务
-提交，外部副作用由租约 worker 消费。同一订单最多一个活跃 PaymentIntent，失败换卡复用该意图，
-避免多个可确认 client secret 造成重复渠道扣款。PayPal 等其他渠道仍需各自的验签与字段归一化适配器。
+Webhook 对 raw body 做 HMAC-SHA256 验签，PayPal Webhook 使用 OAuth2 调官方
+`verify-webhook-signature` postback 验证 transmission headers；两者都只在验签后用 provider event id
+推进数据库。库存预占消费、订单状态、交易、审计事件和 Outbox 在同一事务提交。同一订单最多一个
+活跃 PaymentIntent，避免多个可确认支付对象造成重复扣款；Stripe 失败换卡复用意图，PayPal Capture
+declined 后终结当前意图并允许创建新 Order。其他渠道仍需独立验签与字段归一化适配器。
 
 ## ADR-010：Checkout Quote 的价格与预占边界
 
@@ -95,15 +96,24 @@ cancelled 或 expired 后立即清除临时地址和备注，长期交易快照�
 
 ## ADR-011：渠道事件、外部资金事实与异步退款
 
-**状态：采用，Stripe 已落地**
+**状态：采用，Stripe 与 PayPal 已落地**
 
 验签后的事件先进入幂等 Provider Event Inbox；数据库只保存 raw payload 的 SHA-256 和 allowlist
-归一化字段，不持久化 card/customer/receipt email 或 client secret。渠道已成功的 capture/refund
+归一化字段，不持久化 card/customer/payer/payee email、OAuth access token 或 client secret。渠道已成功的 capture/refund
 必须先写不可删除的 `provider_money_movements`，再匹配内部交易。若金额不一致、订单已取消或库存
 预占已失效，不得丢弃渠道资金事实，也不得伪造库存扣减；标记 `action_required` 并写事务 Outbox
-等待补偿退款或人工履约。
+等待补偿退款或人工履约。即使渠道事件币种超出当前 CNY 结账能力，只要它代表真实成功资金也先作为
+unmatched 外部事实保存；这不等于允许创建非 CNY 订单。
 
 真实渠道退款采用两阶段：`refund_requests` 先以关系化行预留可退数量和金额，渠道确认前不修改订单、
 库存或成功退款账本；只有签名 Webhook/API 响应确认 `succeeded` 后，才在单事务写 payment/refund、
 推进订单并按原始负库存流水回补。`failed`/`cancelled` 请求释放预留。同步 `refund_order` 只保留给
 手工流程和测试，且不能穿透活跃异步退款请求。
+
+PayPal Order ID 代表买家批准对象，Capture ID 才代表实际资金，因此内部 PaymentIntent 保留 Order ID，
+成功交易和外部资金事实使用 Capture ID。只有 `COMPLETED` Capture 才消费库存；`PENDING` 等后续事件。
+`PAYMENT.CAPTURE.REVERSED` 记录不可删除的外部退款方向资金异常、触发人工对账并阻止该 Capture 继续退款；
+即使 reversal 先于 completed 乱序到达，也不消费库存或把订单标记已支付，但不会静默伪造本地退款。
+PayPal pending Refund 由 service-only worker 查询具体 Refund 资源；
+`PAYMENT.CAPTURE.REFUNDED` 只作为聚合轮询信号，不能据此猜测某个部分退款已经完成。轮询候选通过
+`FOR UPDATE SKIP LOCKED` 公平 claim，并设置最短重查间隔，避免并发重复查询和老请求饿死新请求。

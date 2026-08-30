@@ -411,6 +411,23 @@ verify_jwt = false
 [functions.stripe-create-refund]
 verify_jwt = false
 
+# PayPal customer/admin endpoints authenticate the Supabase JWT in the handler;
+# the webhook verifies with PayPal and the reconciler compares the service token.
+[functions.paypal-create-order]
+verify_jwt = false
+
+[functions.paypal-capture-order]
+verify_jwt = false
+
+[functions.paypal-webhook]
+verify_jwt = false
+
+[functions.paypal-create-refund]
+verify_jwt = false
+
+[functions.paypal-reconcile-refunds]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
