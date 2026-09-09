@@ -34,7 +34,10 @@ supabase/migrations/
 ├── 20260830090000_paypal_payments.sql # PayPal Order/Capture/reversal/退款轮询边界
 ├── 20260830100000_stripe_best_practices.sql # Stripe 精确资金/乱序状态/退款父引用加固
 ├── 20260830110000_payment_command_safety.sql # PayPal 捕获/取消互斥、手工收款与渠道终态
-└── 20260830120000_refund_fulfillment_quantities.sql # 退款取消数量/履约预留与历史回填
+├── 20260830120000_refund_fulfillment_quantities.sql # 退款取消数量/履约预留与历史回填
+├── 20260830130000_order_edit_and_review_permissions.sql # 支付快照/评价 INSERT/目录可见性
+├── 20260830140000_exact_discount_allocation.sql # 整数分最大余数分摊/免邮实际收益
+└── 20260830150000_default_address_commands.sql # 默认地址 RPC/列权限/锁顺序
 
 supabase/functions/
 ├── stripe-create-payment-intent/ / stripe-webhook/ / stripe-create-refund/
@@ -43,7 +46,7 @@ supabase/functions/
 ├── paypal-create-refund/           # admin 鉴权 + PayPal Payments v2 退款
 └── paypal-reconcile-refunds/       # service-only pending refund 轮询
 
-tests/                              # bun test，共 206 例
+tests/                              # bun test，共 238 例
 ├── helpers.ts                      # API/RPC/认证/库存 辅助函数
 ├── catalog.test.ts                 # 商品目录与视图
 ├── orders.test.ts                  # 下单金额/折扣/运费/税/取消/RLS
@@ -60,7 +63,11 @@ tests/                              # bun test，共 206 例
 ├── paypal-edge.test.ts             # OAuth、postback 验签、DTO/PII 与 PayPal 幂等
 ├── payment-workflows.test.ts       # 真实 handler + mock 渠道、捕获/取消、退款重试与手工支付
 ├── payment-concurrency.test.ts     # 数据库事务屏障，验证捕获/取消两种锁交错
-└── refund-fulfillment.test.ts       # 退款取消量/履约并发/回库与安全 DTO
+├── refund-fulfillment.test.ts       # 退款取消量/履约并发/回库与安全 DTO
+├── order-edit-payments.test.ts      # 活动意图锁快照/改价与意图创建的受控并发
+├── pricing-allocation.test.ts       # 分币/大金额/属性样本/免邮阈值与账本一致性
+├── default-addresses.test.ts        # 默认地址权限/既有行并发/事务屏障
+└── storefront-permissions.test.ts   # 评价 INSERT/再审核/停用分类
 ```
 
 ### 商品域（Shopify 变体模型）
@@ -92,6 +99,8 @@ tests/                              # bun test，共 206 例
   - `code = null` 自动生效；有码 = 输码生效（每客限次、总次数、时间窗）；码统一存大写
   - `priority` 决定求值顺序；`stackable=false` 为独占，生效后阻止后续促销（含免邮促销）
   - 行级折扣钳制：任意促销叠加后单行折扣不超过行金额，杜绝负行额/负税
+- 整单折扣使用整数分最大余数法，按剩余净额分摊，余数相同时以变体 UUID 排序；总分摊严格等于目标优惠
+- 零收益免邮不占独占资格；可叠加免邮在后续优惠跌破包邮线时可延后生效，但不能与独占商品优惠组合
   - 下单时对涉及的促销行加锁（`for update`），usage_limit / 每客限次并发安全
 - `promotion_targets`：作用范围（商品/分类/变体；分类含子分类闭包；空 = 全场）
 - `price_checkout` RPC：**预览与下单共用的计价引擎**，返回行级折扣与促销明细
@@ -136,11 +145,16 @@ POST /rest/v1/rpc/create_order
 POST /rest/v1/rpc/create_order_v2
 {"idempotency_key":"checkout-attempt-id","items":[...],"address":{...}}
 
+# 地址内容仍可 PATCH；新建地址仍可 POST is_default=true
+# 既有地址设置/清除默认必须走 RPC，不再直接 PATCH is_default
+POST /rest/v1/rpc/set_default_address {"address_id":"..."}
+POST /rest/v1/rpc/set_default_address {"address_id":"...","make_default":false}
+
 # 取消（仅未支付未发货，按原扣减仓回补库存+释放促销+记流水）
 POST /rest/v1/rpc/cancel_order {"order_id":"...","reason":"..."}
 
-# 仅 pending + 未发货订单可修改地址（自动重算税、重校验运法国家限制）
-# 已支付订单必须等待 Order Edit / Adjustment 流程，不允许原地改价
+# 仅 pending + 未发货且无活动支付意图的兼容订单可改地址（自动重算税、重校验运法）
+# 本地 Stripe cancelled/failed 还需渠道取消确认；Quote 和已支付订单不可原地重算
 POST /rest/v1/rpc/update_order_address {"order_id":"...","address":{...}}
 
 # 管理端（admin）；线上意图仍可扣款时禁止 mark_order_paid，必须先完成渠道撤销/对账
@@ -203,7 +217,8 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
 - 按行退款优先取消未履约数量，已发货部分不重复计入取消；pending 退款预留取消量，成功后固化，失败/取消释放
 - 可新增履约数量扣除已成功取消和活跃退款预留；全额退款订单不可新增履约，即使退款未指定商品行
 - 有按行退款事实/活跃请求的履约不可再取消以释放数量；通过安全 DTO 查询剩余数量，不用原订购量自行推算
-- `product_reviews`：每客每商品一条，需 admin 审核后公开；作者改内容自动回落待审
+- `product_reviews`：每客每商品一条，普通客户 INSERT 只能为 pending；需 admin 审核后公开，作者改内容自动回落待审
+- `product_listing.categories` 仅包含启用分类，不通过 owner 权限视图绕过分类可见性
 - 分类自连接不支持 PostgREST 内嵌查询，前端拉平铺列表自行组树即可
 - 金额口径：`order_items.total` = 行毛额（单价×数量），`line_total` = 行净额（扣行折扣）；
   `orders.discount_total` 只含商品折扣，免运费优惠记于 `order_promotions.amount` 并把
@@ -266,10 +281,19 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
    `PAYMENT.CAPTURE.REFUNDED` 仅作为聚合唤醒信号，最终状态以具体 Refund 资源为准。
 6. Webhook Simulator 不能通过 postback 验签，部署前必须使用真实 sandbox 交易演练；商户账户需支持接收 CNY。
 
+## 本批前向迁移注意事项
+
+- 迁移 `20260830130000`–`20260830150000` 只向前升级，**不要重置已有数据库**。安排写入维护窗口，先升级数据库，再启用客户端的新默认地址 RPC 调用。
+- 地址直接 PATCH 仅保留内容字段；不可写入 `id`、`customer_id`、时间戳或 `is_default`。后台/service 表写入也应通过 `set_default_address` 切换默认值。
+- 新计价规则可能使旧 Quote 转单返回 `pricing changed`，此时需重新报价，不会静默重定价。既有订单/退款金额不会被迁移重写。
+- 历史订单与 Stripe 意图金额不一致时，取消 Worker 会回收旧渠道对象；必须先完成渠道撤销/对账，再生成新的支付尝试。
+- 历史 approved 评价无法可靠区分真实审核与旧漏洞写入，需单独审计，不会批量降级。
+- 直接商品行写入遇到订单锁竞争会返回 409，避免锁反转；交易写入应通过先锁订单的命令完成。
+
 ## 开发检查
 
 ```bash
-bun run test             # reset + 206 个串行 API/handler/并发回归
+bun run test             # reset + 238 个串行 API/handler/并发回归
 bun run db:lint          # public API + commerce 账本 schema lint
 bun run types:check      # 检查生成类型是否漂移
 bun run typecheck        # TypeScript 静态检查

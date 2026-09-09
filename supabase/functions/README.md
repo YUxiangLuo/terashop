@@ -5,7 +5,7 @@
 - `stripe-create-payment-intent`: authenticated Storefront endpoint. The Edge gateway verifies the JWT and the handler revalidates it with Auth before checking order ownership in PostgreSQL.
 - `stripe-webhook`: public endpoint with `verify_jwt = false`; verifies the unchanged raw body with `Stripe-Signature`, then writes the service-only Provider Inbox. Once the inbox row is durable, processing failures are acknowledged and owned by the retry worker.
 - `stripe-create-refund`: authenticated admin endpoint with the same gateway/handler defense in depth. It reserves the refund first, then submits it to Stripe.
-- `stripe-reconcile-payment-intents`: service-role-only scheduled worker. It leases expired intents, locally failed/cancelled intents, and intents on non-payable orders. A local terminal status is not provider confirmation: it cancels still-active Stripe objects with a stable idempotency key and ingests a raced `succeeded` state instead of discarding it.
+- `stripe-reconcile-payment-intents`: service-role-only scheduled worker. It leases expired intents, locally failed/cancelled intents, intents on non-payable orders, and historical intents whose amount/currency no longer matches the order. A local terminal status is not provider confirmation: it cancels still-active Stripe objects with a stable idempotency key and ingests a raced `succeeded` state instead of discarding it.
 
 Prefer a restricted live key with only the PaymentIntent and Refund read/write permissions required by these functions. Never use a publishable key server-side.
 
@@ -98,6 +98,7 @@ Customer disputes are not automated in this phase; monitor PayPal and route them
 
 - Once PayPal capture is prepared, ordinary order/quote cancellation is rejected until a definite outcome is reconciled. Network errors never clear the marker. Retry the same intent, retrieving the provider Order before another POST. Legacy orders without a Quote need explicit recovery; do not fabricate failure or clear the marker in SQL.
 - Quote expiry remains bounded even during ambiguous capture. Expiry can cancel the local order and release its reservation; subsequent real funds enter `action_required` reconciliation rather than reviving expired inventory.
+- Active intents lock order addresses, amounts and item snapshots, including legacy orders without a Quote. Stripe local failure/cancellation does not unlock editing until the provider is confirmed cancelled; historical mismatches are reclaimed by the cancellation worker, never repaired by changing the intent amount.
 - `mark_order_paid` rejects online intents that may still charge. Stripe cancellation must be confirmed at the provider, not inferred from a local `cancelled`/`failed` label. Monitor the cancellation worker, including historical intents left behind by manual payments.
 - Item refunds reserve/finalize unshipped cancellation quantities before those units can be fulfilled again. Fully refunded orders cannot create another fulfillment. Read `get_order_fulfillment_balance` instead of subtracting only existing shipments from the original order quantity.
 

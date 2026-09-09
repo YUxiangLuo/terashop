@@ -1793,6 +1793,30 @@ export type Database = {
         Args: { max_events?: number }
         Returns: Json
       }
+      set_default_address: {
+        Args: { address_id: string; make_default?: boolean }
+        Returns: {
+          city: string
+          country: string
+          created_at: string
+          customer_id: string
+          detail: string
+          id: string
+          is_default: boolean
+          label: string
+          phone: string
+          postal_code: string | null
+          province: string
+          receiver: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "addresses"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       set_user_role: {
         Args: { role: string; user_id: string }
         Returns: {

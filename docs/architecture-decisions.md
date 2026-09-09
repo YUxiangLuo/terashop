@@ -16,6 +16,8 @@
 
 - 当前订单币种为 CNY，账本金额使用 `numeric(12,2)`。
 - 每个可落账调整先按两位小数舍入，再汇总；PostgreSQL `round(numeric, 2)` 是当前权威实现。
+- V1 整单折扣按各行剩余净额，以整数分最大余数法分摊；先取整除商，再按余数降序、变体 UUID 升序分配剩余分。
+  分子使用精确 `numeric` 整数乘法和 `div/mod`，避免 bigint 乘积溢出或除法舍入；分摊合计必须等于目标优惠额。
 - 不用浮点数存储或比较金额。
 - 引入多币种前，增加 currency exponent/rounding policy，不复用固定两位小数假设。
 
@@ -26,6 +28,13 @@
 已支付订单的商品、价格、税、运费和地址快照不能原地重算。数据库 trigger 会阻止包括
 service role 在内的原地改写；订单行只允许受控退款流程单向推进兼容退款字段。后续变化必须
 通过 Order Edit、Adjustment、补扣或退款账本表达，保留原始商业事实和完整审计链。
+
+兼容订单存在活动 PaymentIntent 时，同样锁定商业快照和商品行，禁止修改地址或改价；
+已绑定但未确认 Stripe 渠道取消的本地 failed/cancelled 意图也继续保护快照。
+地址编辑与新意图创建共用 quote → order 锁，不能先锁 order 再等待 intent；渠道取消确认后才可编辑。
+不重写历史错配的意图金额；Stripe 取消 Worker 将金额/币种错配的旧意图纳入回收。
+这些订单需先渠道撤销/对账，再重新报价或创建意图。直接商品行写入只以 NOWAIT 获取订单锁，
+竞争时返回 409，不能在已持商品行锁的 trigger 中反向等待订单锁。
 
 ## ADR-004：库存语义
 
@@ -52,6 +61,10 @@ V1/V2 `create_order` 暂时保留“下单即扣库存”，但 inventory trigge
 V2 管线固定为：条件求值 → 候选生成 → 组合选择 → 行级分摊 → 税 → usage ledger。
 发布后的 `promotion_version` 不可变，订单记录实际命中的版本。状态、目标、组合和分摊关系化；
 受约束的条件 DSL 与 action 参数使用 JSONB。上线前与 `price_checkout` V1 双算并比较结果。
+
+V1 仍按 priority 贪心选择，不宣称寻找全局最优组合。免邮在其求值位置按已生效商品优惠后的金额
+判断是否仍有运费可免；满额包邮已生效时，不占用独占资格。不产生收益的独占免邮被跳过；
+最早的可叠加免邮可延后，若后续商品优惠使金额跌破包邮线，则仅在无独占优惠时应用，仍只记一次真实免邮收益。
 
 ## ADR-006：API 分层
 
@@ -154,3 +167,18 @@ PayPal pending Refund 由 service-only worker 查询具体 Refund 资源；
 
 Stripe disputes/chargebacks、Stripe payout/balance reconciliation 与 PayPal disputes 暂不自动化，统一由渠道
 Dashboard 人工监控并进入 reconciliation。没有专用争议/结算账本前，不把这些事件接入会误写退款或库存的自动状态机。
+
+## ADR-012：客户写入权限与默认地址
+
+**状态：采用**
+
+普通客户 INSERT 评价必须为 pending；只有管理员审核后才公开，管理员的受权写入不受客户 policy 限制。
+不批量撤销历史已批准评价，因无法可靠区分真实审核与旧漏洞写入，历史数据需另行审计。
+
+既有地址切换默认值必须调用 `set_default_address`，先取得客户 advisory lock，再锁目标地址并清理旧默认。
+保留创建地址时 `is_default=true` 的兼容 INSERT，但此路径也必须在更新任何旧地址前取锁。
+客户端只可直接修改内容字段；身份/归属不可变，默认值切换不允许直接 PATCH，包括 service-role 表写入。
+`make_default=false` 可清除指定地址的默认值；数据库唯一索引继续保证每客户最多一个默认地址，
+清除/删除默认地址允许留下零个，不自动挑选其他地址。
+
+owner 权限的 `product_listing` 视图必须显式过滤停用分类；Metaobject definition 停用是否隐藏子对象仍待产品确认，不在本批改动。

@@ -282,16 +282,16 @@ describe('PayPal capture dispatch and cancellation', () => {
     if (prepared.status === 200) await settleIntent(intent);
   });
 
-  test('兼容订单也校验金额，并在捕获登记后保护地址与取消；结算不重复扣库存', async () => {
+  test('兼容订单创建意图后即保护地址，捕获登记后保护取消；结算不重复扣库存', async () => {
     const order = await fixtureOrder(fixture, buyer, 1, false);
     const intent = await fixtureIntent(order, buyer, 'paypal');
     const before = await stockOf(fixture.sku);
     const command = { payment_intent_id: intent.id, customer_id: buyer.userId };
-    await checked(rpc('update_order_address', { order_id: order.id, address: { ...CN_ADDRESS, country: 'US' } }, buyer.token));
-    const mismatch = await rpc('prepare_paypal_capture', command, undefined, true);
-    expect(mismatch.status).toBe(400);
-    expect(mismatch.data).toMatchObject({ message: expect.stringContaining('order total changed') });
-    await checked(rpc('update_order_address', { order_id: order.id, address: CN_ADDRESS }, buyer.token));
+    const beforeCapture = await rpc('update_order_address', {
+      order_id: order.id, address: { ...CN_ADDRESS, country: 'US' },
+    }, buyer.token);
+    expect(beforeCapture.status).toBe(400);
+    expect(beforeCapture.data).toMatchObject({ message: expect.stringContaining('payment intent') });
     await checked(rpc('prepare_paypal_capture', command, undefined, true));
     const change = await rpc('update_order_address', { order_id: order.id, address: { ...CN_ADDRESS, country: 'US' } }, buyer.token);
     expect(change.status).toBe(400);
