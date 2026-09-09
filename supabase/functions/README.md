@@ -5,7 +5,7 @@
 - `stripe-create-payment-intent`: authenticated Storefront endpoint. The Edge gateway verifies the JWT and the handler revalidates it with Auth before checking order ownership in PostgreSQL.
 - `stripe-webhook`: public endpoint with `verify_jwt = false`; verifies the unchanged raw body with `Stripe-Signature`, then writes the service-only Provider Inbox. Once the inbox row is durable, processing failures are acknowledged and owned by the retry worker.
 - `stripe-create-refund`: authenticated admin endpoint with the same gateway/handler defense in depth. It reserves the refund first, then submits it to Stripe.
-- `stripe-reconcile-payment-intents`: service-role-only scheduled worker. It leases expired/canceled-order intents, cancels still-active Stripe objects with a stable idempotency key, and ingests a raced `succeeded` state instead of discarding it.
+- `stripe-reconcile-payment-intents`: service-role-only scheduled worker. It leases expired intents, locally failed/cancelled intents, and intents on non-payable orders. A local terminal status is not provider confirmation: it cancels still-active Stripe objects with a stable idempotency key and ingests a raced `succeeded` state instead of discarding it.
 
 Prefer a restricted live key with only the PaymentIntent and Refund read/write permissions required by these functions. Never use a publishable key server-side.
 
@@ -41,6 +41,8 @@ Use a snapshot-event webhook destination (not a thin-event destination), scoped 
 - `refund.updated`
 - `refund.failed`
 
+The API Refund object has no `livemode` field. Refund API responses inherit mode from the validated secret-key configuration; webhook mode comes from the verified event envelope. Binding a refund resource is idempotent and cannot regress `processing`/`requires_action` to `submitted`; Inbox processing owns terminal transitions.
+
 The normalized inbox stores only allowlisted money/correlation fields. A provider reference bound by the trusted API path is authoritative; metadata alone never binds an early event. Refund correlation additionally requires the captured PaymentIntent or Charge. `client_secret` is returned only to the authenticated caller and is never persisted.
 
 Official references: [PaymentIntents](https://docs.stripe.com/api/payment_intents),
@@ -56,7 +58,7 @@ Stripe disputes/chargebacks and payout-to-bank balance reconciliation are not au
 ## PayPal Orders v2 / Payments v2
 
 - `paypal-create-order`: authenticated Storefront endpoint. Creates an idempotent `CAPTURE` Order and returns only its trusted approval URL.
-- `paypal-capture-order`: authenticated Storefront endpoint called after buyer approval. Captures with the local intent UUID as `PayPal-Request-Id` and reconciles the returned Capture.
+- `paypal-capture-order`: authenticated Storefront endpoint called after buyer approval. After retrieving the provider Order, it calls service-only `prepare_paypal_capture` to lock/recheck the intent, quote and order and durably mark dispatch. Only then may it POST Capture with the local intent UUID as `PayPal-Request-Id`. An already-existing Capture is always reconciled, including after local cancellation/expiry.
 - `paypal-webhook`: public endpoint with `verify_jwt = false`; validates transmission headers by calling PayPal's `verify-webhook-signature` endpoint before accepting the event.
 - `paypal-create-refund`: authenticated admin endpoint. Reserves the refundable amount/lines and submits an idempotent Payments v2 refund.
 - `paypal-reconcile-refunds`: service-role-only polling worker for pending refunds. This is required because PayPal documents pending/failed refund events and an aggregate `PAYMENT.CAPTURE.REFUNDED` signal, not a per-refund completed event.
@@ -92,7 +94,16 @@ Official references: [Orders v2](https://developer.paypal.com/docs/api/orders/v2
 [signature postback](https://developer.paypal.com/api/webhooks/v1/verify-webhook-signature-post/).
 Customer disputes are not automated in this phase; monitor PayPal and route them through the reconciliation process.
 
+## Capture, manual payment and fulfillment safety
+
+- Once PayPal capture is prepared, ordinary order/quote cancellation is rejected until a definite outcome is reconciled. Network errors never clear the marker. Retry the same intent, retrieving the provider Order before another POST. Legacy orders without a Quote need explicit recovery; do not fabricate failure or clear the marker in SQL.
+- Quote expiry remains bounded even during ambiguous capture. Expiry can cancel the local order and release its reservation; subsequent real funds enter `action_required` reconciliation rather than reviving expired inventory.
+- `mark_order_paid` rejects online intents that may still charge. Stripe cancellation must be confirmed at the provider, not inferred from a local `cancelled`/`failed` label. Monitor the cancellation worker, including historical intents left behind by manual payments.
+- Item refunds reserve/finalize unshipped cancellation quantities before those units can be fulfilled again. Fully refunded orders cannot create another fulfillment. Read `get_order_fulfillment_balance` instead of subtracting only existing shipments from the original order quantity.
+
 ## Workers and deployment
+
+For the payment safety upgrade, pause payment/fulfillment writes and drain old capture requests, apply forward migrations `20260830110000` and `20260830120000`, then deploy the updated functions before resuming traffic. The database must be upgraded before the new PayPal handler runs; an old handler must not remain callable because it does not prepare capture. Never reset an existing database for this upgrade. Backfill conservatively classifies historical unshipped refunds without changing their amounts, inventory movements or original quantities; review pre-existing financial/inventory exceptions separately.
 
 Deploy all functions with the repository's `supabase/config.toml`. Schedule:
 
@@ -102,3 +113,7 @@ Deploy all functions with the repository's `supabase/config.toml`. Schedule:
 - the Outbox consumer, including `payment.reconciliation_required`, `stripe.payment_intent_cancel_failed`, and `paypal.refund_reconciliation_requested`
 
 Never expose `SUPABASE_SERVICE_ROLE_KEY`, Stripe secrets, `PAYPAL_CLIENT_SECRET`, or webhook credentials to browsers.
+
+## Handler regression tests
+
+`tests/payment-workflows.test.ts` imports the same `handler.ts` used by each `index.ts` entry point. Auth and PostgreSQL are real; only provider HTTP is mocked, and all non-Supabase requests are intercepted so tests cannot call live payment services. Run the complete suite with `bun run test` in a disposable local project, or `bun run test:current` against an already-prepared test database. These tests do not replace real provider sandbox and deployed Edge gateway checks.

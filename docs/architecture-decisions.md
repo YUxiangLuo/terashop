@@ -36,6 +36,15 @@ service role 在内的原地改写；订单行只允许受控退款流程单向�
 V1/V2 `create_order` 暂时保留“下单即扣库存”，但 inventory trigger 会阻止它消耗活跃预占。
 取消/退款继续以原始 `inventory_movements` 为权威回补依据，不能依赖变体当前配置。
 
+按行退款优先取消尚未履约的数量，其余数量属于已履约商品的退款；分别在
+`refund_request_lines.cancelled_quantity`（请求时冻结）和 `refund_lines.cancelled_quantity`
+（成功事实）记录取消数量。可新履约数量 = 原订购数量 − 活跃履约数量 − 已成功取消数量
+− 活跃退款请求预留的取消数量。`get_order_fulfillment_balance` 仅向订单客户、管理员和 service role
+返回这些数量，并将不可履约订单的 available 置零。金额型退款不推测商品取消数量，但全额退款订单禁止新增履约。
+存在按行退款事实或活跃请求的履约不能再通过取消履约来释放数量，应走退货/新订单流程。
+历史退款无法无歧义区分取消和退货，迁移采用未履约优先的保守分配，不修改历史金额、库存或退款数量；
+缺少历史关系化退款行的兼容数量也保守计入限制，不能用于重新发货。
+
 ## ADR-005：促销 V2
 
 **状态：采用，V1 保留**
@@ -85,6 +94,15 @@ transmission headers；两者都只在验签后用 provider event id 推进数�
 重复扣款；Stripe 失败换卡复用意图，PayPal Capture
 declined 后终结当前意图并允许创建新 Order。其他渠道仍需独立验签与字段归一化适配器。
 
+PayPal Edge 发出 Capture POST 前，必须调用 service-only `prepare_paypal_capture`，按
+intent → quote → order 顺序校验归属、应付金额、订单及预占状态，并持久化捕获请求时间。
+登记后普通取消不能与渠道捕获竞争；网络错误不清除此标记，同一个意图 UUID 继续作为渠道幂等键，
+重试先查询渠道资源。Quote 到期仍允许释放库存和取消订单，不无限延长 hold；晚到资金继续进入对账。
+无 Quote 的兼容订单遇到结果不明的捕获，需重试或渠道核对后恢复，不自动猜测失败。
+
+`mark_order_paid` 不得取消仍可扣款的 Stripe/PayPal 意图再手工收款；只有线上意图已终结才允许执行。
+本地 cancelled/failed 不等于 Stripe 渠道已终结，撤销 Worker 同样扫描这些历史意图及已不应付款的订单。
+
 ## ADR-010：Checkout Quote 的价格与预占边界
 
 **状态：采用，已落地**
@@ -114,6 +132,10 @@ Inbox 行一旦持久化，即使业务处理因锁竞争暂时失败也向 Stri
 短库存 hold 默认禁用 redirect 支付方式；Quote/订单过期后，租约 worker 还必须用稳定幂等键取消 Stripe
 PaymentIntent，防止浏览器保存的 `client_secret` 在本地取消后继续付款。若取消与成功竞态，则仍按真实成功资金
 入 Inbox/reconciliation。开放长异步支付前必须另行定义 reservation 延期与资金晚到策略。
+
+Stripe API 的 Refund 对象没有 `livemode` 字段；API 响应的模式来自已校验的密钥配置，
+Webhook 的模式来自已验签的事件 envelope。绑定退款引用不得将 processing/requires_action 回退为
+submitted，终态由 Provider Inbox 推进。
 
 真实渠道退款采用两阶段：`refund_requests` 先以关系化行预留可退数量和金额，渠道确认前不修改订单、
 库存或成功退款账本；只有签名 Webhook/API 响应确认 `succeeded` 后，才在单事务写 payment/refund、

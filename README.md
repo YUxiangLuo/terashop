@@ -32,7 +32,9 @@ supabase/migrations/
 ├── 20260830070000_checkout_reservations.sql # Quote/库存预占/支付确认转换/过期释放
 ├── 20260830080000_provider_payments.sql # Provider Inbox/外部资金事实/异步退款请求
 ├── 20260830090000_paypal_payments.sql # PayPal Order/Capture/reversal/退款轮询边界
-└── 20260830100000_stripe_best_practices.sql # Stripe 精确资金/乱序状态/退款父引用加固
+├── 20260830100000_stripe_best_practices.sql # Stripe 精确资金/乱序状态/退款父引用加固
+├── 20260830110000_payment_command_safety.sql # PayPal 捕获/取消互斥、手工收款与渠道终态
+└── 20260830120000_refund_fulfillment_quantities.sql # 退款取消数量/履约预留与历史回填
 
 supabase/functions/
 ├── stripe-create-payment-intent/ / stripe-webhook/ / stripe-create-refund/
@@ -41,7 +43,7 @@ supabase/functions/
 ├── paypal-create-refund/           # admin 鉴权 + PayPal Payments v2 退款
 └── paypal-reconcile-refunds/       # service-only pending refund 轮询
 
-tests/                              # bun test，共 174 例
+tests/                              # bun test，共 206 例
 ├── helpers.ts                      # API/RPC/认证/库存 辅助函数
 ├── catalog.test.ts                 # 商品目录与视图
 ├── orders.test.ts                  # 下单金额/折扣/运费/税/取消/RLS
@@ -55,7 +57,10 @@ tests/                              # bun test，共 174 例
 ├── provider-payments.test.ts       # Provider Inbox/资金异常/异步退款/并发预留
 ├── stripe-edge.test.ts             # Stripe 签名、金额转换、PII 归一化与 HTTP 幂等
 ├── paypal-payments.test.ts         # PayPal capture/reversal/异步退款与库存闭环
-└── paypal-edge.test.ts             # OAuth、postback 验签、DTO/PII 与 PayPal 幂等
+├── paypal-edge.test.ts             # OAuth、postback 验签、DTO/PII 与 PayPal 幂等
+├── payment-workflows.test.ts       # 真实 handler + mock 渠道、捕获/取消、退款重试与手工支付
+├── payment-concurrency.test.ts     # 数据库事务屏障，验证捕获/取消两种锁交错
+└── refund-fulfillment.test.ts       # 退款取消量/履约并发/回库与安全 DTO
 ```
 
 ### 商品域（Shopify 变体模型）
@@ -138,7 +143,7 @@ POST /rest/v1/rpc/cancel_order {"order_id":"...","reason":"..."}
 # 已支付订单必须等待 Order Edit / Adjustment 流程，不允许原地改价
 POST /rest/v1/rpc/update_order_address {"order_id":"...","address":{...}}
 
-# 管理端（admin）
+# 管理端（admin）；线上意图仍可扣款时禁止 mark_order_paid，必须先完成渠道撤销/对账
 POST /rest/v1/rpc/mark_order_paid      {"order_id":"...","provider":"manual"}
 POST /rest/v1/rpc/create_fulfillment   {"order_id":"...","items":[...],"carrier":"顺丰","tracking_number":"..."}
 # 后台重试优先使用 V2（幂等键为店铺级）
@@ -160,6 +165,8 @@ POST /rest/v1/rpc/refund_order {"order_id":"...","items":[{"order_item_id":"..."
 POST /rest/v1/rpc/refund_order_v2 {"order_id":"...","idempotency_key":"manual-refund-id","items":[...]}
 # 客户/管理员读取安全交易账本 DTO（只返回订单归属人的账本）
 POST /rest/v1/rpc/get_order_ledger     {"order_id":"..."}
+# 同样限制归属；返回每行 ordered/fulfilled/cancelled/reserved/available_quantity
+POST /rest/v1/rpc/get_order_fulfillment_balance {"order_id":"..."}
 
 # Storefront 创建 Stripe PaymentIntent：网关 + 函数双重校验 JWT，client_secret 不进入数据库
 POST /functions/v1/stripe-create-payment-intent
@@ -176,6 +183,7 @@ POST /functions/v1/paypal-capture-order {"payment_intent_id":"..."}
 POST /functions/v1/paypal-webhook
 
 # 下列 RPC 仅授予 service_role，只供 Edge Function/Worker 调用，禁止发给浏览器
+POST /rest/v1/rpc/prepare_paypal_capture {"payment_intent_id":"...","customer_id":"..."}
 POST /rest/v1/rpc/ingest_payment_provider_event {...verified-normalized-event...}
 POST /rest/v1/rpc/retry_payment_provider_events {"max_events":50}
 POST /rest/v1/rpc/claim_outbox_events           {"worker_id":"worker-1","max_events":50,"lease_seconds":300}
@@ -192,6 +200,9 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
 补充说明：
 - `inventory_movements` 只记录 `on_hand` 事实变化；Quote 预占不伪造流水，支付确认时才写 `order` 扣减
 - 新 Quote 流程使用 `available = on_hand - active reserved`；V1/V2 兼容下单仍立即扣库存但受 reservation guard 保护
+- 按行退款优先取消未履约数量，已发货部分不重复计入取消；pending 退款预留取消量，成功后固化，失败/取消释放
+- 可新增履约数量扣除已成功取消和活跃退款预留；全额退款订单不可新增履约，即使退款未指定商品行
+- 有按行退款事实/活跃请求的履约不可再取消以释放数量；通过安全 DTO 查询剩余数量，不用原订购量自行推算
 - `product_reviews`：每客每商品一条，需 admin 审核后公开；作者改内容自动回落待审
 - 分类自连接不支持 PostgREST 内嵌查询，前端拉平铺列表自行组树即可
 - 金额口径：`order_items.total` = 行毛额（单价×数量），`line_total` = 行净额（扣行折扣）；
@@ -246,6 +257,8 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
    `PAYPAL_LIVEMODE`；完整事件列表见 [`supabase/functions/README.md`](supabase/functions/README.md)。
 2. Storefront 调用 `paypal-create-order` 获取可信 approval URL；买家批准后调用
    `paypal-capture-order`。Order ID 绑定内部意图，实际资金账本使用不同的 Capture ID。
+   Capture POST 前在数据库持久化捕获请求并锁定取消；结果不明时保留保护，重试先 GET 且复用幂等键。
+   Quote 到期仍释放库存；晚到资金进入对账，不通过延长库存 hold 掩盖异常。
 3. `paypal-webhook` 使用 OAuth2 和 PayPal 官方 postback API 验证 transmission headers；验签后才写 Inbox。
 4. `COMPLETED` Capture 才消费库存；`PENDING` 等待后续事件；`REVERSED` 只记外部资金异常并阻止继续退款，
    不会伪造本地退款或静默改写订单。
@@ -256,7 +269,7 @@ POST /rest/v1/rpc/anonymize_user       {"p_user_id":"..."}
 ## 开发检查
 
 ```bash
-bun run test             # reset + 174 个串行 API/并发回归
+bun run test             # reset + 206 个串行 API/handler/并发回归
 bun run db:lint          # public API + commerce 账本 schema lint
 bun run types:check      # 检查生成类型是否漂移
 bun run typecheck        # TypeScript 静态检查

@@ -652,7 +652,7 @@ export interface StripeRefundResponse extends Record<string, unknown> {
   currency: string;
   status: string;
   created: number;
-  livemode: boolean;
+  // Unlike PaymentIntent and Event, Stripe Refund has no livemode field.
   payment_intent?: string | null;
   charge?: string | null;
   metadata?: Record<string, string>;

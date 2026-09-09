@@ -1663,6 +1663,10 @@ export type Database = {
         Returns: Json
       }
       get_order_checkout_quote: { Args: { order_id: string }; Returns: Json }
+      get_order_fulfillment_balance: {
+        Args: { order_id: string }
+        Returns: Json
+      }
       get_order_ledger: { Args: { order_id: string }; Returns: Json }
       get_payment_intent_for_customer: {
         Args: {
@@ -1748,6 +1752,10 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      prepare_paypal_capture: {
+        Args: { customer_id: string; payment_intent_id: string }
+        Returns: Json
       }
       price_checkout: {
         Args: {
