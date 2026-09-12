@@ -482,11 +482,12 @@ begin
   if tg_op <> 'UPDATE' then
     raise exception 'locked order items are immutable';
   end if;
-  -- generated column line_total 在 BEFORE trigger 的 NEW 中尚未重算，会暂时为 null。
+  -- Generated line_total / line_key are not yet recomputed in BEFORE NEW;
+  -- their source fields (including attributes) remain protected.
   if coalesce(current_setting('commerce.refund_write', true), 'off') <> 'on'
-     or (to_jsonb(new) - array['refunded_quantity', 'refunded_amount', 'line_total'])
+     or (to_jsonb(new) - array['refunded_quantity', 'refunded_amount', 'line_total', 'line_key'])
         is distinct from
-        (to_jsonb(old) - array['refunded_quantity', 'refunded_amount', 'line_total'])
+        (to_jsonb(old) - array['refunded_quantity', 'refunded_amount', 'line_total', 'line_key'])
      or new.refunded_quantity < old.refunded_quantity
      or new.refunded_amount < old.refunded_amount then
     raise exception 'locked order item snapshot is immutable';

@@ -125,7 +125,9 @@ async function fixture() {
       const refundPid = await refundReady.promise;
       await waitBlockedBy(gatePid);
       quote = rpc('create_checkout_quote', {
-        items: variants.map(v => ({ variant_id: v.variantId, quantity: 1 })), address: TEST_ADDRESS,
+        items: variants.flatMap(v => ['Alice', 'Bob'].map(engraving => ({
+          variant_id: v.variantId, quantity: 1, attributes: { engraving },
+        }))), address: TEST_ADDRESS,
         idempotency_key: crypto.randomUUID(),
       }, buyer.token);
       await waitBlockedBy(refundPid);
@@ -136,6 +138,7 @@ async function fixture() {
         from public.orders o where o.id=${order.id}::uuid`;
       expect(refundResult).toMatchObject({ completed: true });
       expect(quoteResult.status).toBe(200);
+      expect((quoteResult.data as { lines: unknown[] }).lines).toHaveLength(4);
       const unpaid = mode === 'cancel' || mode === 'expiry';
       expect(row.financial_status).toBe(unpaid ? 'pending' : 'refunded');
       expect(Number(row.refunded)).toBe(unpaid ? 0 : 20);

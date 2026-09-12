@@ -3,6 +3,138 @@
 begin;
 set local check_function_bodies = false;
 
+-- Child ownership is immutable. This also keeps the deferred validator's routing stable.
+CREATE FUNCTION private.catalog_product_id(p_table text, p_row jsonb) RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+  select case p_table
+    when 'products' then (p_row ->> 'id')::uuid
+    when 'product_option_values' then (select product_id from public.product_options where id = (p_row ->> 'option_id')::uuid)
+    when 'variant_option_values' then (select product_id from public.product_variants where id = (p_row ->> 'variant_id')::uuid)
+    else (p_row ->> 'product_id')::uuid end;
+$$;
+
+CREATE FUNCTION private.guard_catalog_product() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_row jsonb := case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end;
+  v_parent text := case tg_table_name
+    when 'product_option_values' then 'option_id'
+    when 'variant_option_values' then 'variant_id'
+    else 'product_id' end;
+  v_product_id uuid := private.catalog_product_id(tg_table_name, v_row);
+begin
+  if tg_op = 'UPDATE' and (
+    to_jsonb(new) -> 'id' is distinct from to_jsonb(old) -> 'id'
+    or to_jsonb(new) -> v_parent is distinct from to_jsonb(old) -> v_parent
+  ) then
+    raise exception 'catalog identity and ownership are immutable; delete and recreate the association';
+  end if;
+  if tg_table_name <> 'products' then
+    -- Child UPDATE/DELETE may already own its row. Never wait backwards for a
+    -- product publisher. Touching a non-key column supplies a real write conflict
+    -- at snapshot isolation without blocking checkout's parent FK KEY SHARE.
+    perform 1 from public.products where id = v_product_id for no key update nowait;
+    if not found and tg_op = 'INSERT' then
+      -- Never let the FK wait for an invisible/uncommitted ancestor AFTER we
+      -- skipped its product lock. Cross-transaction imports must commit parents first.
+      raise exception using errcode = '23503', message = 'catalog parent must exist before inserting a child';
+    end if;
+    update public.products set updated_at = now() where id = v_product_id;
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.assert_catalog_product() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_product_id uuid := private.catalog_product_id(tg_table_name,
+    case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end);
+  v_status text;
+begin
+  select status into v_status from public.products where id = v_product_id;
+  if not found then return null; end if; -- deleted parent / cascading children
+  if exists (
+    select 1 from public.variant_option_values vo
+    join public.product_variants v on v.id = vo.variant_id
+    join public.product_option_values ov on ov.id = vo.option_value_id
+    join public.product_options o on o.id = ov.option_id
+    where v.product_id = v_product_id and o.product_id <> v.product_id
+  ) then raise exception 'variant option must belong to the same product'; end if;
+  if exists (
+    select 1 from public.variant_option_values vo
+    join public.product_variants v on v.id = vo.variant_id
+    join public.product_option_values ov on ov.id = vo.option_value_id
+    where v.product_id = v_product_id
+    group by v.id, ov.option_id having count(*) > 1
+  ) then raise exception 'variant may select only one value per option'; end if;
+  if exists (
+    select 1 from public.product_images i join public.product_variants v on v.id = i.variant_id
+    where i.product_id = v_product_id and v.product_id <> i.product_id
+  ) then raise exception 'image variant must belong to the same product'; end if;
+  if v_status = 'active' then
+    if not exists (select 1 from public.product_variants where product_id = v_product_id) then
+      raise exception 'published product requires a variant';
+    end if;
+    if exists (
+      select 1 from public.product_variants v
+      where v.product_id = v_product_id and v.is_active
+      and (select count(*) from public.variant_option_values where variant_id = v.id)
+          <> (select count(*) from public.product_options where product_id = v_product_id)
+    ) then raise exception 'published variant requires one value for every option'; end if;
+    if exists (
+      select 1 from public.product_variants v
+      where v.product_id = v_product_id and v.is_active
+      group by array(select option_value_id from public.variant_option_values
+                     where variant_id = v.id order by option_value_id)
+      having count(*) > 1
+    ) then raise exception 'published variants must have unique option combinations'; end if;
+  end if;
+  return null;
+end;
+$$;
+
+CREATE FUNCTION private.guard_category_tree() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  -- Serialize graph edits, not readers. Fail fast instead of forming a row/graph
+  -- lock inversion; callers retry the entire catalog transaction on 55P03/40001.
+  if not pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended('catalog.category_tree', 0)) then
+    raise exception using errcode = '55P03', message = 'category tree is being edited; retry transaction';
+  end if;
+  update private.category_tree_guard set revision = revision + 1 where singleton;
+  return null;
+end;
+$$;
+
+CREATE FUNCTION private.assert_category_tree() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+begin
+  if tg_op = 'UPDATE' and new.id <> old.id then
+    raise exception 'category identity is immutable';
+  end if;
+  if exists (
+    with recursive ancestors as (
+      select parent_id from public.categories where id = new.id
+      union
+      select c.parent_id from public.categories c join ancestors a on c.id = a.parent_id
+    ) select 1 from ancestors where parent_id = new.id
+  ) then raise exception 'category hierarchy cannot contain a cycle'; end if;
+  return null;
+end;
+$$;
+
 CREATE FUNCTION private.enforce_metafield_definition_compatibility() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''

@@ -34,7 +34,6 @@ test('SQL lint 覆盖业务函数与每个触发器挂载表，精确例外可�
     ['private.canonical_variant_quantities(jsonb)', null],
     ['private.canonical_order_item_quantities(jsonb)', null],
     ['private.assert_checkout_quote_totals()', 'commerce.checkout_quotes'],
-    ['private.assert_checkout_quote_totals()', 'commerce.checkout_quote_lines'],
     ['private.assert_refund_request_lines()', 'commerce.refund_requests'],
     ['private.assert_refund_request_lines()', 'commerce.refund_request_lines'],
   ].sort());

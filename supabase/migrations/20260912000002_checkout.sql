@@ -184,6 +184,96 @@ begin
 end;
 $_$;
 
+CREATE FUNCTION private.canonical_checkout_lines(p_items jsonb) RETURNS jsonb
+    LANGUAGE plpgsql STABLE
+    SET search_path TO ''
+    AS $$
+declare
+  v_item jsonb;
+  v_attributes jsonb;
+  v_key text;
+  v_result jsonb;
+begin
+  -- Keep the inventory quantity validator separate from commercial line identity.
+  perform private.canonical_variant_quantities(p_items);
+  for v_item in select value from jsonb_array_elements(p_items) loop
+    if v_item - array['variant_id', 'quantity', 'attributes', 'line_key'] <> '{}'::jsonb then
+      raise exception 'unsupported checkout line field';
+    end if;
+    v_attributes := coalesce(v_item -> 'attributes', '{}'::jsonb);
+    if not private.valid_line_attributes(v_attributes) then
+      raise exception 'attributes must be a text object: at most 20 keys, 64-character keys, 500-character values and 8192 bytes';
+    end if;
+    v_key := private.checkout_line_key((v_item ->> 'variant_id')::uuid, v_attributes);
+    if v_item ? 'line_key' and v_item ->> 'line_key' is distinct from v_key then
+      raise exception 'line_key does not match variant and attributes';
+    end if;
+  end loop;
+  select jsonb_agg(jsonb_build_object(
+    'variant_id', x.variant_id, 'attributes', x.attributes,
+    'line_key', private.checkout_line_key(x.variant_id, x.attributes), 'quantity', x.quantity
+  ) order by x.variant_id, private.checkout_line_key(x.variant_id, x.attributes))
+  into v_result from (
+    select (e ->> 'variant_id')::uuid variant_id,
+           coalesce(e -> 'attributes', '{}'::jsonb) attributes,
+           sum((e ->> 'quantity')::integer)::integer quantity
+    from jsonb_array_elements(p_items) e
+    group by (e ->> 'variant_id')::uuid, coalesce(e -> 'attributes', '{}'::jsonb)
+  ) x;
+  return v_result;
+end;
+$$;
+
+CREATE FUNCTION private.allocate_price_discount(p_amount numeric, p_variant_id uuid DEFAULT NULL) RETURNS void
+    LANGUAGE plpgsql
+    SET search_path TO ''
+    AS $$
+declare
+  v_base numeric;
+  v_allocated numeric;
+  v_share record;
+begin
+  if p_amount <= 0 then return; end if;
+  select sum(unit_price * quantity - discount_total) into v_base from _price_lines
+  where p_variant_id is null or variant_id = p_variant_id;
+  if v_base is null or p_amount > v_base or p_amount <> round(p_amount, 2) then
+    raise exception 'discount exceeds line capacity';
+  end if;
+  -- First allocate across variants, then across their commercial lines. This
+  -- preserves SKU-level benefits when a customer changes/splits text attributes.
+  if p_variant_id is null then
+    for v_share in
+      with weights as (
+        select variant_id, sum(unit_price * quantity - discount_total) * 100 capacity
+        from _price_lines group by variant_id
+      ), shares as (
+        select variant_id, div(p_amount * 100 * capacity, v_base * 100) floor_share,
+               mod(p_amount * 100 * capacity, v_base * 100) remainder from weights
+      ) select variant_id, floor_share + case when row_number() over (order by remainder desc, variant_id)
+        <= p_amount * 100 - sum(floor_share) over () then 1 else 0 end minor_share from shares
+    loop
+      perform private.allocate_price_discount(v_share.minor_share / 100, v_share.variant_id);
+    end loop;
+    return;
+  end if;
+  -- Exact integer cents within a variant; canonical line_key order breaks ties.
+  with weights as (
+    select idx, (unit_price * quantity - discount_total) * 100 capacity from _price_lines
+    where p_variant_id is null or variant_id = p_variant_id
+  ), shares as (
+    select idx, div(p_amount * 100 * capacity, v_base * 100) floor_share,
+           mod(p_amount * 100 * capacity, v_base * 100) remainder from weights
+  ), allocation as (
+    select idx, floor_share + case when row_number() over (order by remainder desc, idx)
+      <= p_amount * 100 - sum(floor_share) over () then 1 else 0 end minor_share from shares
+  ), applied as (
+    update _price_lines l set discount_total = l.discount_total + a.minor_share / 100
+    from allocation a where a.idx = l.idx returning a.minor_share
+  ) select coalesce(sum(minor_share), 0) / 100 into v_allocated from applied;
+  if v_allocated <> p_amount then raise exception 'discount allocation does not match its target'; end if;
+end;
+$$;
+
 CREATE FUNCTION private.checkout_pricing_hash(p_price jsonb) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT
     SET search_path TO ''
@@ -198,7 +288,7 @@ CREATE FUNCTION private.checkout_pricing_hash(p_price jsonb) RETURNS text
     'shipping_method_id', p_price -> 'shipping_method_id',
     'shipping_method_name', p_price -> 'shipping_method_name',
     'lines', (
-      select coalesce(jsonb_agg(e.value order by e.value ->> 'variant_id'), '[]'::jsonb)
+      select coalesce(jsonb_agg(e.value order by e.value ->> 'variant_id', e.value ->> 'line_key'), '[]'::jsonb)
       from jsonb_array_elements(p_price -> 'lines') e
     ),
     'promotions', (
@@ -238,6 +328,9 @@ CREATE FUNCTION private.checkout_quote_json(p_quote commerce.checkout_quotes) RE
     'updated_at', p_quote.updated_at,
     'lines', (
       select coalesce(jsonb_agg(jsonb_build_object(
+        'id', ql.id,
+        'line_key', ql.line_key,
+        'attributes', ql.attributes,
         'variant_id', ql.variant_id,
         'product_id', ql.product_id,
         'sku', ql.sku,
@@ -250,7 +343,7 @@ CREATE FUNCTION private.checkout_quote_json(p_quote commerce.checkout_quotes) RE
         'total', ql.total,
         'line_total', ql.line_total,
         'track_inventory', ql.track_inventory
-      ) order by ql.variant_id), '[]'::jsonb)
+      ) order by ql.variant_id, ql.line_key), '[]'::jsonb)
       from commerce.checkout_quote_lines ql where ql.quote_id = p_quote.id
     )
   );
@@ -307,17 +400,14 @@ begin
     raise exception 'quoted order amounts do not match reservation';
   end if;
   if exists (
-    with quoted as (
-      select ql.variant_id, sum(ql.quantity)::integer quantity
-      from commerce.checkout_quote_lines ql where ql.quote_id = v_quote.id
-      group by ql.variant_id
-    ), ordered as (
-      select oi.variant_id, sum(oi.quantity)::integer quantity
-      from public.order_items oi where oi.order_id = p_order_id
-      group by oi.variant_id
-    )
-    select 1 from quoted q full join ordered o using (variant_id)
-    where q.variant_id is null or o.variant_id is null or q.quantity <> o.quantity
+    select 1 from (select * from commerce.checkout_quote_lines where quote_id = v_quote.id) q
+    full join (select * from public.order_items where order_id = p_order_id) o using (id)
+    where q.id is null or o.id is null
+       or (q.variant_id, q.product_id, q.attributes, q.line_key, q.quantity,
+           q.sku, q.name, q.variant_title, q.options, q.unit_price, q.total, q.discount_total)
+          is distinct from
+          (o.variant_id, o.product_id, o.attributes, o.line_key, o.quantity,
+           o.sku, o.name, o.variant_title, o.options, o.unit_price, o.total, o.discount_total)
   ) then
     raise exception 'quoted order items do not match reservation';
   end if;
@@ -327,9 +417,11 @@ begin
   where id = v_quote.id returning * into v_quote;
 
   for v_line in
-    select ql.* from commerce.checkout_quote_lines ql
+    select ql.variant_id, ql.location_id, sum(ql.quantity)::integer quantity
+    from commerce.checkout_quote_lines ql
     where ql.quote_id = v_quote.id and ql.track_inventory
-    order by ql.variant_id
+    group by ql.variant_id, ql.location_id
+    order by ql.variant_id, ql.location_id
   loop
     select il.on_hand into v_on_hand from public.inventory_levels il
     where il.variant_id = v_line.variant_id and il.location_id = v_line.location_id
@@ -386,7 +478,7 @@ begin
     raise exception 'items must be a non-empty array';
   end if;
 
-  items := private.canonical_variant_quantities(items);
+  items := private.canonical_checkout_lines(items);
   if jsonb_array_length(items) > 50 or (select sum((e->>'quantity')::integer) from jsonb_array_elements(items) e) > 100 then
     raise exception 'checkout is limited to 50 lines and 100 units';
   end if;
@@ -487,7 +579,7 @@ begin
   for v_line in select * from jsonb_array_elements(v_price -> 'lines') loop
     insert into public.order_items (
       order_id, variant_id, product_id, sku, name, variant_title,
-      options, unit_price, quantity, discount_total, total
+      options, attributes, unit_price, quantity, discount_total, total
     ) values (
       v_order.id,
       (v_line ->> 'variant_id')::uuid,
@@ -496,25 +588,25 @@ begin
       v_line ->> 'name',
       v_line ->> 'variant_title',
       v_line -> 'options',
+      v_line -> 'attributes',
       (v_line ->> 'unit_price')::numeric,
       (v_line ->> 'quantity')::int,
       (v_line ->> 'discount_total')::numeric,
       round((v_line ->> 'unit_price')::numeric * (v_line ->> 'quantity')::int, 2)
     );
 
-    if (v_line ->> 'track_inventory')::boolean then
-      update public.inventory_levels
-      set on_hand = on_hand - (v_line ->> 'quantity')::int
-      where variant_id = (v_line ->> 'variant_id')::uuid
-        and location_id = v_location_id
-      returning on_hand into v_on_hand;
+  end loop;
 
+  -- One inventory mutation per resource, regardless of commercial line count.
+  for v_item in select value from jsonb_array_elements(private.canonical_variant_quantities(items)) loop
+    if (select track_inventory from public.product_variants where id = (v_item ->> 'variant_id')::uuid) then
+      update public.inventory_levels set on_hand = on_hand - (v_item ->> 'quantity')::integer
+      where variant_id = (v_item ->> 'variant_id')::uuid and location_id = v_location_id
+      returning on_hand into v_on_hand;
       insert into public.inventory_movements
         (variant_id, location_id, delta, on_hand_after, reason, order_id, actor_id)
-      values (
-        (v_line ->> 'variant_id')::uuid, v_location_id,
-        -(v_line ->> 'quantity')::int, v_on_hand, 'order', v_order.id, v_uid
-      );
+      values ((v_item ->> 'variant_id')::uuid, v_location_id,
+        -(v_item ->> 'quantity')::integer, v_on_hand, 'order', v_order.id, v_uid);
     end if;
   end loop;
 
@@ -582,7 +674,6 @@ declare
   v_pct numeric;
   v_amount numeric(12, 2);
   v_base numeric(12, 2);
-  v_alloc_sum numeric(12, 2);
   v_room numeric(12, 2);
   v_unit_disc numeric(12, 2);
   v_buy integer;
@@ -602,6 +693,7 @@ begin
   if items is null or jsonb_typeof(items) <> 'array' or jsonb_array_length(items) = 0 then
     raise exception 'items must be a non-empty array';
   end if;
+  items := private.canonical_checkout_lines(items);
   v_country := private.normalize_checkout_address(address) ->> 'country';
   if shipping_method_id is not null and v_country is null then
     raise exception 'shipping requires an explicit destination country';
@@ -614,6 +706,8 @@ begin
   end if;
   create temporary table _price_lines (
     idx serial primary key,
+    line_key text,
+    attributes jsonb,
     variant_id uuid,
     product_id uuid,
     sku text,
@@ -636,15 +730,8 @@ begin
     promotion_id uuid, name text, code text, amount numeric(12, 2), stackable boolean
   ) on commit drop;
 
-  -- Canonical UUID order also determines equal-remainder tie breaks. UUID case,
-  -- cart permutation and splitting a variant across rows cannot change them.
-  for v_item in
-    select jsonb_build_object(
-      'variant_id', (e.value ->> 'variant_id')::uuid,
-      'quantity', sum((e.value ->> 'quantity')::int)) as line
-    from jsonb_array_elements(items) e
-    group by (e.value ->> 'variant_id')::uuid
-    order by (e.value ->> 'variant_id')::uuid
+  -- Canonical commercial lines: identical attributes merge; distinct ones survive.
+  for v_item in select value from jsonb_array_elements(items)
   loop
     if coalesce((v_item ->> 'quantity')::int, 0) <= 0 then
       raise exception 'quantity must be positive';
@@ -670,11 +757,11 @@ begin
     join public.product_option_values pov on pov.id = vov.option_value_id
     join public.product_options po on po.id = pov.option_id
     where vov.variant_id = v_variant.id;
-    insert into _price_lines (variant_id, product_id, sku, name, variant_title, options,
+    insert into _price_lines (line_key, attributes, variant_id, product_id, sku, name, variant_title, options,
                               quantity, unit_price, category_ids, track_inventory)
-    values (v_variant.id, v_variant.product_id, v_variant.sku, v_variant.product_name,
-            v_variant_title, v_options, (v_item ->> 'quantity')::int, v_variant.price,
-            v_cat_ids, v_variant.track_inventory);
+    values (v_item ->> 'line_key', v_item -> 'attributes', v_variant.id, v_variant.product_id, v_variant.sku,
+            v_variant.product_name, v_variant_title, v_options, (v_item ->> 'quantity')::int,
+            v_variant.price, v_cat_ids, v_variant.track_inventory);
   end loop;
   select coalesce(sum(unit_price * quantity), 0) into v_subtotal from _price_lines;
 
@@ -725,15 +812,16 @@ begin
       where public._line_in_scope(v_promo.id, 'apply', l.variant_id, l.product_id, l.category_ids);
       if v_scope_qty > 0 and v_scope_qty >= v_min_qty then
         for v_line in
-          select * from _price_lines l
+          select l.variant_id, sum(l.unit_price * l.quantity) gross,
+                 sum(l.unit_price * l.quantity - l.discount_total) room
+          from _price_lines l
           where public._line_in_scope(v_promo.id, 'apply', l.variant_id, l.product_id, l.category_ids)
+          group by l.variant_id order by l.variant_id
         loop
-          v_room := v_line.unit_price * v_line.quantity - v_line.discount_total;
-          v_disc := least(round(v_line.unit_price * v_line.quantity * v_pct / 100, 2), v_room);
-          if v_disc > 0 then
-            update _price_lines set discount_total = discount_total + v_disc where idx = v_line.idx;
-            v_amount := v_amount + v_disc;
-          end if;
+          -- Customer-controlled text must not multiply percentage-rounding benefits.
+          v_disc := least(round(v_line.gross * v_pct / 100, 2), v_line.room);
+          perform private.allocate_price_discount(v_disc, v_line.variant_id);
+          v_amount := v_amount + v_disc;
         end loop;
       end if;
     when 'buy_x_get_y' then
@@ -755,9 +843,11 @@ begin
         v_free := (floor(v_scope_qty / (v_buy + v_get)))::int * v_get;
       end if;
       for v_line in
-        select * from _price_lines l
+        select l.variant_id, l.unit_price, sum(l.quantity)::integer quantity, sum(l.discount_total) discount_total
+        from _price_lines l
         where public._line_in_scope(v_promo.id, v_get_role, l.variant_id, l.product_id, l.category_ids)
-        order by l.unit_price asc, l.idx
+        group by l.variant_id, l.unit_price
+        order by l.unit_price, l.variant_id
       loop
         exit when v_free <= 0;
         v_room := v_line.unit_price * v_line.quantity - v_line.discount_total;
@@ -766,7 +856,7 @@ begin
           v_take := least(v_free, v_line.quantity, floor(v_room / v_unit_disc)::int);
           if v_take > 0 then
             v_disc := v_take * v_unit_disc;
-            update _price_lines set discount_total = discount_total + v_disc where idx = v_line.idx;
+            perform private.allocate_price_discount(v_disc, v_line.variant_id);
             v_amount := v_amount + v_disc;
             v_free := v_free - v_take;
           end if;
@@ -804,31 +894,7 @@ begin
 
     if v_amount > 0 then
       if v_promo.type in ('order_percentage', 'order_fixed') then
-        v_base := v_subtotal - (select coalesce(sum(discount_total), 0) from _price_lines);
-        -- Largest remainder in integer minor units. NUMERIC div/mod are exact
-        -- even when the product exceeds bigint or a rounded quotient is close
-        -- to the next integer. Ties use the canonical line/UUID order above.
-        with weights as (
-          select idx, (unit_price * quantity - discount_total) * 100 as capacity
-          from _price_lines
-        ), shares as (
-          select idx,
-                 div(v_amount * 100 * capacity, v_base * 100) as floor_share,
-                 mod(v_amount * 100 * capacity, v_base * 100) as remainder
-          from weights
-        ), allocation as (
-          select idx, floor_share + case
-            when row_number() over (order by remainder desc, idx)
-                 <= v_amount * 100 - sum(floor_share) over () then 1 else 0 end as minor_share
-          from shares
-        ), applied as (
-          update _price_lines l set discount_total = l.discount_total + a.minor_share / 100
-          from allocation a where a.idx = l.idx returning a.minor_share
-        )
-        select coalesce(sum(minor_share), 0) / 100 into v_alloc_sum from applied;
-        if v_alloc_sum is distinct from v_amount then
-          raise exception 'discount allocation does not match its target';
-        end if;
+        perform private.allocate_price_discount(v_amount);
       end if;
       insert into _price_promos values (v_promo.id, v_promo.name, v_promo.code, v_amount, v_promo.stackable);
       v_applied := v_applied + 1;
@@ -859,6 +925,7 @@ begin
     (v_subtotal - v_discount_total + case when coalesce(v_tax_inc_ship, false) then v_shipping_total else 0 end)
     * coalesce(v_tax_rate, 0), 2);
   select jsonb_agg(jsonb_build_object(
+           'line_key', line_key, 'attributes', attributes,
            'variant_id', variant_id, 'product_id', product_id, 'sku', sku, 'name', name,
            'variant_title', variant_title, 'options', options, 'quantity', quantity,
            'unit_price', unit_price, 'discount_total', discount_total, 'track_inventory', track_inventory,
@@ -1296,7 +1363,7 @@ begin
     raise exception 'ttl_seconds must be between 60 and 1800';
   end if;
 
-  v_items := private.canonical_variant_quantities(items);
+  v_items := private.canonical_checkout_lines(items);
   if jsonb_array_length(v_items) > 50
      or (select sum((e.value ->> 'quantity')::integer)
          from jsonb_array_elements(v_items) e) > 100 then
@@ -1332,7 +1399,7 @@ begin
   where l.is_default and l.is_active order by l.id limit 1;
 
   -- 固定 variant 顺序，并锁 inventory level；所有库存写路径共用这把行锁。
-  for v_item in select value from jsonb_array_elements(v_items)
+  for v_item in select value from jsonb_array_elements(private.canonical_variant_quantities(v_items))
   loop
     select v.*, p.name product_name, p.status product_status
     into v_variant
@@ -1384,14 +1451,14 @@ begin
   loop
     insert into commerce.checkout_quote_lines (
       quote_id, variant_id, product_id, location_id, sku, name, variant_title,
-      options, unit_price, quantity, discount_total, total, line_total,
+      options, attributes, unit_price, quantity, discount_total, total, line_total,
       track_inventory
     ) values (
       v_quote.id, (v_line ->> 'variant_id')::uuid,
       (v_line ->> 'product_id')::uuid,
       case when (v_line ->> 'track_inventory')::boolean then v_location_id end,
       v_line ->> 'sku', v_line ->> 'name', v_line ->> 'variant_title',
-      v_line -> 'options', (v_line ->> 'unit_price')::numeric,
+      v_line -> 'options', v_line -> 'attributes', (v_line ->> 'unit_price')::numeric,
       (v_line ->> 'quantity')::integer,
       (v_line ->> 'discount_total')::numeric,
       round((v_line ->> 'unit_price')::numeric * (v_line ->> 'quantity')::integer, 2),
@@ -1470,10 +1537,11 @@ begin
   for v_item in
     select jsonb_build_object(
       'variant_id', ql.variant_id, 'location_id', ql.location_id,
-      'quantity', ql.quantity)
+      'quantity', sum(ql.quantity)::integer)
     from commerce.checkout_quote_lines ql
     where ql.quote_id = v_quote.id and ql.track_inventory
-    order by ql.variant_id
+    group by ql.variant_id, ql.location_id
+    order by ql.variant_id, ql.location_id
   loop
     select il.on_hand into v_on_hand from public.inventory_levels il
     where il.variant_id = (v_item ->> 'variant_id')::uuid
@@ -1502,8 +1570,8 @@ begin
   order by p.id for update of p;
 
   select jsonb_agg(jsonb_build_object(
-           'variant_id', ql.variant_id, 'quantity', ql.quantity)
-           order by ql.variant_id)
+           'variant_id', ql.variant_id, 'attributes', ql.attributes, 'quantity', ql.quantity)
+           order by ql.variant_id, ql.line_key)
   into v_items
   from commerce.checkout_quote_lines ql where ql.quote_id = v_quote.id;
   v_price := public.price_checkout(
@@ -1539,12 +1607,13 @@ begin
   for v_line in select value from jsonb_array_elements(v_price -> 'lines')
   loop
     insert into public.order_items (
-      order_id, variant_id, product_id, sku, name, variant_title,
-      options, unit_price, quantity, discount_total, total
+      id, order_id, variant_id, product_id, sku, name, variant_title,
+      options, attributes, unit_price, quantity, discount_total, total
     ) values (
+      (select ql.id from commerce.checkout_quote_lines ql where ql.quote_id = v_quote.id and ql.line_key = v_line ->> 'line_key'),
       v_order.id, (v_line ->> 'variant_id')::uuid,
       (v_line ->> 'product_id')::uuid, v_line ->> 'sku', v_line ->> 'name',
-      v_line ->> 'variant_title', v_line -> 'options',
+      v_line ->> 'variant_title', v_line -> 'options', v_line -> 'attributes',
       (v_line ->> 'unit_price')::numeric, (v_line ->> 'quantity')::integer,
       (v_line ->> 'discount_total')::numeric,
       round((v_line ->> 'unit_price')::numeric * (v_line ->> 'quantity')::integer, 2)
@@ -1598,7 +1667,7 @@ begin
   if coalesce(v_key, '') = '' or length(v_key) > 200 then
     raise exception 'idempotency_key is required and must be at most 200 characters';
   end if;
-  v_items := private.canonical_variant_quantities(items);
+  v_items := private.canonical_checkout_lines(items);
   v_address := private.normalize_checkout_address(address);
   v_request_hash := private.command_request_hash(jsonb_build_object(
     'items', v_items, 'address', v_address, 'address_id', address_id,

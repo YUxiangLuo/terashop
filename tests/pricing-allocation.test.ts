@@ -21,11 +21,23 @@ const decimal = (value: bigint | number) => {
 beforeAll(async () => {
   admin = await signup(); buyer = await signup(); await makeAdmin(admin.userId);
   const [product] = await checked<Array<{ id: string }>>(api('/rest/v1/products', {
-    service: true, method: 'POST', body: { slug: `allocation-${crypto.randomUUID()}`, name: 'allocation', status: 'active' },
+    service: true, method: 'POST', body: { slug: `allocation-${crypto.randomUUID()}`, name: 'allocation', status: 'draft' },
   }));
   productId = product.id;
   await checked(api('/rest/v1/product_variants', {
     service: true, method: 'POST', body: variants.map(id => ({ id, product_id: productId, sku: `ALLOC-${id}`, price: '0.01', track_inventory: false })),
+  }));
+  const [option] = await checked<Array<{ id: string }>>(api('/rest/v1/product_options', {
+    service: true, method: 'POST', body: { product_id: productId, name: 'Allocation case' },
+  }));
+  const values = await checked<Array<{ id: string; value: string }>>(api('/rest/v1/product_option_values', {
+    service: true, method: 'POST', body: variants.map(id => ({ option_id: option.id, value: id })),
+  }));
+  await checked(api('/rest/v1/variant_option_values', {
+    service: true, method: 'POST', body: values.map(value => ({ variant_id: value.value, option_value_id: value.id })),
+  }));
+  await checked(api(`/rest/v1/products?id=eq.${productId}`, {
+    service: true, method: 'PATCH', body: { status: 'active' },
   }));
 });
 afterAll(async () => {

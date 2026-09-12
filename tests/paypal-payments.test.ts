@@ -104,7 +104,7 @@ async function createFixture(): Promise<Fixture> {
   const products = await api('/rest/v1/products?select=id', {
     service: true,
     method: 'POST',
-    body: { slug: `paypal-${suffix}`, name: 'PayPal fixture', status: 'active' },
+    body: { slug: `paypal-${suffix}`, name: 'PayPal fixture', status: 'draft' },
   });
   const productId = (products.data as Array<{ id: string }>)[0].id;
   createdProducts.push(productId);
@@ -114,6 +114,10 @@ async function createFixture(): Promise<Fixture> {
     body: { product_id: productId, sku, price: 10, track_inventory: true },
   });
   const variantId = (variants.data as Array<{ id: string }>)[0].id;
+  const published = await api(`/rest/v1/products?id=eq.${productId}`, {
+    service: true, method: 'PATCH', body: { status: 'active' },
+  });
+  if (published.status >= 400) throw new Error(JSON.stringify(published.data));
   const stocked = await rpc('adjust_inventory', {
     variant_id: variantId,
     delta: 12,

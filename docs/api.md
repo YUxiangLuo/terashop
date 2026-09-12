@@ -15,6 +15,12 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 使用显式字段选择，不对变体使用 `select=*`：`cost` 有列权限保护。精确库存仅管理员可读，商城使用 `in_stock`。
 商品子资源继承发布状态；分类拉取平铺列表后在客户端组树，列表视图仅包含启用分类。
 
+管理员创建商品应先用 `status:"draft"`，依次建立变体、选项/值、规格关联、图片，最后 PATCH 为 `active`。
+草稿也禁止跨商品选项/图片和同一选项多值；发布商品必须有变体，启用变体必须选全规格且组合唯一（无选项时最多一个启用默认变体）。停用变体可暂存未完成配置。
+约束在事务提交时检查；增加规格或替换整个组合可先转草稿分步编辑，或在同一可信事务中完成全部修改。
+子资源 ID 和所属商品/选项/变体不可迁移，关联需删除重建。分类禁止任意长度的环。
+并发目录修改遇到 SQLSTATE `55P03` / `40001` 时重试整笔事务，不绕过约束。
+
 ## 推荐结账流程
 
 1. `price_checkout` 预览价格（匿名可用），不占库存，也不保证之后价格不变。
@@ -38,7 +44,7 @@ POST /rest/v1/rpc/create_order_from_quote
 不传地址时仅预估商品价格，不计目的地税；选择配送方式必须显式传国家。传入地址时 `country` 不可省略。
 Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会静默重定价。
 同一业务重试复用幂等键，不同参数必须使用新键。
-建单与报价均限制 50 行/100 件，每客户最多 5 个活跃 checkout（未转单 Quote + 未过期未付款订单）；转单及幂等重试不重复占名额。订单 DTO 的 `payment_expires_at` 是固定付款期限，不可延长。
+建单与报价均限制 50 条规范化商业行/100 件，每客户最多 5 个活跃 checkout（未转单 Quote + 未过期未付款订单）；转单及幂等重试不重复占名额。订单 DTO 的 `payment_expires_at` 是固定付款期限，不可延长。
 
 | RPC | 参数 / 用途 |
 | --- | --- |
@@ -51,6 +57,27 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 | `update_order_address` | `order_id`、`address` 或 `address_id`；仅符合编辑条件的非 Quote 订单 |
 
 查询限制订单/Quote 归属，部分接口另允许管理员。Quote、已支付订单及活动支付意图保护下的商业快照不可原地改价或改地址。
+
+## 商业行身份
+
+所有计价、报价和即时建单入口共用以下 `items` 合同：
+
+```json
+[
+  {"variant_id":"<同一个 SKU 的 uuid>","quantity":1,"attributes":{"engraving":"Alice"}},
+  {"variant_id":"<同一个 SKU 的 uuid>","quantity":1,"attributes":{"engraving":"Bob"}}
+]
+```
+
+- `attributes` 可省略，默认为 `{}`；必须是文本值对象，最多 20 个键、键长 1–64 字符且非空白、值长至多 500 字符，JSON 文本总长至多 8192 UTF-8 字节。
+- 相同变体和完全相同属性才合并数量；属性键顺序、UUID 大小写及输入重排不改变结果。文本大小写、空格仍有意义，不自动改写定制内容。
+- `line_key` 由服务器按变体/属性计算，与数量无关；响应会返回它，重传时必须匹配。其他未声明字段拒绝，不能提交自定价格、目录 `options` 或尚未实现的购买计划。
+- 预览返回 `line_key` / `attributes`；Quote 另返回独立行 `id`，转单沿用为 `order_items.id`。即时订单直接分配行 ID。履约和退款继续传 `order_item_id`，不能用 SKU 代替行 ID。
+- 库存按变体/仓库汇总；优惠先按变体确定，再按商业行分摊，不能通过添加属性放大促销收益。
+
+订单明细可查询 `/rest/v1/order_items?order_id=eq.<uuid>&select=id,line_key,variant_id,attributes,quantity,line_total`。
+属性是不可变交易快照中的客户文本，不是服务端授权指令；前端显示时必须转义，不应包含密钥或不必要的个人信息。终态 Quote 的地址/备注清理不包含行属性。
+当前只是保存商业配置，不包含收费定制、订阅、套装或持久购物车。
 
 ## 支付与退款
 

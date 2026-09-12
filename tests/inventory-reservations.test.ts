@@ -47,7 +47,7 @@ async function createStockFixture(label: string): Promise<StockFixture> {
   const { status: productStatus, data: products } = await api('/rest/v1/products?select=id', {
     service: true,
     method: 'POST',
-    body: { slug, name: `Reservation ${label}`, status: 'active' },
+    body: { slug, name: `Reservation ${label}`, status: 'draft' },
   });
   if (productStatus >= 400) throw new Error(JSON.stringify(products));
   const productId = (products as { id: string }[])[0].id;
@@ -59,6 +59,10 @@ async function createStockFixture(label: string): Promise<StockFixture> {
   });
   if (variantStatus >= 400) throw new Error(JSON.stringify(variants));
   const variantId = (variants as { id: string }[])[0].id;
+  const published = await api(`/rest/v1/products?id=eq.${productId}`, {
+    service: true, method: 'PATCH', body: { status: 'active' },
+  });
+  if (published.status >= 400) throw new Error(JSON.stringify(published.data));
   const stocked = await rpc('adjust_inventory', {
     variant_id: variantId, delta: 5, reason: 'restock', note: 'reservation test setup',
   }, admin.token);

@@ -32,6 +32,33 @@ CREATE FUNCTION private.valid_country_codes(p_countries text[]) RETURNS boolean
   from unnest(p_countries) as x(c);
 $_$;
 
+-- Only text attributes participate in commercial identity; never prices or options.
+CREATE FUNCTION private.valid_line_attributes(p_attributes jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE STRICT
+    SET search_path TO ''
+    AS $$
+  select case when jsonb_typeof(p_attributes) <> 'object' then false else
+    octet_length(p_attributes::text) <= 8192
+    and (select count(*) <= 20 and coalesce(bool_and(
+      length(key) between 1 and 64 and key ~ '[^[:space:]]'
+      and jsonb_typeof(value) = 'string' and length(value #>> '{}') <= 500
+    ), true) from jsonb_each(p_attributes)) end;
+$$;
+
+CREATE FUNCTION private.checkout_line_key(p_variant_id uuid, p_attributes jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE STRICT
+    SET search_path TO ''
+    AS $$
+  -- Fixed UUID and JSON text only; independent of quantity, object key order and session settings.
+  select encode(extensions.digest(convert_to(p_variant_id::text || ':' || p_attributes::text, 'UTF8'), 'sha256'), 'hex');
+$$;
+
+-- A write-conflict sentinel makes category graph validation safe even at REPEATABLE READ.
+CREATE TABLE private.category_tree_guard (singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), revision bigint NOT NULL DEFAULT 0);
+INSERT INTO private.category_tree_guard DEFAULT VALUES;
+ALTER TABLE private.category_tree_guard ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.category_tree_guard FROM PUBLIC, anon, authenticated, service_role;
+
 -- Tables: catalog, customers and transaction facts
 
 CREATE TABLE public.orders (
@@ -318,8 +345,11 @@ CREATE TABLE public.addresses (
 );
 
 CREATE TABLE commerce.checkout_quote_lines (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
     quote_id uuid NOT NULL,
     variant_id uuid NOT NULL,
+    attributes jsonb DEFAULT '{}'::jsonb NOT NULL CHECK (private.valid_line_attributes(attributes)),
+    line_key text GENERATED ALWAYS AS (private.checkout_line_key(variant_id, attributes)) STORED NOT NULL,
     product_id uuid NOT NULL,
     location_id uuid,
     sku text,
@@ -604,6 +634,8 @@ CREATE TABLE public.order_items (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     order_id uuid NOT NULL,
     variant_id uuid,
+    attributes jsonb DEFAULT '{}'::jsonb NOT NULL CHECK (private.valid_line_attributes(attributes)),
+    line_key text GENERATED ALWAYS AS (private.checkout_line_key(coalesce(variant_id, id), attributes)) STORED NOT NULL,
     product_id uuid,
     sku text,
     name text NOT NULL,
@@ -834,7 +866,10 @@ ALTER TABLE public.orders ALTER COLUMN order_number ADD GENERATED ALWAYS AS IDEN
 );
 
 ALTER TABLE ONLY commerce.checkout_quote_lines
-    ADD CONSTRAINT checkout_quote_lines_pkey PRIMARY KEY (quote_id, variant_id);
+    ADD CONSTRAINT checkout_quote_lines_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY commerce.checkout_quote_lines
+    ADD CONSTRAINT checkout_quote_lines_quote_line_key UNIQUE (quote_id, line_key);
 
 ALTER TABLE ONLY commerce.checkout_quotes
     ADD CONSTRAINT checkout_quotes_customer_id_idempotency_key_key UNIQUE (customer_id, idempotency_key);
@@ -988,6 +1023,9 @@ ALTER TABLE ONLY public.order_items
 
 ALTER TABLE ONLY public.order_items
     ADD CONSTRAINT order_items_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.order_items
+    ADD CONSTRAINT order_items_order_line_key UNIQUE (order_id, line_key);
 
 ALTER TABLE ONLY public.order_promotions
     ADD CONSTRAINT order_promotions_pkey PRIMARY KEY (order_id, promotion_id);

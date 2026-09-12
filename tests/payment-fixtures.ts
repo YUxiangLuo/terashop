@@ -35,12 +35,15 @@ export async function paymentFixture(admin: TestUser): Promise<PaymentFixture> {
   const suffix = crypto.randomUUID();
   const [product] = await checked<Array<{ id: string }>>(api('/rest/v1/products?select=id', {
     service: true, method: 'POST',
-    body: { slug: `workflow-${suffix}`, name: 'Payment workflow fixture', status: 'active' },
+    body: { slug: `workflow-${suffix}`, name: 'Payment workflow fixture', status: 'draft' },
   }));
   const sku = `WORKFLOW-${suffix}`;
   const [variant] = await checked<Array<{ id: string }>>(api('/rest/v1/product_variants?select=id', {
     service: true, method: 'POST',
     body: { product_id: product.id, sku, price: 10, track_inventory: true },
+  }));
+  await checked(api(`/rest/v1/products?id=eq.${product.id}`, {
+    service: true, method: 'PATCH', body: { status: 'active' },
   }));
   await checked(rpc('adjust_inventory', {
     variant_id: variant.id, delta: 100, reason: 'restock', note: 'workflow tests',

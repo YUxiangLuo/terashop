@@ -157,6 +157,20 @@ CREATE TRIGGER payments_no_truncate BEFORE TRUNCATE ON public.payments FOR EACH 
 CREATE TRIGGER payments_sync_transaction_insert AFTER INSERT ON public.payments FOR EACH ROW EXECUTE FUNCTION private.sync_legacy_payment_transaction();
 CREATE TRIGGER payments_sync_transaction_update AFTER UPDATE ON public.payments FOR EACH ROW EXECUTE FUNCTION private.sync_legacy_payment_transaction();
 CREATE TRIGGER payments_updated_at BEFORE UPDATE ON public.payments FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER categories_tree_write BEFORE INSERT OR UPDATE OR DELETE ON public.categories FOR EACH STATEMENT EXECUTE FUNCTION private.guard_category_tree();
+CREATE CONSTRAINT TRIGGER categories_tree_check AFTER INSERT OR UPDATE ON public.categories DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_category_tree();
+CREATE TRIGGER products_identity BEFORE UPDATE OF id ON public.products FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
+CREATE CONSTRAINT TRIGGER products_catalog_check AFTER INSERT OR UPDATE OF status ON public.products DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
+CREATE TRIGGER product_variants_catalog_write BEFORE INSERT OR DELETE OR UPDATE OF id, product_id, is_active ON public.product_variants FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
+CREATE CONSTRAINT TRIGGER product_variants_catalog_check AFTER INSERT OR DELETE OR UPDATE OF id, product_id, is_active ON public.product_variants DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
+CREATE TRIGGER product_options_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.product_options FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
+CREATE CONSTRAINT TRIGGER product_options_catalog_check AFTER INSERT OR UPDATE OR DELETE ON public.product_options DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
+CREATE TRIGGER product_option_values_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.product_option_values FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
+CREATE CONSTRAINT TRIGGER product_option_values_catalog_check AFTER INSERT OR UPDATE OR DELETE ON public.product_option_values DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
+CREATE TRIGGER variant_option_values_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.variant_option_values FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
+CREATE CONSTRAINT TRIGGER variant_option_values_catalog_check AFTER INSERT OR UPDATE OR DELETE ON public.variant_option_values DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
+CREATE TRIGGER product_images_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.product_images FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
+CREATE CONSTRAINT TRIGGER product_images_catalog_check AFTER INSERT OR UPDATE OR DELETE ON public.product_images DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
 CREATE TRIGGER product_reviews_remoderate BEFORE UPDATE ON public.product_reviews FOR EACH ROW EXECUTE FUNCTION public.review_edit_requires_moderation();
 CREATE TRIGGER product_reviews_updated_at BEFORE UPDATE ON public.product_reviews FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER product_variants_updated_at BEFORE UPDATE ON public.product_variants FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -270,6 +284,13 @@ CREATE POLICY "variant_option_values: public read published" ON public.variant_o
 
 -- Explicit schema, function, table and column privileges
 
+REVOKE ALL ON FUNCTION private.valid_line_attributes(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.checkout_line_key(uuid, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.catalog_product_id(text, jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.guard_catalog_product() FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.assert_catalog_product() FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.guard_category_tree() FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.assert_category_tree() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.active_reserved_quantity(p_variant_id uuid, p_location_id uuid, p_exclude_quote_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.allocate_refund_cancellation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.allocate_refund_request_cancellation() FROM PUBLIC;
@@ -279,6 +300,8 @@ REVOKE ALL ON FUNCTION private.assert_refund_request_lines() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.cancel_order(order_id uuid, reason text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.canonical_order_item_quantities(p_items jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.canonical_variant_quantities(p_items jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.canonical_checkout_lines(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.allocate_price_discount(numeric, uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.checkout_pricing_hash(p_price jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.checkout_quote_json(p_quote commerce.checkout_quotes) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.checkout_quote_to_outbox() FROM PUBLIC;
@@ -419,6 +442,7 @@ GRANT ALL ON FUNCTION private.refund_order(order_id uuid, items jsonb, amount nu
 GRANT ALL ON FUNCTION private.set_user_role(user_id uuid, role text) TO service_role;
 GRANT ALL ON FUNCTION private.update_order_address(order_id uuid, address jsonb, address_id uuid) TO service_role;
 GRANT ALL ON FUNCTION private.valid_country_codes(p_countries text[]) TO service_role, authenticated;
+GRANT EXECUTE ON FUNCTION private.valid_line_attributes(jsonb), private.checkout_line_key(uuid, jsonb) TO service_role;
 GRANT ALL ON FUNCTION public._line_in_scope(p_promotion_id uuid, p_role text, p_variant_id uuid, p_product_id uuid, p_category_ids uuid[]) TO service_role;
 GRANT ALL ON FUNCTION public.adjust_inventory(variant_id uuid, delta integer, reason text, note text, location_id uuid) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.anonymize_user(p_user_id uuid) TO service_role, authenticated;

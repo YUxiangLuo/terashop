@@ -427,7 +427,7 @@ describe('修复：库存口径与回补仓', () => {
     // 探针商品：无任何库存行
     const { data: prod } = await api('/rest/v1/products?select=id', {
       service: true, method: 'POST',
-      body: { slug: 'stock-probe', name: '库存探针', status: 'active' },
+      body: { slug: 'stock-probe', name: '库存探针', status: 'draft' },
     });
     const productId = (prod as { id: string }[])[0].id;
     const { data: variant } = await api('/rest/v1/product_variants?select=id', {
@@ -435,6 +435,10 @@ describe('修复：库存口径与回补仓', () => {
       body: { product_id: productId, sku: 'PROBE-1', price: 1 },
     });
     const probeVariant = (variant as { id: string }[])[0].id;
+    const published = await api(`/rest/v1/products?id=eq.${productId}`, {
+      service: true, method: 'PATCH', body: { status: 'active' },
+    });
+    expect(published.status).toBe(200);
 
     const listing = async () => {
       const { data } = await api('/rest/v1/product_listing?slug=eq.stock-probe&select=in_stock');

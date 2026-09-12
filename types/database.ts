@@ -560,8 +560,10 @@ export type Database = {
       }
       order_items: {
         Row: {
+          attributes: Json
           discount_total: number
           id: string
+          line_key: string
           line_total: number | null
           name: string
           options: Json
@@ -577,8 +579,10 @@ export type Database = {
           variant_title: string
         }
         Insert: {
+          attributes?: Json
           discount_total?: number
           id?: string
+          line_key?: string
           line_total?: number | null
           name: string
           options?: Json
@@ -594,8 +598,10 @@ export type Database = {
           variant_title?: string
         }
         Update: {
+          attributes?: Json
           discount_total?: number
           id?: string
+          line_key?: string
           line_total?: number | null
           name?: string
           options?: Json
