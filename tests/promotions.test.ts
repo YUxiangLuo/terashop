@@ -1,5 +1,5 @@
-import { describe, test, expect, beforeAll } from 'bun:test';
-import { api, rpc, signup, variantBySku, stockOf, CN_ADDRESS, type TestUser } from './helpers';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { api, rpc, signup, variantBySku, stockOf, TEST_ADDRESS, installTestTax, type TestUser } from './helpers';
 
 // seed 促销：
 //   WELCOME10  输码 满50打9折（独占）
@@ -15,7 +15,7 @@ let teeId: string;
 let kbId: string;
 
 const preview = (items: unknown, extra: Record<string, unknown> = {}, token?: string) =>
-  rpc('price_checkout', { items, ...extra }, token);
+  rpc('price_checkout', { items, address: TEST_ADDRESS, ...extra }, token);
 
 interface PriceResult {
   lines: { sku: string; quantity: number; unit_price: number; discount_total: number; line_total: number }[];
@@ -44,7 +44,10 @@ async function promoUsedCount(name: string): Promise<number> {
   return (data as { used_count: number }[])[0].used_count;
 }
 
+let removeTax: (() => Promise<void>) | undefined;
+afterAll(async () => { await removeTax?.(); });
 beforeAll(async () => {
+  removeTax = await installTestTax();
   user = await signup();
   cableId = await variantBySku('CABLE-1M');
   mugId = await variantBySku('MUG-350');
@@ -234,12 +237,12 @@ describe('下单落账', () => {
     const usedBefore = await promoUsedCount('马克杯满3件7折');
 
     const previewRes = (await preview(
-      [{ variant_id: mugId, quantity: 3 }], { address: CN_ADDRESS }, user.token
+      [{ variant_id: mugId, quantity: 3 }], { address: TEST_ADDRESS }, user.token
     )).data as PriceResult;
 
     const { data: order } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 3 }], address: CN_ADDRESS },
+      { items: [{ variant_id: mugId, quantity: 3 }], address: TEST_ADDRESS },
       user.token
     );
     const o = order as Record<string, unknown>;
@@ -282,7 +285,7 @@ describe('下单落账', () => {
     const items = [{ variant_id: kbId, quantity: 2 }]; // 178 ≥ 100
     const { data: order } = await rpc(
       'create_order',
-      { items, address: CN_ADDRESS, discount_code: 'SAVE20' },
+      { items, address: TEST_ADDRESS, discount_code: 'SAVE20' },
       user.token
     );
     expect(Number((order as Record<string, unknown>).discount_total)).toBeCloseTo(20);
@@ -290,7 +293,7 @@ describe('下单落账', () => {
     // 再次使用被拒
     const again = await rpc(
       'create_order',
-      { items, address: CN_ADDRESS, discount_code: 'SAVE20' },
+      { items, address: TEST_ADDRESS, discount_code: 'SAVE20' },
       user.token
     );
     expect((again.data as { message: string }).message).toBe('discount code already used');

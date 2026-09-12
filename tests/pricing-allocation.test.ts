@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { api, rpc, signup, makeAdmin, CN_ADDRESS, type TestUser } from './helpers';
+import { api, rpc, signup, makeAdmin, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked } from './payment-fixtures';
 import { decimalToMinorUnits } from '../supabase/functions/_shared/stripe.ts';
 
@@ -13,7 +13,7 @@ let admin: TestUser;
 let buyer: TestUser;
 let productId: string;
 const variants = Array.from({ length: 8 }, () => crypto.randomUUID()).sort();
-const minor = (value: number) => value === 0 ? 0n : BigInt(decimalToMinorUnits(value, 'CNY'));
+const minor = (value: number) => value === 0 ? 0n : BigInt(decimalToMinorUnits(value, 'USD'));
 const decimal = (value: bigint | number) => {
   const cents = BigInt(value);
   return `${cents / 100n}.${(cents % 100n).toString().padStart(2, '0')}`;
@@ -55,7 +55,7 @@ async function withPromotions<T>(specs: Record<string, unknown>[], run: (promos:
   }
 }
 const quotePrice = (quantities: number[], discountCode: string | null, shippingId?: string): Promise<Price> => checked(rpc('price_checkout', {
-  items: cart(quantities), address: CN_ADDRESS, discount_code: discountCode, shipping_method_id: shippingId,
+  items: cart(quantities), address: TEST_ADDRESS, discount_code: discountCode, shipping_method_id: shippingId,
 }));
 function allocate(capacities: bigint[], target: bigint): bigint[] {
   const base = capacities.reduce((a, b) => a + b, 0n);
@@ -142,7 +142,7 @@ test('购物车顺序、拆行和 UUID 大小写不改变折扣分摊', async ()
     const split = await checked<Price>(rpc('price_checkout', {
       items: variants.slice(0, 3).reverse().flatMap(id => [
         { variant_id: id.toUpperCase(), quantity: 1 }, { variant_id: id, quantity: 1 },
-      ]), address: CN_ADDRESS, discount_code: promo.code,
+      ]), address: TEST_ADDRESS, discount_code: promo.code,
     }));
     expect(split).toEqual(canonical);
   });
@@ -169,7 +169,7 @@ test('Quote、转单、成功账本与退款沿用同一分币结果', async () 
   await withPromotions([{
     type: 'order_fixed', params: { amount: '0.02' }, code: `LEDGER-${crypto.randomUUID()}`,
   }], async ([promo]) => {
-    const input = { items: cart([1, 1, 1, 1]), address: CN_ADDRESS, discount_code: promo.code };
+    const input = { items: cart([1, 1, 1, 1]), address: TEST_ADDRESS, discount_code: promo.code };
     const quote = await checked<{ id: string }>(rpc('create_checkout_quote', {
       ...input, idempotency_key: crypto.randomUUID(),
     }, buyer.token));
@@ -193,7 +193,7 @@ test('Quote、转单、成功账本与退款沿用同一分币结果', async () 
 
 async function withShipping<T>(freeAbove: number, run: (shippingId: string) => Promise<T>): Promise<T> {
   const [shipping] = await checked<Array<{ id: string }>>(api('/rest/v1/shipping_methods', {
-    service: true, method: 'POST', body: { name: 'threshold shipping', price: 10, free_above: freeAbove, countries: ['CN'] },
+    service: true, method: 'POST', body: { name: 'threshold shipping', price: 10, free_above: freeAbove, countries: ['US'] },
   }));
   try { return await run(shipping.id); }
   finally { await checked(api(`/rest/v1/shipping_methods?id=eq.${shipping.id}`, {
@@ -211,7 +211,7 @@ test('已经满额包邮时，零收益独占免邮不阻断后续减 5 元，�
     expect(price).toMatchObject({ discount_total: 5, shipping_total: 0 });
     expect(price.promotions).toEqual([expect.objectContaining({ promotion_id: fixed.id, amount: 5 })]);
     await checked(rpc('create_order', {
-      items: cart([1]), address: CN_ADDRESS, shipping_method_id: shipping,
+      items: cart([1]), address: TEST_ADDRESS, shipping_method_id: shipping,
     }, buyer.token));
     const [row] = await checked<Array<{ used_count: number }>>(api(`/rest/v1/promotions?id=eq.${free.id}&select=used_count`, { service: true }));
     expect(row.used_count).toBe(0);

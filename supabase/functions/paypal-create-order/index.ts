@@ -16,7 +16,7 @@ import {
   configuredRedirectUrl,
   extractPayPalCapture,
   type LocalPayPalIntent,
-  normalizeCnyAmount,
+  normalizeCheckoutAmount,
   normalizedPayPalCaptureData,
   payPalApiBase,
   payPalApprovalUrl,
@@ -89,7 +89,7 @@ Deno.serve(async (request) => {
     }
 
     const config = clientConfig();
-    const amount = normalizeCnyAmount(local.amount, local.currency);
+    const amount = normalizeCheckoutAmount(local.amount, local.currency);
     const brandName = optionalEnv('PAYPAL_BRAND_NAME', 'Tera Store');
     if (brandName.length > 127) throw new HttpError('PAYPAL_BRAND_NAME is too long', 500, 'server_misconfigured');
     const order = local.provider_reference

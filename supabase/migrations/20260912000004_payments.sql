@@ -1208,8 +1208,8 @@ CREATE FUNCTION private.provider_minor_amount(p_minor text, p_currency text) RET
     SET search_path TO ''
     AS $_$
 begin
-  if upper(p_currency) <> 'CNY' then
-    raise exception 'provider currency % is outside the current CNY capability', p_currency;
+  if upper(p_currency) <> 'USD' then
+    raise exception 'provider currency % is outside the current USD capability', p_currency;
   end if;
   if p_minor !~ '^[1-9][0-9]*$' then
     raise exception 'provider amount_minor must be a positive integer';

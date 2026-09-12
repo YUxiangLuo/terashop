@@ -361,27 +361,7 @@ begin
     raise exception 'items must be a non-empty array';
   end if;
 
-  -- ----- 地址：address_id 优先（校验归属权），否则直接用传入快照 -----
-  if address_id is not null then
-    select jsonb_build_object(
-      'receiver', a.receiver, 'phone', a.phone, 'country', a.country,
-      'province', a.province, 'city', a.city, 'detail', a.detail,
-      'postal_code', a.postal_code)
-    into v_address
-    from public.addresses a
-    where a.id = address_id and a.customer_id = v_uid;
-    if not found then
-      raise exception 'address not found';
-    end if;
-  else
-    v_address := address;
-  end if;
-  if v_address is null
-     or v_address ->> 'receiver' is null
-     or v_address ->> 'detail' is null then
-    raise exception 'address requires at least receiver and detail';
-  end if;
-  v_address := coalesce(v_address, '{}') || jsonb_build_object('country', coalesce(v_address ->> 'country', 'CN'));
+  v_address := private.resolve_checkout_address(v_uid, address, address_id);
 
   select id into v_location_id from public.locations where is_default and is_active limit 1;
 
@@ -594,7 +574,10 @@ begin
   if items is null or jsonb_typeof(items) <> 'array' or jsonb_array_length(items) = 0 then
     raise exception 'items must be a non-empty array';
   end if;
-  v_country := coalesce(address ->> 'country', 'CN');
+  v_country := private.normalize_checkout_address(address) ->> 'country';
+  if shipping_method_id is not null and v_country is null then
+    raise exception 'shipping requires an explicit destination country';
+  end if;
 
   if exists (select 1 from pg_catalog.pg_class
              where relname = '_price_lines' and relpersistence = 't'
@@ -842,7 +825,7 @@ begin
   end if;
 
   select t.rate, t.include_shipping into v_tax_rate, v_tax_inc_ship from public.tax_rates t
-  where t.is_active and (t.country = v_country or t.country = '*')
+  where v_country is not null and t.is_active and (t.country = v_country or t.country = '*')
   order by (t.country = '*') asc limit 1;
   v_tax_total := round(
     (v_subtotal - v_discount_total + case when coalesce(v_tax_inc_ship, false) then v_shipping_total else 0 end)
@@ -860,7 +843,7 @@ begin
     'lines', v_lines_json, 'subtotal', v_subtotal, 'discount_total', v_discount_total,
     'promotions', v_promos_json, 'shipping_method_id', v_shipping.id, 'shipping_method_name', v_shipping.name,
     'shipping_total', v_shipping_total, 'tax_total', v_tax_total,
-    'total', v_subtotal - v_discount_total + v_shipping_total + v_tax_total, 'currency', 'CNY'
+    'total', v_subtotal - v_discount_total + v_shipping_total + v_tax_total, 'currency', 'USD'
   );
 end;
 $$;
@@ -962,9 +945,9 @@ declare
 begin
   if p_address_id is not null then
     select jsonb_build_object(
-      'receiver', a.receiver, 'phone', a.phone, 'country', a.country,
-      'province', a.province, 'city', a.city, 'detail', a.detail,
-      'postal_code', a.postal_code)
+      'recipient_name', a.recipient_name, 'phone', a.phone, 'country', a.country,
+      'region', a.region, 'city', a.city, 'line1', a.line1,
+      'line2', a.line2, 'postal_code', a.postal_code)
     into v_address
     from public.addresses a
     where a.id = p_address_id and a.customer_id = p_customer_id;
@@ -973,13 +956,11 @@ begin
     v_address := private.normalize_checkout_address(p_address);
   end if;
   if v_address is null
-     or nullif(v_address ->> 'receiver', '') is null
-     or nullif(v_address ->> 'detail', '') is null then
-    raise exception 'address requires at least receiver and detail';
+     or nullif(btrim(v_address ->> 'recipient_name'), '') is null
+     or nullif(btrim(v_address ->> 'line1'), '') is null then
+    raise exception 'address requires recipient_name, line1 and country';
   end if;
-  return v_address || jsonb_build_object(
-    'country', private.normalize_country_code(coalesce(v_address ->> 'country', 'CN'))
-  );
+  return private.normalize_checkout_address(v_address);
 end;
 $$;
 
@@ -1057,27 +1038,7 @@ begin
     raise exception 'order already has fulfillments, address is locked';
   end if;
 
-  if address_id is not null then
-    select jsonb_build_object(
-      'receiver', a.receiver, 'phone', a.phone, 'country', a.country,
-      'province', a.province, 'city', a.city, 'detail', a.detail,
-      'postal_code', a.postal_code)
-    into v_address
-    from public.addresses a
-    where a.id = address_id and a.customer_id = v_order.customer_id;
-    if not found then
-      raise exception 'address not found';
-    end if;
-  else
-    v_address := address;
-  end if;
-  if v_address is null
-     or v_address ->> 'receiver' is null
-     or v_address ->> 'detail' is null then
-    raise exception 'address requires at least receiver and detail';
-  end if;
-  -- 国家归一化（与 create_order 一致）
-  v_address := coalesce(v_address, '{}') || jsonb_build_object('country', coalesce(v_address ->> 'country', 'CN'));
+  v_address := private.resolve_checkout_address(v_order.customer_id, address, address_id);
 
   -- 运费方式的国家限制重校验：地址变了，原运法可能不再可用
   if v_order.shipping_method_id is not null and exists (

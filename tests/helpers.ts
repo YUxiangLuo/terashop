@@ -90,11 +90,25 @@ export async function stockOf(sku: string): Promise<number> {
   return (data as { on_hand: number }[])[0].on_hand;
 }
 
-export const CN_ADDRESS = {
-  receiver: '张三',
-  phone: '13800000000',
-  country: 'CN',
-  province: '上海',
-  city: '上海',
-  detail: '浦东新区世纪大道 1 号',
+export const TEST_ADDRESS = {
+  recipient_name: 'Alex Morgan',
+  country: 'US',
+  region: 'NY',
+  city: 'New York',
+  line1: '123 Example Street',
+  line2: 'Apt 4B',
+  postal_code: '10001',
 };
+
+// Explicit, fictitious test rule, never a seed/default or a claim about US tax law.
+export async function installTestTax(country = 'US', rate = 0.13): Promise<() => Promise<void>> {
+  const created = await api('/rest/v1/tax_rates?select=id', {
+    service: true, method: 'POST', body: { name: 'Test-only tax', country, rate },
+  });
+  if (created.status >= 400) throw new Error(`test tax setup failed: ${JSON.stringify(created.data)}`);
+  const [{ id }] = created.data as { id: string }[];
+  return async () => {
+    const deleted = await api(`/rest/v1/tax_rates?id=eq.${id}`, { service: true, method: 'DELETE' });
+    if (deleted.status >= 400) throw new Error(`test tax cleanup failed: ${JSON.stringify(deleted.data)}`);
+  };
+}

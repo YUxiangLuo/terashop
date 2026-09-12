@@ -74,7 +74,7 @@ CREATE FUNCTION private.normalize_address_country() RETURNS trigger
     SET search_path TO ''
     AS $$
 begin
-  new.country := private.normalize_country_code(coalesce(new.country, 'CN'));
+  new.country := private.normalize_country_code(new.country);
   return new;
 end;
 $$;
@@ -83,15 +83,24 @@ CREATE FUNCTION private.normalize_checkout_address(p_address jsonb) RETURNS json
     LANGUAGE plpgsql STABLE
     SET search_path TO ''
     AS $$
+declare
+  v_field text;
 begin
-  if p_address is null then
-    return null;
-  end if;
+  -- Price previews may omit the address; order/quote commands require one.
+  if p_address is null then return null; end if;
   if jsonb_typeof(p_address) <> 'object' then
     raise exception using errcode = '22023', message = 'address must be an object';
   end if;
+  foreach v_field in array array[
+    'recipient_name', 'line1', 'line2', 'city', 'region', 'postal_code', 'phone'
+  ] loop
+    if p_address ? v_field and jsonb_typeof(p_address -> v_field) not in ('string', 'null') then
+      raise exception using errcode = '22023', message = format('address %s must be text', v_field);
+    end if;
+  end loop;
+  -- Never infer destination country from currency, language or server location.
   return p_address || jsonb_build_object(
-    'country', private.normalize_country_code(coalesce(p_address ->> 'country', 'CN'))
+    'country', private.normalize_country_code(p_address ->> 'country')
   );
 end;
 $$;

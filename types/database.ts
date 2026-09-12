@@ -36,48 +36,51 @@ export type Database = {
     Tables: {
       addresses: {
         Row: {
-          city: string
+          city: string | null
           country: string
           created_at: string
           customer_id: string
-          detail: string
           id: string
           is_default: boolean
           label: string
-          phone: string
+          line1: string
+          line2: string | null
+          phone: string | null
           postal_code: string | null
-          province: string
-          receiver: string
+          recipient_name: string
+          region: string | null
           updated_at: string
         }
         Insert: {
-          city?: string
-          country?: string
+          city?: string | null
+          country: string
           created_at?: string
           customer_id?: string
-          detail: string
           id?: string
           is_default?: boolean
           label?: string
-          phone: string
+          line1: string
+          line2?: string | null
+          phone?: string | null
           postal_code?: string | null
-          province?: string
-          receiver: string
+          recipient_name: string
+          region?: string | null
           updated_at?: string
         }
         Update: {
-          city?: string
+          city?: string | null
           country?: string
           created_at?: string
           customer_id?: string
-          detail?: string
           id?: string
           is_default?: boolean
           label?: string
-          phone?: string
+          line1?: string
+          line2?: string | null
+          phone?: string | null
           postal_code?: string | null
-          province?: string
-          receiver?: string
+          recipient_name?: string
+          region?: string | null
           updated_at?: string
         }
         Relationships: [
@@ -1408,6 +1411,7 @@ export type Database = {
           categories: string[] | null
           compare_at_from: number | null
           created_at: string | null
+          currency: string | null
           description: string | null
           id: string | null
           in_stock: boolean | null
@@ -1796,18 +1800,19 @@ export type Database = {
       set_default_address: {
         Args: { address_id: string; make_default?: boolean }
         Returns: {
-          city: string
+          city: string | null
           country: string
           created_at: string
           customer_id: string
-          detail: string
           id: string
           is_default: boolean
           label: string
-          phone: string
+          line1: string
+          line2: string | null
+          phone: string | null
           postal_code: string | null
-          province: string
-          receiver: string
+          recipient_name: string
+          region: string | null
           updated_at: string
         }
         SetofOptions: {

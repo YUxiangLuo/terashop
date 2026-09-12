@@ -20,6 +20,7 @@ CREATE VIEW public.product_listing AS
          LIMIT 1
         )
  SELECT id,
+    'USD'::text AS currency,
     slug,
     name,
     description,
@@ -518,7 +519,7 @@ GRANT SELECT (id, order_number, customer_id, email, status, financial_status, fu
 GRANT UPDATE (admin_note) ON TABLE public.orders TO authenticated;
 GRANT UPDATE (full_name, phone) ON TABLE public.profiles TO authenticated;
 GRANT UPDATE (rating, title, body) ON TABLE public.product_reviews TO authenticated;
-GRANT UPDATE (label, receiver, phone, country, province, city, detail, postal_code) ON TABLE public.addresses TO authenticated;
+GRANT UPDATE (label, recipient_name, phone, country, region, city, line1, line2, postal_code) ON TABLE public.addresses TO authenticated;
 GRANT SELECT (id, order_id, provider, kind, status, amount, currency, provider_ref, created_at, updated_at) ON TABLE public.payments TO anon, authenticated;
 GRANT SELECT (id, product_id, sku, barcode, price, compare_at_price, track_inventory, "position", is_active, created_at, updated_at) ON TABLE public.product_variants TO anon, authenticated;
 

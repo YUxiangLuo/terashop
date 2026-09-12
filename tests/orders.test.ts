@@ -1,11 +1,11 @@
-import { describe, test, expect, beforeAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import {
   api, rpc, signup, variantBySku, shippingByName, stockOf,
-  CN_ADDRESS, type TestUser,
+  TEST_ADDRESS, installTestTax, type TestUser,
 } from './helpers';
 
 // seed 基准：CABLE-1M 5 件 / KB87-RED 20 件 / MUG-350 200 件
-// 税率 CN 13%；标准快递 8 元满 99 包邮；WELCOME10 满 50 打 9 折
+// 本文件显式安装虚构的 US 13% 测试税率；运费和商品价格均为 USD。
 // 注意：库存断言一律用相对增量（before/after），不假设绝对值
 
 let buyer: TestUser;
@@ -14,7 +14,10 @@ let cableId: string;
 let kbRedId: string;
 let mugId: string;
 
+let removeTax: (() => Promise<void>) | undefined;
+afterAll(async () => { await removeTax?.(); });
 beforeAll(async () => {
+  removeTax = await installTestTax();
   buyer = await signup();
   stranger = await signup();
   cableId = await variantBySku('CABLE-1M');
@@ -44,10 +47,10 @@ describe('用户与地址', () => {
   });
 
   test('地址 CRUD + customer_id 自动填充', async () => {
-    const { data } = await api('/rest/v1/addresses?select=receiver,customer_id,is_default', {
+    const { data } = await api('/rest/v1/addresses?select=recipient_name,customer_id,is_default', {
       token: buyer.token,
       method: 'POST',
-      body: { ...CN_ADDRESS, is_default: true },
+      body: { ...TEST_ADDRESS, is_default: true },
     });
     const a = (data as Record<string, unknown>[])[0];
     expect(a.customer_id).toBe(buyer.userId);
@@ -58,13 +61,13 @@ describe('用户与地址', () => {
     await api('/rest/v1/addresses', {
       token: buyer.token,
       method: 'POST',
-      body: { ...CN_ADDRESS, receiver: '公司', is_default: true },
+      body: { ...TEST_ADDRESS, recipient_name: '公司', is_default: true },
     });
-    const { data } = await api('/rest/v1/addresses?select=receiver,is_default', {
+    const { data } = await api('/rest/v1/addresses?select=recipient_name,is_default', {
       token: buyer.token,
     });
-    const rows = data as { receiver: string; is_default: boolean }[];
-    expect(rows.filter((r) => r.is_default)).toEqual([{ receiver: '公司', is_default: true }]);
+    const rows = data as { recipient_name: string; is_default: boolean }[];
+    expect(rows.filter((r) => r.is_default)).toEqual([{ recipient_name: '公司', is_default: true }]);
   });
 
   test('买家读不到别人的地址', async () => {
@@ -79,7 +82,7 @@ describe('下单：金额计算', () => {
     const kbBefore = await stockOf('KB87-RED');
 
     // 89 + 4.9 = 93.90 → 9折 -9.39 → 84.51 + 运费 8 + 税 84.51*13%=10.99 → 103.50
-    const ship = await shippingByName('标准快递');
+    const ship = await shippingByName('Standard shipping');
     const { data } = await rpc(
       'create_order',
       {
@@ -87,7 +90,7 @@ describe('下单：金额计算', () => {
           { variant_id: kbRedId, quantity: 1 },
           { variant_id: cableId, quantity: 1 },
         ],
-        address: CN_ADDRESS,
+        address: TEST_ADDRESS,
         shipping_method_id: ship,
         discount_code: 'WELCOME10',
         note: '请尽快发货',
@@ -104,7 +107,7 @@ describe('下单：金额计算', () => {
     expect(Number(o.tax_total)).toBeCloseTo(10.99);
     expect(Number(o.total)).toBeCloseTo(103.5);
     expect(o.discount_code).toBe('WELCOME10');
-    expect(o.shipping_method_name).toBe('标准快递');
+    expect(o.shipping_method_name).toBe('Standard shipping');
 
     // 库存扣减（相对断言）
     expect(await stockOf('CABLE-1M')).toBe(cableBefore - 1);
@@ -140,7 +143,7 @@ describe('下单：金额计算', () => {
           { variant_id: cableId, quantity: 2 },
           { variant_id: cableId, quantity: 2 },
         ],
-        address: CN_ADDRESS,
+        address: TEST_ADDRESS,
       },
       buyer.token
     );
@@ -166,7 +169,7 @@ describe('下单：金额计算', () => {
           { variant_id: cableId, quantity: half },
           { variant_id: cableId, quantity: half },
         ],
-        address: CN_ADDRESS,
+        address: TEST_ADDRESS,
       },
       buyer.token
     );
@@ -186,7 +189,7 @@ describe('下单：金额计算', () => {
           { variant_id: mugId, quantity: 1 },
           { variant_id: cableId, quantity: 999999 }, // 必失败，整单回滚
         ],
-        address: CN_ADDRESS,
+        address: TEST_ADDRESS,
       },
       buyer.token
     );
@@ -198,10 +201,10 @@ describe('下单：金额计算', () => {
 
   test('满额包邮：折后满 99 运费为 0', async () => {
     // KB ×2 = 178 ≥ 99 → 免运费；税 178*0.13 = 23.14
-    const ship = await shippingByName('标准快递');
+    const ship = await shippingByName('Standard shipping');
     const { data } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 2 }], address: CN_ADDRESS, shipping_method_id: ship },
+      { items: [{ variant_id: kbRedId, quantity: 2 }], address: TEST_ADDRESS, shipping_method_id: ship },
       buyer.token
     );
     const o = data as Record<string, unknown>;
@@ -210,21 +213,21 @@ describe('下单：金额计算', () => {
     expect(Number(o.total)).toBeCloseTo(201.14);
   });
 
-  test('运费国家限制 + 海外地址免税（无匹配税率）', async () => {
-    const intl = await shippingByName('国际挂号');
+  test('运费国家限制 + 未配置税率的地址返回零税额', async () => {
+    const intl = await shippingByName('Regional shipping');
     const bad = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS, shipping_method_id: intl },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, shipping_method_id: intl },
       buyer.token
     );
     expect((bad.data as { message: string }).message).toContain('not available for this country');
 
-    // US 地址可以用，且无税率匹配 → 税 0
+    // CA 地址可以用；本测试未配置 CA 税率，因此计算值为 0（不代表税务豁免）。
     const ok = await rpc(
       'create_order',
       {
         items: [{ variant_id: mugId, quantity: 1 }],
-        address: { receiver: 'John', phone: '123', country: 'US', detail: '1 Infinite Loop' },
+        address: { recipient_name: 'John', phone: '123', country: 'CA', line1: '1 Infinite Loop' },
         shipping_method_id: intl,
       },
       buyer.token
@@ -237,18 +240,18 @@ describe('下单：金额计算', () => {
   test('无效变体 / 空 items / 缺地址都被拒绝', async () => {
     const bad1 = await rpc('create_order', {
       items: [{ variant_id: '00000000-0000-0000-0000-000000000000', quantity: 1 }],
-      address: CN_ADDRESS,
+      address: TEST_ADDRESS,
     }, buyer.token);
     expect((bad1.data as { message: string }).message).toContain('variant not available');
 
-    const bad2 = await rpc('create_order', { items: [], address: CN_ADDRESS }, buyer.token);
+    const bad2 = await rpc('create_order', { items: [], address: TEST_ADDRESS }, buyer.token);
     expect((bad2.data as { message: string }).message).toContain('non-empty');
 
     const bad3 = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 1 }],
-      address: { phone: '1' },
+      address: { phone: '1', country: 'US' },
     }, buyer.token);
-    expect((bad3.data as { message: string }).message).toContain('receiver');
+    expect((bad3.data as { message: string }).message).toContain('recipient_name');
   });
 });
 
@@ -261,7 +264,7 @@ describe('下单：折扣码', () => {
     });
     const { data } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'MIN100X' },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'MIN100X' },
       buyer.token
     );
     expect((data as { message: string }).message).toContain('minimum subtotal');
@@ -271,7 +274,7 @@ describe('下单：折扣码', () => {
     // buyer 在"完整链路"里已用过 WELCOME10
     const { data } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'welcome10' },
+      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'welcome10' },
       buyer.token
     );
     expect((data as { message: string }).message).toBe('discount code already used');
@@ -280,7 +283,7 @@ describe('下单：折扣码', () => {
   test('不存在 / 过期的折扣码', async () => {
     const fake = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'FAKE' },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'FAKE' },
       buyer.token
     );
     expect((fake.data as { message: string }).message).toContain('invalid or expired');
@@ -292,7 +295,7 @@ describe('下单：折扣码', () => {
     });
     const expired = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'EXPIRED' },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'EXPIRED' },
       buyer.token
     );
     expect((expired.data as { message: string }).message).toContain('invalid or expired');
@@ -317,7 +320,7 @@ describe('下单：折扣码', () => {
 
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'REL50' },
+      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'REL50' },
       stranger.token
     );
     expect(Number((o as Record<string, unknown>).discount_total)).toBeCloseTo(5);
@@ -343,7 +346,7 @@ describe('下单：折扣码', () => {
     // 再次使用成功
     const { data: o2 } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'REL50' },
+      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'REL50' },
       stranger.token
     );
     expect((o2 as Record<string, unknown>).status).toBe('open');
@@ -354,7 +357,7 @@ describe('取消订单', () => {
   test('重复取消报错', async () => {
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
       stranger.token
     );
     const id = (o as { id: string }).id;
@@ -366,7 +369,7 @@ describe('取消订单', () => {
   test('不能取消别人的订单', async () => {
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
       buyer.token
     );
     const { data } = await rpc('cancel_order', { order_id: (o as { id: string }).id }, stranger.token);
@@ -378,7 +381,7 @@ describe('修改收货地址', () => {
   test('未发货前可改；引用别人地址簿会被拒绝', async () => {
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
       buyer.token
     );
     const orderId = (o as { id: string }).id;
@@ -387,7 +390,7 @@ describe('修改收货地址', () => {
     const { data: strangerAddr } = await api('/rest/v1/addresses', {
       token: stranger.token,
       method: 'POST',
-      body: CN_ADDRESS,
+      body: TEST_ADDRESS,
     });
     const bad = await rpc(
       'update_order_address',
@@ -399,10 +402,10 @@ describe('修改收货地址', () => {
     // 直接传新地址成功
     const ok = await rpc(
       'update_order_address',
-      { order_id: orderId, address: { ...CN_ADDRESS, detail: '新地址 666 号' } },
+      { order_id: orderId, address: { ...TEST_ADDRESS, line1: '新地址 666 号' } },
       buyer.token
     );
-    expect((ok.data as { shipping_address: { detail: string } }).shipping_address.detail).toBe('新地址 666 号');
+    expect((ok.data as { shipping_address: { line1: string } }).shipping_address.line1).toBe('新地址 666 号');
 
     // 事件已记录
     const { data: events } = await api(
@@ -448,7 +451,7 @@ describe('RLS 权限', () => {
   test('未登录不能下单', async () => {
     const { status, data } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 1 }],
-      address: CN_ADDRESS,
+      address: TEST_ADDRESS,
     });
     expect(status).toBe(401);
     expect((data as { code: string }).code).toBe('42501');

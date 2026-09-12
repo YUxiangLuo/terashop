@@ -3,6 +3,7 @@
 RPC 路径为 `/rest/v1/rpc/<name>`，Edge Function 路径为 `/functions/v1/<name>`，均使用 POST。
 PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization: Bearer <user-jwt>`。
 参数名与默认值见 [生成类型](../types/database.ts)，业务约束见 [ADR](architecture-decisions.md)。
+所有商品、运费、固定金额优惠、订单、收款和退款均以 **USD** 计价；`product_listing.currency` 显式返回 `USD`，不提供币种切换或自动换汇。
 
 ## 商品查询（匿名）
 
@@ -24,7 +25,7 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 ```http
 POST /rest/v1/rpc/create_checkout_quote
 
-{"idempotency_key":"checkout-attempt-id","items":[{"variant_id":"<uuid>","quantity":1}],"address":{"receiver":"张三","phone":"13800000000","country":"CN","province":"上海","city":"上海","detail":"世纪大道 1 号"},"ttl_seconds":900}
+{"idempotency_key":"checkout-attempt-id","items":[{"variant_id":"<uuid>","quantity":1}],"address":{"recipient_name":"Alex Morgan","country":"US","region":"NY","city":"New York","line1":"123 Example Street","line2":"Apt 4B","postal_code":"10001"},"ttl_seconds":900}
 ```
 
 ```http
@@ -34,6 +35,7 @@ POST /rest/v1/rpc/create_order_from_quote
 ```
 
 `price_checkout` 接受 `items`、`address`、`shipping_method_id`、`discount_code`。
+不传地址时仅预估商品价格，不计目的地税；选择配送方式必须显式传国家。传入地址时 `country` 不可省略。
 Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会静默重定价。
 同一业务重试复用幂等键，不同参数必须使用新键。
 
@@ -66,6 +68,16 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 
 退款请求被接受不等于渠道退款成功；确认前仅预留可退额度/数量，不回库。
 渠道密钥、Webhook 和 Worker 接入见 [支付与部署](../supabase/functions/README.md)。
+
+## 地址合同
+
+地址簿及下单/改地址请求共用字段：
+
+- 必填：`recipient_name`、`line1`、`country`（两位国家码，规范化为大写）。不根据 USD、语言或服务器位置推断国家。
+- 可选：`line2`、`city`、`region`（州/省/其他行政区）、`postal_code`、`phone`。不强制所有国家采用同一行政区、邮编或电话号码格式。
+- 地址簿另有 `label`、`is_default`。配送商和支付渠道可提出额外的地区字段要求。
+
+开发期已直接替换旧地址字段与 CN/CNY 假设，没有兼容别名；按 [数据库开发](database.md) 重建本地库，并使用最新生成类型。
 
 ## 客户与管理员命令
 

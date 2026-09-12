@@ -324,10 +324,10 @@ export function normalizeProviderAmount(value: unknown, currency: unknown): stri
   return normalized;
 }
 
-export function normalizeCnyAmount(value: unknown, currency: unknown): string {
+export function normalizeCheckoutAmount(value: unknown, currency: unknown): string {
   const code = requiredText(currency, 'currency', 3).toUpperCase();
-  if (code !== 'CNY') {
-    throw new PayPalIntegrationError(`Currency ${code} is outside the current CNY capability`);
+  if (code !== 'USD') {
+    throw new PayPalIntegrationError(`Currency ${code} is outside the current USD capability`);
   }
   return normalizeProviderAmount(value, code);
 }
@@ -509,8 +509,8 @@ export function validatePayPalOrder(
       || unit.reference_id !== local.order_id
       || unit.custom_id !== local.id
       || (enforceExpectedMoney
-          && normalizeCnyAmount(amount.value, amount.currency_code)
-             !== normalizeCnyAmount(local.amount, local.currency))) {
+          && normalizeCheckoutAmount(amount.value, amount.currency_code)
+             !== normalizeCheckoutAmount(local.amount, local.currency))) {
     throw new PayPalIntegrationError('PayPal Order does not match local payment intent', 409, 'provider_mismatch');
   }
   if (local.provider_reference && local.provider_reference !== id) {
@@ -545,8 +545,8 @@ export function extractPayPalCapture(
   if (capture.final_capture === false
       || (capture.custom_id !== undefined && capture.custom_id !== local.id)
       || (enforceExpectedMoney
-          && normalizeCnyAmount(capture.amount.value, capture.amount.currency_code)
-             !== normalizeCnyAmount(local.amount, local.currency))) {
+          && normalizeCheckoutAmount(capture.amount.value, capture.amount.currency_code)
+             !== normalizeCheckoutAmount(local.amount, local.currency))) {
     throw new PayPalIntegrationError('PayPal Capture does not match local payment intent', 409, 'provider_mismatch');
   }
   return capture;
@@ -595,8 +595,8 @@ export function validatePayPalRefund(
               || !Number.isFinite(Date.parse(refund.update_time))))
       || refund.custom_id !== local.id
       || (enforceExpectedMoney
-          && normalizeCnyAmount(refund.amount.value, refund.amount.currency_code)
-             !== normalizeCnyAmount(local.amount, local.currency))) {
+          && normalizeCheckoutAmount(refund.amount.value, refund.amount.currency_code)
+             !== normalizeCheckoutAmount(local.amount, local.currency))) {
     throw new PayPalIntegrationError('PayPal Refund does not match local request', 409, 'provider_mismatch');
   }
   const captureReference = upReference(refund.links, 'captures');
@@ -644,11 +644,12 @@ export function payPalShippingUnit(address: Record<string, unknown>): Record<str
   const country = addressText(address, 'country', 2, true)!.toUpperCase();
   if (!/^[A-Z]{2}$/.test(country)) throw new PayPalIntegrationError('Shipping country is invalid');
   const mapped: Record<string, unknown> = {
-    name: { full_name: addressText(address, 'receiver', 300, true) },
+    name: { full_name: addressText(address, 'recipient_name', 300, true) },
     address: {
-      address_line_1: addressText(address, 'detail', 300, true),
-      admin_area_2: addressText(address, 'city', 120, true),
-      admin_area_1: addressText(address, 'province', 300, false),
+      address_line_1: addressText(address, 'line1', 300, true),
+      address_line_2: addressText(address, 'line2', 300, false),
+      admin_area_2: addressText(address, 'city', 120, false),
+      admin_area_1: addressText(address, 'region', 300, false),
       postal_code: addressText(address, 'postal_code', 60, false),
       country_code: country,
     },

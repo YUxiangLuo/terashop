@@ -56,7 +56,8 @@ Refund API 对象没有 `livemode`，模式来自已校验的密钥；成功退�
 ## PayPal Orders v2 / Payments v2
 
 必填：`PAYPAL_CLIENT_ID`、`PAYPAL_CLIENT_SECRET`、`PAYPAL_WEBHOOK_ID`；创建 Order 还需 `PAYPAL_RETURN_URL` 和 `PAYPAL_CANCEL_URL`（生产 HTTPS）。
-生产显式设置 `PAYPAL_LIVEMODE=true`；`PAYPAL_BRAND_NAME` 可选。`PAYPAL_API_BASE` 生产留空，由模式选择官方地址。商户账户必须支持接收 CNY。
+生产显式设置 `PAYPAL_LIVEMODE=true`；`PAYPAL_BRAND_NAME` 可选。`PAYPAL_API_BASE` 生产留空，由模式选择官方地址。结账统一使用 USD，商户账户须具备对应收款能力。
+地址映射为通用 `recipient_name` / `line1` / `line2` / `city` / `region` / `postal_code` / `country`，不推断国家或强制所有地区填写城市、州及邮编；渠道的额外地区要求仍需满足。
 
 Webhook 指向 `/functions/v1/paypal-webhook`，订阅：
 

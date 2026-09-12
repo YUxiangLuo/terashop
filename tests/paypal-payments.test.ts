@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
-  api, CN_ADDRESS, makeAdmin, rpc, signup, stockOf, type TestUser,
+  api, TEST_ADDRESS, makeAdmin, rpc, signup, stockOf, type TestUser,
 } from './helpers';
 
 interface Fixture {
@@ -128,7 +128,7 @@ async function createPayPalOrder(quantity: number): Promise<CreatedOrder> {
   const quote = await rpc('create_checkout_quote', {
     items: [{ variant_id: fixture.variantId, quantity }],
     idempotency_key: `paypal-quote-${crypto.randomUUID()}`,
-    address: CN_ADDRESS,
+    address: TEST_ADDRESS,
   }, buyer.token);
   if (quote.status >= 400) throw new Error(JSON.stringify(quote.data));
   const converted = await rpc('create_order_from_quote', {
@@ -209,7 +209,7 @@ describe('PayPal Orders v2 与 Provider Inbox', () => {
     const created = await createPayPalOrder(1);
     expect(created.intent).toMatchObject({
       provider: 'paypal',
-      shipping_address: expect.objectContaining({ country: 'CN' }),
+      shipping_address: expect.objectContaining({ country: 'US' }),
     });
     expect(created.intent.order_number).toBeGreaterThan(0);
 
@@ -265,7 +265,7 @@ describe('PayPal Orders v2 与 Provider Inbox', () => {
     expect(await stockOf(fixture.sku)).toBe(stockBefore - 1);
   });
 
-  test('无法关联的非 CNY Capture 仍先保存为外部资金事实', async () => {
+  test('无法关联的非 USD Capture 仍先保存为外部资金事实', async () => {
     const result = await paypalEvent({
       eventId: `WH-${crypto.randomUUID()}`,
       eventType: 'PAYMENT.CAPTURE.COMPLETED',

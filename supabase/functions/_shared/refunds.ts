@@ -42,7 +42,7 @@ export function parseRefundRequest(
     throw new HttpError('amount must be a decimal');
   }
   // Preserve each provider's decimal validation and error contract.
-  if (amount !== null) validateAmount(amount, 'CNY');
+  if (amount !== null) validateAmount(amount, 'USD');
   if (body.reason !== undefined && body.reason !== null && typeof body.reason !== 'string') {
     throw new HttpError('reason must be text');
   }

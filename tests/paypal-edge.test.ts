@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from 'bun:test';
 import {
   configuredRedirectUrl,
   extractPayPalCapture,
-  normalizeCnyAmount,
+  normalizeCheckoutAmount,
   normalizePayPalEvent,
   normalizedPayPalCaptureData,
   normalizedPayPalRefundData,
@@ -120,7 +120,7 @@ describe('PayPal Edge 安全边界', () => {
       resource: {
         id: 'CAPTURE12345',
         status: 'COMPLETED',
-        amount: { value: '10.00', currency_code: 'CNY' },
+        amount: { value: '10.00', currency_code: 'USD' },
         custom_id: 'f39c37ad-e437-4bdf-a990-d474bcd9430a',
         payee: { email_address: 'merchant@example.com' },
         payer: { email_address: 'buyer@example.com' },
@@ -133,7 +133,7 @@ describe('PayPal Edge 安全边界', () => {
       data: {
         status: 'completed',
         amount: '10.00',
-        currency: 'CNY',
+        currency: 'USD',
         order_reference: 'ORDER12345',
       },
     });
@@ -164,7 +164,7 @@ describe('PayPal Edge 安全边界', () => {
       provider: 'paypal',
       status: 'requires_action',
       amount: '10.00',
-      currency: 'CNY',
+      currency: 'USD',
       provider_reference: null,
       expires_at: null,
       shipping_address: {},
@@ -176,11 +176,11 @@ describe('PayPal Edge 安全边界', () => {
       purchase_units: [{
         reference_id: local.order_id,
         custom_id: local.id,
-        amount: { value: '10.00', currency_code: 'CNY' },
+        amount: { value: '10.00', currency_code: 'USD' },
         payments: { captures: [{
           id: 'CAPTURE12345',
           status: 'COMPLETED',
-          amount: { value: '10.00', currency_code: 'CNY' },
+          amount: { value: '10.00', currency_code: 'USD' },
           final_capture: true,
           create_time: '2026-08-30T00:00:00Z',
         }] },
@@ -196,7 +196,7 @@ describe('PayPal Edge 安全边界', () => {
     const mismatchUnit = mismatched.purchase_units[0] as any;
     mismatchUnit.amount = { value: '11.00', currency_code: 'EUR' };
     mismatchUnit.payments.captures[0].amount = { value: '11.00', currency_code: 'EUR' };
-    expect(() => validatePayPalOrder(mismatched, local)).toThrow('outside the current CNY capability');
+    expect(() => validatePayPalOrder(mismatched, local)).toThrow('outside the current USD capability');
     expect(() => validatePayPalOrder(mismatched, local, false)).not.toThrow();
     const mismatchedCapture = extractPayPalCapture(mismatched, local, false)!;
     expect(normalizedPayPalCaptureData(mismatchedCapture, local, mismatched.id)).toMatchObject({
@@ -209,15 +209,23 @@ describe('PayPal Edge 安全边界', () => {
     }, false)).toThrow('untrusted');
 
     expect(payPalShippingUnit({
-      receiver: '张三', country: 'CN', province: '上海', city: '上海',
-      detail: '世纪大道 1 号', postal_code: '200000',
+      recipient_name: 'Alex Morgan', country: 'US', region: 'NY', city: 'New York',
+      line1: '123 Example Street', line2: 'Apt 4B', postal_code: '10001',
     })).toEqual({
-      name: { full_name: '张三' },
+      name: { full_name: 'Alex Morgan' },
       address: {
-        address_line_1: '世纪大道 1 号', admin_area_2: '上海', admin_area_1: '上海',
-        postal_code: '200000', country_code: 'CN',
+        address_line_1: '123 Example Street', address_line_2: 'Apt 4B',
+        admin_area_2: 'New York', admin_area_1: 'NY', postal_code: '10001', country_code: 'US',
       },
     });
+    expect(payPalShippingUnit({
+      recipient_name: '陳曉', country: 'HK', line1: '12 Example Road',
+    })).toEqual({
+      name: { full_name: '陳曉' },
+      address: { address_line_1: '12 Example Road', country_code: 'HK' },
+    });
+    expect(() => payPalShippingUnit({ recipient_name: 'Alex', line1: 'Example Street' }))
+      .toThrow('country is required');
     expect(configuredRedirectUrl('https://shop.example/paypal/return', 'return')).toBe(
       'https://shop.example/paypal/return',
     );
@@ -227,7 +235,7 @@ describe('PayPal Edge 安全边界', () => {
     const refund: PayPalRefund = {
       id: 'REFUND12345',
       status: 'COMPLETED',
-      amount: { value: '5.00', currency_code: 'CNY' },
+      amount: { value: '5.00', currency_code: 'USD' },
       custom_id: 'eaa59125-66e9-4b8e-a080-f63f19181461',
       create_time: '2026-08-30T00:00:00Z',
       links: [{
@@ -235,7 +243,7 @@ describe('PayPal Edge 安全边界', () => {
       }],
     };
     const localRefund = {
-      id: refund.custom_id!, order_id: local.order_id, amount: '5.00', currency: 'CNY',
+      id: refund.custom_id!, order_id: local.order_id, amount: '5.00', currency: 'USD',
       parent_provider_reference: 'CAPTURE12345',
     };
     expect(() => validatePayPalRefund(refund, localRefund)).not.toThrow();
@@ -244,11 +252,11 @@ describe('PayPal Edge 安全边界', () => {
     });
   });
 
-  test('CNY decimal 不使用浮点换算，渠道错误不回传原始消息', async () => {
-    expect(normalizeCnyAmount('0.01', 'CNY')).toBe('0.01');
-    expect(normalizeCnyAmount('9999999999.99', 'cny')).toBe('9999999999.99');
-    expect(() => normalizeCnyAmount('10.001', 'CNY')).toThrow('at most two places');
-    expect(() => normalizeCnyAmount('10', 'USD')).toThrow('outside the current CNY capability');
+  test('USD decimal 不使用浮点换算，渠道错误不回传原始消息', async () => {
+    expect(normalizeCheckoutAmount('0.01', 'USD')).toBe('0.01');
+    expect(normalizeCheckoutAmount('9999999999.99', 'usd')).toBe('9999999999.99');
+    expect(() => normalizeCheckoutAmount('10.001', 'USD')).toThrow('at most two places');
+    expect(() => normalizeCheckoutAmount('10', 'EUR')).toThrow('outside the current USD capability');
     expect(payPalApiBase(false)).toBe('https://api-m.sandbox.paypal.com');
     expect(payPalApiBase(true)).toBe('https://api-m.paypal.com');
     expect(() => payPalApiBase(false, 'https://attacker.example')).toThrow('untrusted');

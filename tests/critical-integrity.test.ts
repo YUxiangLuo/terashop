@@ -1,6 +1,6 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
-  api, rpc, signup, makeAdmin, variantBySku, stockOf, CN_ADDRESS,
+  api, rpc, signup, makeAdmin, variantBySku, stockOf, TEST_ADDRESS, installTestTax,
   type TestUser,
 } from './helpers';
 
@@ -10,7 +10,10 @@ let mugId: string;
 let cableId: string;
 let keyboardId: string;
 
+let removeTax: (() => Promise<void>) | undefined;
+afterAll(async () => { await removeTax?.(); });
 beforeAll(async () => {
+  removeTax = await installTestTax();
   admin = await signup();
   customer = await signup();
   await makeAdmin(admin.userId);
@@ -20,13 +23,13 @@ beforeAll(async () => {
 });
 
 describe('关键完整性：输入与 Storefront 可见性', () => {
-  test('国家码统一大写，不能通过 cn 绕过 CN 税率', async () => {
+  test('国家码统一大写，不能通过小写国家码绕过显式配置的测试税率', async () => {
     const { data } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 1 }],
-      address: { ...CN_ADDRESS, country: 'cn' },
+      address: { ...TEST_ADDRESS, country: 'us' },
     }, customer.token);
     const order = data as { shipping_address: { country: string }; tax_total: number; total: number };
-    expect(order.shipping_address.country).toBe('CN');
+    expect(order.shipping_address.country).toBe('US');
     expect(Number(order.tax_total)).toBeCloseTo(1.29);
     expect(Number(order.total)).toBeCloseTo(11.19);
   });
@@ -121,7 +124,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
 
     try {
       const { data } = await rpc('price_checkout', {
-        items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+        items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
       });
       const quote = data as { promotions: { name: string }[]; discount_total: number };
       expect(quote.promotions.map((promotion) => promotion.name)).toEqual([`有效折扣-${suffix}`]);
@@ -135,7 +138,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
 
   test('客户订单 RPC 不返回 admin_note', async () => {
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, customer.token);
     const orderId = (created as { id: string }).id;
 
@@ -143,7 +146,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
       service: true, method: 'PATCH', body: { admin_note: '内部敏感备注' },
     });
     const { data } = await rpc('update_order_address', {
-      order_id: orderId, address: { ...CN_ADDRESS, detail: '新地址 1 号' },
+      order_id: orderId, address: { ...TEST_ADDRESS, line1: '新地址 1 号' },
     }, customer.token);
 
     expect(Object.prototype.hasOwnProperty.call(data as object, 'admin_note')).toBe(false);
@@ -151,14 +154,14 @@ describe('关键完整性：订单、支付、履约与退款', () => {
 
   test('已支付订单不能通过修改地址直接改变总额', async () => {
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, customer.token);
     const order = created as { id: string; total: number };
     await rpc('mark_order_paid', { order_id: order.id }, admin.token);
 
     const { data } = await rpc('update_order_address', {
       order_id: order.id,
-      address: { receiver: 'John', phone: '1', country: 'US', detail: '1 Main St' },
+      address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Main St' },
     }, customer.token);
     expect((data as { message: string }).message).toContain('order edit adjustment');
 
@@ -172,7 +175,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
   test('同一履约 payload 的重复订单项先合并，不能超发', async () => {
     const owner = await signup();
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const orderId = (created as { id: string }).id;
     const { data: lines } = await api(`/rest/v1/order_items?order_id=eq.${orderId}&select=id`, {
@@ -207,7 +210,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
   test('按行退款也不能突破剩余可退的成功收款额', async () => {
     const owner = await signup();
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: keyboardId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: keyboardId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const order = created as { id: string; total: number };
     await rpc('mark_order_paid', { order_id: order.id }, admin.token);
@@ -251,7 +254,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     }
 
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: cableId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: cableId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const orderId = (created as { id: string }).id;
     await rpc('mark_order_paid', { order_id: orderId }, admin.token);
@@ -299,7 +302,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     try {
       const owner = await signup();
       const { data: created } = await rpc('create_order', {
-        items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+        items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
       }, owner.token);
       const order = created as { id: string; total: number };
       expect(Number(order.total)).toBe(0);
@@ -331,7 +334,7 @@ describe('关键完整性：并发、库存和审计', () => {
       before = await stockOf('CABLE-1M');
     }
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: cableId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: cableId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     expect(await stockOf('CABLE-1M')).toBe(before - 1);
 
@@ -394,9 +397,9 @@ describe('关键完整性：并发、库存和审计', () => {
         token: owner.token,
         method: 'POST',
         body: {
-          ...CN_ADDRESS,
-          receiver: `并发${index}`,
-          detail: `并发地址${index}`,
+          ...TEST_ADDRESS,
+          recipient_name: `并发${index}`,
+          line1: `并发地址${index}`,
           is_default: true,
         },
       })),

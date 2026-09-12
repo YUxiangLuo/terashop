@@ -1,6 +1,6 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
-  api, rpc, signup, makeAdmin, variantBySku, CN_ADDRESS,
+  api, rpc, signup, makeAdmin, variantBySku, TEST_ADDRESS, installTestTax,
   type TestUser,
 } from './helpers';
 
@@ -71,7 +71,10 @@ async function ledger(orderId: string, token = buyer.token): Promise<Ledger> {
   return data as Ledger;
 }
 
+let removeTax: (() => Promise<void>) | undefined;
+afterAll(async () => { await removeTax?.(); });
 beforeAll(async () => {
+  removeTax = await installTestTax();
   admin = await signup();
   buyer = await signup();
   stranger = await signup();
@@ -82,7 +85,7 @@ beforeAll(async () => {
 describe('关系化订单账本', () => {
   test('订单金额自动双写 adjustment ledger，且只通过安全 DTO 暴露', async () => {
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, buyer.token);
     adjustmentOrderId = (created as { id: string }).id;
 
@@ -106,12 +109,12 @@ describe('关系化订单账本', () => {
           { variant_id: mugId, quantity: 1 },
           { variant_id: mugId, quantity: 1 },
         ],
-        address: CN_ADDRESS,
+        address: TEST_ADDRESS,
         idempotency_key: key,
       }, buyer.token),
       rpc('create_order_v2', {
         items: [{ variant_id: mugId, quantity: 2 }],
-        address: CN_ADDRESS,
+        address: TEST_ADDRESS,
         idempotency_key: key,
       }, buyer.token),
     ]);
@@ -127,7 +130,7 @@ describe('关系化订单账本', () => {
 
     const mismatch = await rpc('create_order_v2', {
       items: [{ variant_id: mugId, quantity: 3 }],
-      address: CN_ADDRESS,
+      address: TEST_ADDRESS,
       idempotency_key: key,
     }, buyer.token);
     expect(mismatch.status).toBe(400);
@@ -137,7 +140,7 @@ describe('关系化订单账本', () => {
   test('pending 订单重算税时追加差额，不改写已有 adjustment', async () => {
     await rpc('update_order_address', {
       order_id: adjustmentOrderId,
-      address: { receiver: 'John', phone: '1', country: 'US', detail: '1 Main St' },
+      address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Main St' },
     }, buyer.token);
 
     const value = await ledger(adjustmentOrderId);
@@ -160,7 +163,7 @@ describe('关系化订单账本', () => {
 describe('支付交易与已支付快照', () => {
   test('mark_order_paid 兼容写 payments，同时生成 capture transaction', async () => {
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 2 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
     }, buyer.token);
     const order = created as { id: string; total: number };
     paidOrderId = order.id;
@@ -206,7 +209,7 @@ describe('支付交易与已支付快照', () => {
       method: 'POST',
       body: {
         order_id: paidOrderId, provider: 'manual', kind: 'charge',
-        status: 'succeeded', amount: 1, currency: 'CNY',
+        status: 'succeeded', amount: 1, currency: 'USD',
       },
     });
     expect(duplicateCapture.status).toBe(400);
@@ -228,7 +231,7 @@ describe('支付交易与已支付快照', () => {
   test('service-only Payment Intent 捕获具备幂等性并原子推进订单', async () => {
     const owner = await signup();
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const orderId = (created as { id: string }).id;
     const intentKey = `pi-${crypto.randomUUID()}`;
@@ -301,7 +304,7 @@ describe('履约行、退款行与 Outbox', () => {
       order_id: paidOrderId,
       items: [{ order_item_id: paidOrderItemId, quantity: 1 }],
       idempotency_key: key,
-      carrier: '顺丰', tracking_number: trackingNumber,
+      carrier: 'Example carrier', tracking_number: trackingNumber,
     };
     const [first, replay] = await Promise.all([
       rpc('create_fulfillment_v2', body, admin.token),

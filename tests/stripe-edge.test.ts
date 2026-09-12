@@ -48,12 +48,12 @@ describe('Stripe Edge 安全边界', () => {
       .toEqual(['whsec_current', 'whsec_previous']);
   });
 
-  test('CNY 元与最小货币单位转换不经过浮点运算', () => {
-    expect(decimalToMinorUnits('0.01', 'CNY')).toBe('1');
-    expect(decimalToMinorUnits('12345678.90', 'cny')).toBe('1234567890');
-    expect(minorUnitsToDecimal('1234567890', 'CNY')).toBe('12345678.90');
-    expect(() => decimalToMinorUnits('1.001', 'CNY')).toThrow('at most two places');
-    expect(() => decimalToMinorUnits('10', 'USD')).toThrow('outside the current CNY capability');
+  test('USD 元与最小货币单位转换不经过浮点运算', () => {
+    expect(decimalToMinorUnits('0.01', 'USD')).toBe('1');
+    expect(decimalToMinorUnits('12345678.90', 'usd')).toBe('1234567890');
+    expect(minorUnitsToDecimal('1234567890', 'USD')).toBe('12345678.90');
+    expect(() => decimalToMinorUnits('1.001', 'USD')).toThrow('at most two places');
+    expect(() => decimalToMinorUnits('10', 'EUR')).toThrow('outside the current USD capability');
     expect(() => assertStripeKeyMode('sk_test_local', false)).not.toThrow();
     expect(() => assertStripeKeyMode('sk_test_local', true)).toThrow('does not match STRIPE_LIVEMODE');
     expect(parseStripeLivemode('false')).toBeFalse();
@@ -78,7 +78,7 @@ describe('Stripe Edge 安全边界', () => {
           status: 'succeeded',
           amount: 1000,
           amount_received: 1000,
-          currency: 'cny',
+          currency: 'usd',
           customer: 'cus_secret',
           receipt_email: 'pii@example.com',
           payment_method: { card: { last4: '4242' } },
@@ -101,7 +101,7 @@ describe('Stripe Edge 安全边界', () => {
       objectReference: 'pi_123',
       data: {
         amount_minor: '1000',
-        currency: 'cny',
+        currency: 'usd',
         failure_code: 'card_declined',
         failure_message: null,
         metadata: {
@@ -125,7 +125,7 @@ describe('Stripe Edge 安全边界', () => {
       livemode: false,
       data: { object: {
         id: 'pi_inconsistent', object: 'payment_intent', status: 'processing',
-        amount: 1000, amount_received: 0, currency: 'cny',
+        amount: 1000, amount_received: 0, currency: 'usd',
       } },
     })).toThrow('status is inconsistent');
 
@@ -147,7 +147,7 @@ describe('Stripe Edge 安全边界', () => {
       apiBase: 'https://api.stripe.com',
       apiVersion: '2026-02-25.clover',
       idempotencyKey: 'local-command-id',
-      form: { amount: '1000', currency: 'cny' },
+      form: { amount: '1000', currency: 'usd' },
       fetcher: async (input, init) => {
         request = new Request(input, init);
         return new Response(JSON.stringify({ id: 'pi_test' }), {
@@ -159,7 +159,7 @@ describe('Stripe Edge 安全边界', () => {
     expect(result.id).toBe('pi_test');
     expect(request?.headers.get('Idempotency-Key')).toBe('local-command-id');
     expect(request?.headers.get('Stripe-Version')).toBe('2026-02-25.clover');
-    expect(await request?.text()).toBe('amount=1000&currency=cny');
+    expect(await request?.text()).toBe('amount=1000&currency=usd');
 
     await expect(stripeRequest('/v1/refunds', {
       secretKey: 'sk_test_fake',

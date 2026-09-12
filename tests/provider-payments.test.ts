@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
-  api, rpc, signup, makeAdmin, stockOf, CN_ADDRESS,
+  api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, installTestTax,
   type TestUser,
 } from './helpers';
 
@@ -137,7 +137,7 @@ async function createQuotedOrder(quantity: number): Promise<{
   const quote = await rpc('create_checkout_quote', {
     items: [{ variant_id: fixture.variantId, quantity }],
     idempotency_key: `provider-quote-${crypto.randomUUID()}`,
-    address: CN_ADDRESS,
+    address: TEST_ADDRESS,
   }, buyer.token);
   if (quote.status >= 400) throw new Error(JSON.stringify(quote.data));
   const converted = await rpc('create_order_from_quote', {
@@ -163,7 +163,9 @@ async function createQuotedOrder(quantity: number): Promise<{
   };
 }
 
+let removeTax: (() => Promise<void>) | undefined;
 afterAll(async () => {
+  await removeTax?.();
   if (createdProducts.length > 0) {
     await api(`/rest/v1/products?id=in.(${createdProducts.join(',')})`, {
       service: true,
@@ -174,6 +176,7 @@ afterAll(async () => {
 });
 
 beforeAll(async () => {
+  removeTax = await installTestTax();
   admin = await signup();
   buyer = await signup();
   stranger = await signup();
@@ -383,7 +386,7 @@ describe('Stripe Provider Event Inbox', () => {
     expect((order.data as Array<{ financial_status: string }>)[0].financial_status).toBe('pending');
   });
 
-  test('非 CNY Stripe 成功资金按币种指数精确保留，但不推进 CNY 订单', async () => {
+  test('非 USD Stripe 成功资金按币种指数精确保留，但不推进 USD 订单', async () => {
     const created = await createQuotedOrder(1);
     const reference = `pi_${crypto.randomUUID().replaceAll('-', '')}`;
     await rpc('bind_payment_intent_provider', {

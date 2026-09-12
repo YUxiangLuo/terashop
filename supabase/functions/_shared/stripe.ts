@@ -130,14 +130,14 @@ function decimalParts(value: string | number): { whole: string; fraction: string
   const text = typeof value === 'number' ? value.toString() : value.trim();
   const match = /^(0|[1-9]\d{0,9})(?:\.(\d{1,2}))?$/.exec(text);
   if (!match) {
-    throw new StripeIntegrationError('Amount must be a positive CNY decimal with at most two places');
+    throw new StripeIntegrationError('Amount must be a positive USD decimal with at most two places');
   }
   return { whole: match[1], fraction: match[2] ?? '' };
 }
 
 export function decimalToMinorUnits(value: string | number, currency: string): string {
-  if (currency.toUpperCase() !== 'CNY') {
-    throw new StripeIntegrationError(`Currency ${currency} is outside the current CNY capability`);
+  if (currency.toUpperCase() !== 'USD') {
+    throw new StripeIntegrationError(`Currency ${currency} is outside the current USD capability`);
   }
   const { whole, fraction } = decimalParts(value);
   const minor = `${whole}${fraction.padEnd(2, '0')}`.replace(/^0+(?=\d)/, '');
@@ -146,8 +146,8 @@ export function decimalToMinorUnits(value: string | number, currency: string): s
 }
 
 export function minorUnitsToDecimal(value: string | number, currency: string): string {
-  if (currency.toUpperCase() !== 'CNY') {
-    throw new StripeIntegrationError(`Currency ${currency} is outside the current CNY capability`);
+  if (currency.toUpperCase() !== 'USD') {
+    throw new StripeIntegrationError(`Currency ${currency} is outside the current USD capability`);
   }
   const text = String(value);
   if (!/^[1-9]\d{0,11}$/.test(text)) {

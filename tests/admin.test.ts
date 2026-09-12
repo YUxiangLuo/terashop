@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll } from 'bun:test';
-import { api, rpc, signup, makeAdmin, variantBySku, stockOf, CN_ADDRESS, type TestUser } from './helpers';
+import { api, rpc, signup, makeAdmin, variantBySku, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 
 // 使用 TEE-BLK-S（库存 50）做管理端流程，不影响 orders.test.ts 的数据
 
@@ -19,7 +19,7 @@ beforeAll(async () => {
   // 顾客下一单：T恤 ×3（会命中 seed 的“服饰分类8折”自动促销）
   const { data } = await rpc(
     'create_order',
-    { items: [{ variant_id: teeId, quantity: 3 }], address: CN_ADDRESS },
+    { items: [{ variant_id: teeId, quantity: 3 }], address: TEST_ADDRESS },
     customer.token
   );
   orderId = (data as { id: string }).id;
@@ -87,7 +87,7 @@ describe('发货（履约）', () => {
   test('不能发其他订单的 item', async () => {
     const { data: other } = await rpc(
       'create_order',
-      { items: [{ variant_id: teeId, quantity: 1 }], address: CN_ADDRESS },
+      { items: [{ variant_id: teeId, quantity: 1 }], address: TEST_ADDRESS },
       customer.token
     );
     const { data: otherItems } = await api(
@@ -110,7 +110,7 @@ describe('发货（履约）', () => {
       {
         order_id: orderId,
         items: [{ order_item_id: orderItemId, quantity: 2 }],
-        carrier: '顺丰',
+        carrier: 'Example carrier',
         tracking_number: 'SF001',
       },
       admin.token
@@ -139,7 +139,7 @@ describe('发货（履约）', () => {
 
     const u = await rpc(
       'update_order_address',
-      { order_id: orderId, address: CN_ADDRESS },
+      { order_id: orderId, address: TEST_ADDRESS },
       customer.token
     );
     expect((u.data as { message: string }).message).toContain('address is locked');
@@ -151,7 +151,7 @@ describe('发货（履约）', () => {
       { token: customer.token }
     );
     const f = (data as Record<string, unknown>[])[0];
-    expect(f.carrier).toBe('顺丰');
+    expect(f.carrier).toBe('Example carrier');
     expect(f.tracking_number).toBe('SF001');
   });
 });
@@ -196,7 +196,7 @@ describe('支付标记与订单完成', () => {
   test('发完剩余数量 → 已支付+已发完 → 自动 completed', async () => {
     await rpc(
       'create_fulfillment',
-      { order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }], carrier: '顺丰', tracking_number: 'SF002' },
+      { order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }], carrier: 'Example carrier', tracking_number: 'SF002' },
       admin.token
     );
     const { data } = await api(

@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeAll } from 'bun:test';
-import { api, rpc, signup, makeAdmin, variantBySku, CN_ADDRESS, type TestUser } from './helpers';
+import { api, rpc, signup, makeAdmin, variantBySku, TEST_ADDRESS, type TestUser } from './helpers';
 
 let admin: TestUser;
 let userA: TestUser;
@@ -92,7 +92,7 @@ describe('Metafields', () => {
   test('order 域 metafield 仅订单归属人可见', async () => {
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: await variantBySku('MUG-350'), quantity: 1 }], address: CN_ADDRESS },
+      { items: [{ variant_id: await variantBySku('MUG-350'), quantity: 1 }], address: TEST_ADDRESS },
       userA.token
     );
     const orderId = (o as { id: string }).id;

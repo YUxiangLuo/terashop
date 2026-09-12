@@ -4,7 +4,7 @@ import { HttpError } from '../supabase/functions/_shared/http.ts';
 import { ingestApiPaymentEvent, sha256Hex } from '../supabase/functions/_shared/provider-events.ts';
 import { parseRefundRequest } from '../supabase/functions/_shared/refunds.ts';
 import { decimalToMinorUnits, StripeIntegrationError } from '../supabase/functions/_shared/stripe.ts';
-import { normalizeCnyAmount, PayPalIntegrationError } from '../supabase/functions/_shared/paypal.ts';
+import { normalizeCheckoutAmount, PayPalIntegrationError } from '../supabase/functions/_shared/paypal.ts';
 
 const orderId = '11111111-1111-4111-8111-111111111111';
 const itemId = '22222222-2222-4222-8222-222222222222';
@@ -13,7 +13,7 @@ const item = { order_item_id: itemId, quantity: 1 };
 
 for (const [provider, validateAmount, ErrorType] of [
   ['stripe', decimalToMinorUnits, StripeIntegrationError],
-  ['paypal', normalizeCnyAmount, PayPalIntegrationError],
+  ['paypal', normalizeCheckoutAmount, PayPalIntegrationError],
 ] as const) {
   describe(`${provider} 共用退款参数`, () => {
     test('保留默认值、原始金额及商品行，丢弃额外字段', () => {
@@ -108,7 +108,7 @@ test('API 入箱保持既有哈希、事件 ID、时间戳、模式与错误行�
       ['paypal', 'refund', 'REFUND123', 'PENDING', 'paypal.refund.api_result', true],
     ] as const) {
       const occurredAt = '2026-08-30T00:00:00.000Z';
-      const data = { object_type: resource, status, currency: 'CNY' };
+      const data = { object_type: resource, status, currency: 'USD' };
       // Pin the pre-refactor serialization independently of the shared helper.
       const payloadHash = createHash('sha256')
         .update(JSON.stringify({ occurred_at: occurredAt, data })).digest('hex');

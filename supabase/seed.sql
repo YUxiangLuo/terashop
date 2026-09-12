@@ -170,13 +170,12 @@ from public.product_variants v where v.sku like 'TEE-%';
 
 -- ---------- 运费方式 ----------
 insert into public.shipping_methods (name, description, countries, price, free_above, estimated_days, position) values
-  ('标准快递', '三通一达', '{}',            8.00, 99.00, '3-5天', 1),
-  ('顺丰速运', '次日达',   '{}',           18.00, null,  '1-2天', 2),
-  ('国际挂号', '海外订单', '{US,JP,SG}',   30.00, null,  '7-15天', 3);
+  ('Standard shipping', 'Example flat rate; configure your own carrier and destinations', '{}', 8.00, 99.00, '3-5 days', 1),
+  ('Express shipping', 'Example expedited delivery', '{}', 18.00, null, '1-2 days', 2),
+  ('Regional shipping', 'Example destination allowlist', '{CA,JP,SG}', 30.00, null, '7-15 days', 3);
 
--- ---------- 税率 ----------
-insert into public.tax_rates (name, country, rate) values
-  ('增值税 13%', 'CN', 0.13);
+-- No tax rules are installed by default. Merchants must configure their own tax
+-- policy before selling; a missing rule producing zero is not a tax exemption.
 
 -- ---------- 促销 ----------
 -- 输码型（半自动）

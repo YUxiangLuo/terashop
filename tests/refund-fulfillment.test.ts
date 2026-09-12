@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { api, rpc, signup, makeAdmin, stockOf, type TestUser } from './helpers';
+import { api, rpc, signup, makeAdmin, stockOf, installTestTax, type TestUser } from './helpers';
 import {
   checked, paymentFixture, fixtureOrder, fixtureIntent, paymentEvent, settleIntent,
   type PaymentFixture, type FixtureOrder,
@@ -9,12 +9,16 @@ import { decimalToMinorUnits } from '../supabase/functions/_shared/stripe.ts';
 let admin: TestUser;
 let buyer: TestUser;
 let fixture: PaymentFixture;
+let removeTax: (() => Promise<void>) | undefined;
 beforeAll(async () => {
+  // Leave tax outside line refunds so quantity guards are exercised before full-refund guards.
+  removeTax = await installTestTax();
   admin = await signup(); buyer = await signup();
   await makeAdmin(admin.userId);
   fixture = await paymentFixture(admin);
 });
 afterAll(async () => {
+  await removeTax?.();
   if (fixture) await api(`/rest/v1/products?id=eq.${fixture.productId}`, {
     service: true, method: 'PATCH', body: { status: 'archived' },
   });

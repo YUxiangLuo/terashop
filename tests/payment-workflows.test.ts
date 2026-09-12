@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { handleStripeCreateRefund } from '../supabase/functions/stripe-create-refund/handler.ts';
 import { handlePayPalCaptureOrder } from '../supabase/functions/paypal-capture-order/handler.ts';
 import { type StripeRefundResponse } from '../supabase/functions/_shared/stripe.ts';
-import { api, rpc, signup, makeAdmin, stockOf, CN_ADDRESS, type TestUser } from './helpers';
+import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import {
   checked, paymentFixture, fixtureOrder, fixtureIntent, paymentEvent, settleIntent,
   type PaymentFixture, type FixtureIntent,
@@ -39,7 +39,7 @@ function refundFixture(form: URLSearchParams, status: string): StripeRefundRespo
     id: `re_${crypto.randomUUID().replaceAll('-', '')}`,
     object: 'refund',
     amount: Number(form.get('amount')),
-    currency: 'cny',
+    currency: 'usd',
     status,
     created: Math.floor(Date.now() / 1000),
     payment_intent: form.get('payment_intent'),
@@ -288,12 +288,12 @@ describe('PayPal capture dispatch and cancellation', () => {
     const before = await stockOf(fixture.sku);
     const command = { payment_intent_id: intent.id, customer_id: buyer.userId };
     const beforeCapture = await rpc('update_order_address', {
-      order_id: order.id, address: { ...CN_ADDRESS, country: 'US' },
+      order_id: order.id, address: { ...TEST_ADDRESS, country: 'CA' },
     }, buyer.token);
     expect(beforeCapture.status).toBe(400);
     expect(beforeCapture.data).toMatchObject({ message: expect.stringContaining('payment intent') });
     await checked(rpc('prepare_paypal_capture', command, undefined, true));
-    const change = await rpc('update_order_address', { order_id: order.id, address: { ...CN_ADDRESS, country: 'US' } }, buyer.token);
+    const change = await rpc('update_order_address', { order_id: order.id, address: { ...TEST_ADDRESS, country: 'CA' } }, buyer.token);
     expect(change.status).toBe(400);
     expect((await rpc('cancel_order', { order_id: order.id }, buyer.token)).status).toBe(400);
     await settleIntent(intent);

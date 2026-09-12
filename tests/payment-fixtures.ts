@@ -1,4 +1,4 @@
-import { api, rpc, CN_ADDRESS, type TestUser } from './helpers';
+import { api, rpc, TEST_ADDRESS, type TestUser } from './helpers';
 import { decimalToMinorUnits } from '../supabase/functions/_shared/stripe.ts';
 import { sha256Hex } from '../supabase/functions/_shared/provider-events.ts';
 
@@ -55,7 +55,7 @@ export async function fixtureOrder(
   quantity = 1,
   quoted = true,
 ): Promise<FixtureOrder> {
-  const input = { items: [{ variant_id: fixture.variantId, quantity }], address: CN_ADDRESS };
+  const input = { items: [{ variant_id: fixture.variantId, quantity }], address: TEST_ADDRESS };
   let quoteId: string | null = null;
   if (quoted) {
     const quote = await checked<{ id: string }>(rpc('create_checkout_quote', {

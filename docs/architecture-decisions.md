@@ -10,11 +10,11 @@
 
 ## ADR-002：货币与舍入
 
-- 订单仅支持 CNY，账本金额使用 `numeric(12,2)`，不以浮点数存储或比较金额。
+- 商品、运费、固定金额促销及交易统一使用 USD；数据库约束内部订单与资金账本的币种，Edge 不能单独承担该校验。金额使用 `numeric(12,2)`，不以浮点数存储或比较。
 - 每个调整先用 PostgreSQL `round(numeric, 2)` 舍入再汇总。
 - 整单优惠按行剩余净额，以整数分最大余数法分摊；余数降序、变体 UUID 升序打破平局，合计严格等于目标优惠。
 - 分子使用精确 `numeric` 整数乘法与 `div/mod`，避免 bigint 溢出和除法舍入；行优惠不得超过行毛额。
-- 多币种需要独立的 currency exponent / rounding policy，不复用固定两位小数假设。
+- 两位小数和整数美分是明确的 USD 合同，不是通用币种算法。当前不提供多币种、价格表切换或自动汇兑；真实非 USD 外部资金仍单独记录并对账，不能冒充 USD 结算。
 
 ## ADR-003：订单快照不可变
 
@@ -53,7 +53,8 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 
 ## ADR-007：税务范围
 
-当前按 ISO 国家码选择单一有效比例税率，`include_shipping` 控制运费计税；国家码统一为大写。
+当前按两位国家码选择单一有效比例税率，`include_shipping` 控制运费计税；国家码统一为大写。不内置任何国家的税率，seed 不安装税务规则。
+地址缺失的商品预估不计算目的地税；正式报价和下单必须提供国家。没有匹配规则时返回零税额，只是当前计算结果，不表示当地免税或已完成税务合规，部署前必须配置适用规则。
 州/省、邮编、VAT、免税资格、含税定价及全球税务合规不在范围内，需要专业服务或独立 Tax Quote / Tax Transaction 模块。
 
 ## ADR-008：交易账本与投影同步
@@ -87,7 +88,7 @@ Quote 不提前占用促销 usage；转单时按固定锁顺序锁库存与有�
 
 Inbox 只保存原始事件的 SHA-256 与 allowlist 归一化字段，不保存 card/customer/payer/payee email、OAuth token 或 `client_secret`。
 真实成功 capture/refund 先写不可删除的 `provider_money_movements`，再匹配内部交易；金额冲突、订单取消或预占失效时标记 `action_required` 并写 Outbox，不能丢弃资金、伪造库存或静默复活订单。
-超出 CNY 结账能力的成功资金仍作为 unmatched 外部事实保存；Stripe 另存 minor units、charge exponent 和精确 major amount，避免零小数币种误算。
+超出 USD 结账能力的成功资金仍作为 unmatched 外部事实保存；Stripe 另存 minor units、charge exponent 和精确 major amount，避免零小数币种误算。
 
 ### Stripe
 
@@ -113,6 +114,7 @@ Stripe disputes/chargebacks、payout/balance reconciliation 与 PayPal disputes 
 
 ## ADR-012：客户写入与默认地址
 
+收货地址使用 `recipient_name`、`line1`、`line2`、`city`、`region`、`postal_code`、`country`、`phone`；仅姓名、第一地址行和国家在订单中必填，其余字段按地区/渠道需要填写。地址簿与直接地址快照使用同一解析入口，不默认为 CN 或 US。
 普通客户只能创建 pending 评价，管理员审核后公开；作者修改内容自动回落待审，管理员受权写入不受客户 policy 限制。
 默认地址命令先取客户 advisory lock，再锁目标地址并清理旧默认；创建地址时传 `is_default=true` 也遵守该锁顺序。
 客户端仅可 PATCH 地址内容，身份/归属不可变，既有默认值切换必须走 `set_default_address`，service-role 表写入也不能绕过。

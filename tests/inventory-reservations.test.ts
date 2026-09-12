@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
-  api, rpc, signup, makeAdmin, stockOf, CN_ADDRESS,
+  api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS,
   type TestUser,
 } from './helpers';
 
@@ -82,7 +82,7 @@ const createQuote = (
   extra: Record<string, unknown> = {},
 ) => rpc('create_checkout_quote', {
   items: [{ variant_id: fixture.variantId, quantity }],
-  address: CN_ADDRESS,
+  address: TEST_ADDRESS,
   idempotency_key: idempotencyKey,
   ...extra,
 }, user.token);
@@ -185,14 +185,14 @@ describe('Checkout Quote 与库存预占', () => {
 
     const blockedLegacy = await rpc('create_order', {
       items: [{ variant_id: contentionStock.variantId, quantity: 2 }],
-      address: CN_ADDRESS,
+      address: TEST_ADDRESS,
     }, other.token);
     expect(blockedLegacy.status).toBe(400);
     expect((blockedLegacy.data as { message: string }).message).toContain('reserved stock');
 
     const oneAvailable = await rpc('create_order', {
       items: [{ variant_id: contentionStock.variantId, quantity: 1 }],
-      address: CN_ADDRESS,
+      address: TEST_ADDRESS,
     }, other.token);
     expect(oneAvailable.status).toBe(200);
     expect(await availability(contentionStock.variantId)).toMatchObject({
@@ -222,7 +222,7 @@ describe('Quote 转单与支付确认', () => {
     });
 
     const addressChange = await rpc('update_order_address', {
-      order_id: order.id, address: { ...CN_ADDRESS, detail: '不可改价的新地址' },
+      order_id: order.id, address: { ...TEST_ADDRESS, line1: '不可改价的新地址' },
     }, buyerA.token);
     expect(addressChange.status).toBe(400);
     expect((addressChange.data as { message: string }).message).toContain('quoted order snapshot is immutable');

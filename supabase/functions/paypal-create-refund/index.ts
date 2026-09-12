@@ -11,7 +11,7 @@ import {
   serviceRpc,
 } from '../_shared/http.ts';
 import {
-  normalizeCnyAmount,
+  normalizeCheckoutAmount,
   normalizedPayPalRefundData,
   payPalApiBase,
   parsePayPalLivemode,
@@ -56,7 +56,7 @@ Deno.serve(async (request) => {
 
     const user = await authenticatedUser(request);
     const body = await readJsonBody(request, 65536);
-    const refundRequest = parseRefundRequest(body, normalizeCnyAmount);
+    const refundRequest = parseRefundRequest(body, normalizeCheckoutAmount);
     const local = await serviceRpc<RefundRequestDto>('create_refund_request', {
       ...refundRequest,
       actor_id: user.id,
@@ -85,7 +85,7 @@ Deno.serve(async (request) => {
             preferRepresentation: true,
             body: {
               amount: {
-                value: normalizeCnyAmount(local.amount, local.currency),
+                value: normalizeCheckoutAmount(local.amount, local.currency),
                 currency_code: local.currency,
               },
               custom_id: local.id,
@@ -98,7 +98,7 @@ Deno.serve(async (request) => {
       refund_request_id: local.id,
       provider_reference: refund.id,
       provider_status: localRefundStatus(refund.status),
-      amount: normalizeCnyAmount(local.amount, local.currency),
+      amount: normalizeCheckoutAmount(local.amount, local.currency),
       currency: local.currency,
     });
     const event = await ingestRefund(refund, local, livemode);

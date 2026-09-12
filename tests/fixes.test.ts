@@ -1,7 +1,7 @@
-import { describe, test, expect, beforeAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import {
   api, rpc, signup, makeAdmin, variantBySku, shippingByName, stockOf,
-  CN_ADDRESS, ANON_KEY, API, type TestUser,
+  TEST_ADDRESS, installTestTax, ANON_KEY, API, type TestUser,
 } from './helpers';
 
 // 深度审查修复的回归测试（20260829170005_fixes.sql）
@@ -46,7 +46,10 @@ async function promoUsedCount(code: string): Promise<number> {
   return (data as { used_count: number }[])[0].used_count;
 }
 
+let removeTax: (() => Promise<void>) | undefined;
+afterAll(async () => { await removeTax?.(); });
 beforeAll(async () => {
+  removeTax = await installTestTax();
   admin = await signup();
   await makeAdmin(admin.userId);
   mugId = await variantBySku('MUG-350');
@@ -69,7 +72,7 @@ describe('修复：促销引擎边界与并发', () => {
     }
 
     const { data } = await rpc('price_checkout', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: { country: 'CN' },
+      items: [{ variant_id: mugId, quantity: 1 }], address: { country: 'US' },
     });
     const p = data as {
       lines: { discount_total: number; line_total: number }[];
@@ -100,7 +103,7 @@ describe('修复：促销引擎边界与并发', () => {
 
     // 数据线×2：8折后行余 1.96，BOGO 免 1 件需 4.90 → 免不起，不击穿
     const { data } = await rpc('price_checkout', {
-      items: [{ variant_id: cableId, quantity: 2 }], address: { country: 'CN' },
+      items: [{ variant_id: cableId, quantity: 2 }], address: { country: 'US' },
     });
     const p = data as {
       lines: { discount_total: number; line_total: number }[];
@@ -129,7 +132,7 @@ describe('修复：促销引擎边界与并发', () => {
     expect((row as { code: string }[])[0].code).toBe('MIXCASE25');
 
     const { data } = await rpc('price_checkout', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: { country: 'CN' }, discount_code: 'MiXcAsE25',
+      items: [{ variant_id: mugId, quantity: 1 }], address: { country: 'US' }, discount_code: 'MiXcAsE25',
     });
     expect(Number((data as { discount_total: number }).discount_total)).toBeCloseTo(2.48);
 
@@ -138,10 +141,10 @@ describe('修复：促销引擎边界与并发', () => {
 
   test('free_shipping(stackable=false) 是完整独占：阻止后续独占促销', async () => {
     const fs = await createPromo({ name: '独占免邮', type: 'free_shipping', params: {}, priority: 1, stackable: false });
-    const ship = await shippingByName('标准快递');
+    const ship = await shippingByName('Standard shipping');
 
     const { data } = await rpc('price_checkout', {
-      items: [{ variant_id: teeId, quantity: 1 }], address: { country: 'CN' }, shipping_method_id: ship,
+      items: [{ variant_id: teeId, quantity: 1 }], address: { country: 'US' }, shipping_method_id: ship,
     });
     const p = data as {
       promotions: { name: string }[]; discount_total: number; shipping_total: number;
@@ -156,10 +159,10 @@ describe('修复：促销引擎边界与并发', () => {
 
   test('free_shipping 反向：先算的独占促销也会阻断免邮', async () => {
     const fs = await createPromo({ name: '迟到的免邮', type: 'free_shipping', params: {}, priority: 200, stackable: false });
-    const ship = await shippingByName('标准快递');
+    const ship = await shippingByName('Standard shipping');
 
     const { data } = await rpc('price_checkout', {
-      items: [{ variant_id: teeId, quantity: 1 }], address: { country: 'CN' }, shipping_method_id: ship,
+      items: [{ variant_id: teeId, quantity: 1 }], address: { country: 'US' }, shipping_method_id: ship,
     });
     const p = data as {
       promotions: { name: string }[]; discount_total: number; shipping_total: number;
@@ -180,8 +183,8 @@ describe('修复：促销引擎边界与并发', () => {
     const u2 = await signup();
     // 关键：两人买【不同商品】，变体行锁不构成串行，考验的是促销行锁
     const [r1, r2] = await Promise.all([
-      rpc('create_order', { items: [{ variant_id: kbRedId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'RACE1' }, u1.token),
-      rpc('create_order', { items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'RACE1' }, u2.token),
+      rpc('create_order', { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'RACE1' }, u1.token),
+      rpc('create_order', { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'RACE1' }, u2.token),
     ]);
     const ok = [r1, r2].filter((r) => r.status < 300);
     const fail = [r1, r2].filter((r) => r.status >= 400);
@@ -196,8 +199,8 @@ describe('修复：促销引擎边界与并发', () => {
   test('同用户并发用同码（每客限1）：恰好一单成功', async () => {
     const u = await signup();
     const [r1, r2] = await Promise.all([
-      rpc('create_order', { items: [{ variant_id: kbRedId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'WELCOME10' }, u.token),
-      rpc('create_order', { items: [{ variant_id: kbBrownId, quantity: 1 }], address: CN_ADDRESS, discount_code: 'WELCOME10' }, u.token),
+      rpc('create_order', { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10' }, u.token),
+      rpc('create_order', { items: [{ variant_id: kbBrownId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10' }, u.token),
     ]);
     const ok = [r1, r2].filter((r) => r.status < 300);
     const fail = [r1, r2].filter((r) => r.status >= 400);
@@ -212,7 +215,7 @@ describe('修复：管理端写路径收拢', () => {
   beforeAll(async () => {
     const u = await signup();
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
     orderId = (o as { id: string }).id;
   });
@@ -263,35 +266,35 @@ describe('修复：管理端写路径收拢', () => {
 });
 
 describe('修复：改地址重算税与运法校验', () => {
-  test('CN → US：税重算为 0，total 同步更新', async () => {
+  test('有测试税率的 US → 未配置税率的 CA：税与 total 同步更新', async () => {
     const u = await signup();
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
     const order = o as { id: string; tax_total: number; total: number };
     expect(Number(order.tax_total)).toBeCloseTo(1.29);   // 9.9 × 13%
 
     const { data: after } = await rpc('update_order_address', {
       order_id: order.id,
-      address: { receiver: 'John', phone: '1', country: 'US', detail: '1 Infinite Loop, CA' },
+      address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Infinite Loop, CA' },
     }, u.token);
     const updated = after as { shipping_address: { country: string }; tax_total: number; total: number };
-    expect(updated.shipping_address.country).toBe('US');
-    expect(Number(updated.tax_total)).toBe(0);           // 重算：US 无税率
+    expect(updated.shipping_address.country).toBe('CA');
+    expect(Number(updated.tax_total)).toBe(0);           // 本测试未配置 CA 税率
     expect(Number(updated.total)).toBeCloseTo(9.9);      // 9.9 - 0 + 0 + 0
   });
 
   test('改地址后原运法不支持新国家 → 拒绝', async () => {
     const u = await signup();
-    const intl = await shippingByName('国际挂号');       // 仅 US/JP/SG
+    const intl = await shippingByName('Regional shipping');       // 仅 CA/JP/SG
     const { data: o } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 1 }],
-      address: { receiver: 'John', phone: '1', country: 'US', detail: '1 Infinite Loop' },
+      address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Infinite Loop' },
       shipping_method_id: intl,
     }, u.token);
 
     const { data } = await rpc('update_order_address', {
-      order_id: (o as { id: string }).id, address: CN_ADDRESS,
+      order_id: (o as { id: string }).id, address: TEST_ADDRESS,
     }, u.token);
     expect((data as { message: string }).message).toBe('shipping method not available for this country');
   });
@@ -302,11 +305,11 @@ describe('修复：改地址重算税与运法校验', () => {
       body: { name: '德国增值税', country: 'DE', rate: 0.19, include_shipping: true },
     });
     const rateId = (created as { id: string }[])[0].id;
-    const ship = await shippingByName('标准快递');
+    const ship = await shippingByName('Standard shipping');
 
     const { data } = await rpc('price_checkout', {
       items: [{ variant_id: mugId, quantity: 1 }],
-      address: { receiver: 'Max', phone: '1', country: 'DE', detail: 'Berliner Str. 1' },
+      address: { recipient_name: 'Max', phone: '1', country: 'DE', line1: 'Berliner Str. 1' },
       shipping_method_id: ship,
     });
     const p = data as { shipping_total: number; tax_total: number; total: number };
@@ -327,7 +330,7 @@ describe('修复：退款闭环', () => {
     owner = await signup();
     // 马克杯×3：满3件7折 → line_total 20.79，税 2.70，total 23.49
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 3 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 3 }], address: TEST_ADDRESS,
     }, owner.token);
     orderId = (o as { id: string }).id;
     const { data: items } = await api(`/rest/v1/order_items?order_id=eq.${orderId}&select=id`, { token: owner.token });
@@ -392,7 +395,7 @@ describe('修复：退款闭环', () => {
     const before = await stockOf('MUG-350');
     const u = await signup();
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 2 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
     }, u.token);
     const oid = (o as { id: string }).id;
     await rpc('mark_order_paid', { order_id: oid }, admin.token);
@@ -412,7 +415,7 @@ describe('修复：退款闭环', () => {
   test('未支付订单不能退款', async () => {
     const u = await signup();
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
     const { data } = await rpc('refund_order', { order_id: (o as { id: string }).id }, admin.token);
     expect((data as { message: string }).message).toContain('not refundable');
@@ -494,7 +497,7 @@ describe('修复：库存口径与回补仓', () => {
       await setDefault(whSh.id, false);
       await setDefault(locBId, true);
       const { data: o } = await rpc('create_order', {
-        items: [{ variant_id: mugId, quantity: 2 }], address: CN_ADDRESS,
+        items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
       }, u.token);
       expect(await levelAt(locBId)).toBe(8);
 
@@ -596,7 +599,7 @@ describe('修复：扩展体系与账号安全', () => {
 
   test('anonymize_user：清 PII、删地址与 customer 域 metafield', async () => {
     const u = await signup();
-    await api('/rest/v1/addresses', { token: u.token, method: 'POST', body: CN_ADDRESS });
+    await api('/rest/v1/addresses', { token: u.token, method: 'POST', body: TEST_ADDRESS });
     await api('/rest/v1/metafields', {
       token: admin.token, method: 'POST',
       body: { owner_type: 'customer', owner_id: u.userId, namespace: 'custom', key: 'vip', type: 'number', value: 1 },
@@ -657,7 +660,7 @@ describe('修复：完整性约束', () => {
   test('payments.amount 不允许负数（方向由 kind 表达）', async () => {
     const u = await signup();
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: CN_ADDRESS,
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
     const { data } = await api('/rest/v1/payments', {
       service: true, method: 'POST',
