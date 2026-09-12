@@ -164,7 +164,7 @@ CREATE TABLE commerce.payment_provider_events (
     CONSTRAINT payment_provider_events_last_error_check CHECK (((last_error IS NULL) OR (char_length(last_error) <= 4000))),
     CONSTRAINT payment_provider_events_object_reference_check CHECK (((object_reference IS NULL) OR ((length(object_reference) >= 1) AND (length(object_reference) <= 255)))),
     CONSTRAINT payment_provider_events_payload_hash_check CHECK ((payload_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT payment_provider_events_provider_check CHECK (((length(btrim(provider)) >= 1) AND (length(btrim(provider)) <= 50))),
+    CONSTRAINT payment_provider_events_provider_check CHECK (provider = 'paypal'),
     CONSTRAINT payment_provider_events_provider_event_id_check CHECK (((length(btrim(provider_event_id)) >= 1) AND (length(btrim(provider_event_id)) <= 255))),
     CONSTRAINT payment_provider_events_resource_type_check CHECK (((resource_type IS NULL) OR (resource_type = ANY (ARRAY['payment_intent'::text, 'payment_transaction'::text, 'refund_request'::text, 'provider_money_movement'::text])))),
     CONSTRAINT payment_provider_events_source_check CHECK ((source = ANY (ARRAY['webhook'::text, 'api_response'::text]))),
@@ -184,23 +184,14 @@ CREATE TABLE commerce.payment_intents (
     expires_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    provider_cancel_claimed_at timestamp with time zone,
-    provider_cancel_attempts integer DEFAULT 0 NOT NULL,
-    provider_cancel_last_error text,
-    provider_terminal_status text,
-    provider_terminal_observed_at timestamp with time zone,
     provider_capture_requested_at timestamp with time zone,
     CONSTRAINT payment_intents_amount_check CHECK ((amount > (0)::numeric)),
     CONSTRAINT payment_intents_capture_provider_ck CHECK (((provider_capture_requested_at IS NULL) OR (provider = 'paypal'::text))),
     CONSTRAINT payment_intents_currency_check CHECK (currency = 'USD'),
     CONSTRAINT payment_intents_idempotency_key_check CHECK ((length(btrim(idempotency_key)) > 0)),
     CONSTRAINT payment_intents_metadata_check CHECK ((jsonb_typeof(metadata) = 'object'::text)),
-    CONSTRAINT payment_intents_provider_cancel_attempts_check CHECK (((provider_cancel_attempts >= 0) AND (provider_cancel_attempts <= 100))),
-    CONSTRAINT payment_intents_provider_cancel_last_error_check CHECK (((provider_cancel_last_error IS NULL) OR (char_length(provider_cancel_last_error) <= 200))),
-    CONSTRAINT payment_intents_provider_check CHECK ((length(btrim(provider)) > 0)),
-    CONSTRAINT payment_intents_provider_terminal_pair_ck CHECK (((provider_terminal_status IS NULL) = (provider_terminal_observed_at IS NULL))),
-    CONSTRAINT payment_intents_provider_terminal_status_check CHECK (((provider_terminal_status IS NULL) OR (provider_terminal_status = ANY (ARRAY['succeeded'::text, 'canceled'::text])))),
-    CONSTRAINT payment_intents_status_check CHECK ((status = ANY (ARRAY['requires_payment_method'::text, 'requires_action'::text, 'processing'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
+    CONSTRAINT payment_intents_provider_check CHECK (provider = 'paypal'),
+    CONSTRAINT payment_intents_status_check CHECK ((status = ANY (ARRAY['requires_action'::text, 'processing'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
 
 CREATE TABLE commerce.provider_money_movements (
@@ -219,19 +210,15 @@ CREATE TABLE commerce.provider_money_movements (
     last_error text,
     matched_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    provider_amount_minor numeric(20,0),
-    provider_currency_exponent smallint,
     CONSTRAINT provider_money_movements_amount_check CHECK ((amount > (0)::numeric)),
     CONSTRAINT provider_money_movements_check CHECK (((reconciliation_status = 'matched'::text) = (payment_transaction_id IS NOT NULL))),
     CONSTRAINT provider_money_movements_check1 CHECK (((reconciliation_status = 'matched'::text) = (matched_at IS NOT NULL))),
     CONSTRAINT provider_money_movements_currency_check CHECK ((currency ~ '^[A-Z]{3}$'::text)),
-    CONSTRAINT provider_money_movements_exact_amount_ck CHECK ((((provider_amount_minor IS NULL) AND (provider_currency_exponent IS NULL)) OR ((provider_amount_minor > (0)::numeric) AND (provider_currency_exponent = ANY (ARRAY[0, 2])) AND (amount = (provider_amount_minor / power((10)::numeric, (provider_currency_exponent)::numeric)))))),
     CONSTRAINT provider_money_movements_kind_check CHECK ((kind = ANY (ARRAY['capture'::text, 'refund'::text]))),
     CONSTRAINT provider_money_movements_last_error_check CHECK (((last_error IS NULL) OR (char_length(last_error) <= 4000))),
-    CONSTRAINT provider_money_movements_provider_check CHECK (((length(btrim(provider)) >= 1) AND (length(btrim(provider)) <= 50))),
+    CONSTRAINT provider_money_movements_provider_check CHECK (provider = 'paypal'),
     CONSTRAINT provider_money_movements_provider_reference_check CHECK (((length(provider_reference) >= 1) AND (length(provider_reference) <= 255))),
-    CONSTRAINT provider_money_movements_reconciliation_status_check CHECK ((reconciliation_status = ANY (ARRAY['unmatched'::text, 'matched'::text, 'action_required'::text]))),
-    CONSTRAINT provider_money_movements_stripe_exact_ck CHECK (((provider <> 'stripe'::text) OR ((provider_amount_minor IS NOT NULL) AND (provider_currency_exponent IS NOT NULL))))
+    CONSTRAINT provider_money_movements_reconciliation_status_check CHECK ((reconciliation_status = ANY (ARRAY['unmatched'::text, 'matched'::text, 'action_required'::text])))
 );
 
 CREATE TABLE commerce.refund_requests (
@@ -267,13 +254,13 @@ CREATE TABLE commerce.refund_requests (
     CONSTRAINT refund_requests_failure_message_check CHECK (((failure_message IS NULL) OR (char_length(failure_message) <= 2000))),
     CONSTRAINT refund_requests_idempotency_key_check CHECK (((length(btrim(idempotency_key)) >= 1) AND (length(btrim(idempotency_key)) <= 200))),
     CONSTRAINT refund_requests_metadata_check CHECK (((jsonb_typeof(metadata) = 'object'::text) AND (pg_column_size(metadata) <= 16384))),
-    CONSTRAINT refund_requests_provider_check CHECK (((length(btrim(provider)) >= 1) AND (length(btrim(provider)) <= 50))),
+    CONSTRAINT refund_requests_provider_check CHECK (provider = 'paypal'),
     CONSTRAINT refund_requests_provider_poll_attempts_check CHECK ((provider_poll_attempts >= 0)),
     CONSTRAINT refund_requests_provider_reference_check CHECK (((provider_reference IS NULL) OR ((length(provider_reference) >= 1) AND (length(provider_reference) <= 255)))),
     CONSTRAINT refund_requests_reason_check CHECK (((reason IS NULL) OR (char_length(reason) <= 1000))),
     CONSTRAINT refund_requests_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT refund_requests_source_check CHECK ((source = ANY (ARRAY['items'::text, 'custom_amount'::text, 'remaining'::text]))),
-    CONSTRAINT refund_requests_status_check CHECK ((status = ANY (ARRAY['requested'::text, 'submitted'::text, 'processing'::text, 'requires_action'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
+    CONSTRAINT refund_requests_status_check CHECK ((status = ANY (ARRAY['requested'::text, 'submitted'::text, 'processing'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
 
 CREATE TABLE public.profiles (
@@ -1292,9 +1279,8 @@ CREATE INDEX fulfillment_lines_order_item_idx ON commerce.fulfillment_lines USIN
 CREATE INDEX order_adjustments_order_idx ON commerce.order_adjustments USING btree (order_id, id);
 CREATE INDEX order_adjustments_order_item_idx ON commerce.order_adjustments USING btree (order_item_id) WHERE (order_item_id IS NOT NULL);
 CREATE INDEX outbox_events_claim_idx ON commerce.outbox_events USING btree (status, available_at, id) WHERE (status = ANY (ARRAY['pending'::text, 'failed'::text, 'processing'::text]));
-CREATE UNIQUE INDEX payment_intents_one_active_per_order_uk ON commerce.payment_intents USING btree (order_id) WHERE (status = ANY (ARRAY['requires_payment_method'::text, 'requires_action'::text, 'processing'::text]));
+CREATE UNIQUE INDEX payment_intents_one_active_per_order_uk ON commerce.payment_intents USING btree (order_id) WHERE (status = ANY (ARRAY['requires_action'::text, 'processing'::text]));
 CREATE INDEX payment_intents_order_idx ON commerce.payment_intents USING btree (order_id, created_at DESC);
-CREATE INDEX payment_intents_provider_cancel_idx ON commerce.payment_intents USING btree (COALESCE(provider_cancel_claimed_at, '-infinity'::timestamp with time zone), expires_at, id) WHERE ((provider = 'stripe'::text) AND (provider_reference IS NOT NULL) AND (status <> 'succeeded'::text) AND (provider_terminal_status IS NULL) AND (provider_cancel_attempts < 100));
 CREATE UNIQUE INDEX payment_intents_provider_reference_uk ON commerce.payment_intents USING btree (provider, provider_reference) WHERE (provider_reference IS NOT NULL);
 CREATE INDEX payment_provider_events_object_idx ON commerce.payment_provider_events USING btree (provider, object_reference, created_at) WHERE (object_reference IS NOT NULL);
 CREATE INDEX payment_provider_events_retry_idx ON commerce.payment_provider_events USING btree (status, created_at, id) WHERE (status = ANY (ARRAY['received'::text, 'failed'::text]));
@@ -1306,9 +1292,9 @@ CREATE INDEX provider_money_movements_order_idx ON commerce.provider_money_movem
 CREATE INDEX provider_money_movements_reconcile_idx ON commerce.provider_money_movements USING btree (reconciliation_status, created_at, id) WHERE (reconciliation_status <> 'matched'::text);
 CREATE INDEX refund_lines_order_item_idx ON commerce.refund_lines USING btree (order_item_id, refund_id);
 CREATE INDEX refund_request_lines_item_idx ON commerce.refund_request_lines USING btree (order_item_id, refund_request_id);
-CREATE INDEX refund_requests_active_idx ON commerce.refund_requests USING btree (order_id, parent_transaction_id, id) WHERE (status = ANY (ARRAY['requested'::text, 'submitted'::text, 'processing'::text, 'requires_action'::text]));
+CREATE INDEX refund_requests_active_idx ON commerce.refund_requests USING btree (order_id, parent_transaction_id, id) WHERE (status = ANY (ARRAY['requested'::text, 'submitted'::text, 'processing'::text]));
 CREATE INDEX refund_requests_order_idx ON commerce.refund_requests USING btree (order_id, created_at DESC);
-CREATE INDEX refund_requests_provider_poll_idx ON commerce.refund_requests USING btree (provider, COALESCE(last_provider_poll_at, created_at), created_at, id) WHERE ((provider_reference IS NOT NULL) AND (status = ANY (ARRAY['submitted'::text, 'processing'::text, 'requires_action'::text])));
+CREATE INDEX refund_requests_provider_poll_idx ON commerce.refund_requests USING btree (provider, COALESCE(last_provider_poll_at, created_at), created_at, id) WHERE ((provider_reference IS NOT NULL) AND (status = ANY (ARRAY['submitted'::text, 'processing'::text])));
 CREATE UNIQUE INDEX refund_requests_provider_reference_uk ON commerce.refund_requests USING btree (provider, provider_reference) WHERE (provider_reference IS NOT NULL);
 CREATE INDEX refunds_order_idx ON commerce.refunds USING btree (order_id, created_at DESC);
 CREATE INDEX addresses_customer_idx ON public.addresses USING btree (customer_id);

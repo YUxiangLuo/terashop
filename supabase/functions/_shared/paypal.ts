@@ -1,3 +1,16 @@
+import { optionalEnv, requiredEnv } from './http.ts';
+import { ingestApiPaymentEvent, type ProviderEventResult } from './provider-events.ts';
+
+export function payPalClientConfig() {
+  const livemode = parsePayPalLivemode(optionalEnv('PAYPAL_LIVEMODE', 'false'));
+  return {
+    livemode,
+    clientId: requiredEnv('PAYPAL_CLIENT_ID'),
+    clientSecret: requiredEnv('PAYPAL_CLIENT_SECRET'),
+    apiBase: payPalApiBase(livemode, optionalEnv('PAYPAL_API_BASE')),
+  };
+}
+
 export class PayPalIntegrationError extends Error {
   constructor(
     message: string,
@@ -93,9 +106,29 @@ async function responseJson(response: Response): Promise<Record<string, unknown>
   if (Number.isFinite(declared) && declared > 1_048_576) {
     throw new PayPalIntegrationError('PayPal response is too large', 502, 'paypal_bad_response');
   }
-  const text = await response.text();
-  if (encoder.encode(text).byteLength > 1_048_576) {
-    throw new PayPalIntegrationError('PayPal response is too large', 502, 'paypal_bad_response');
+  let text = '';
+  const reader = response.body?.getReader();
+  if (reader) {
+    const decoder = new TextDecoder();
+    let size = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 1_048_576) {
+          throw new PayPalIntegrationError('PayPal response is too large', 502, 'paypal_bad_response');
+        }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      if (error instanceof PayPalIntegrationError) throw error;
+      throw new PayPalIntegrationError('PayPal response interrupted', 502, 'paypal_unavailable');
+    } finally {
+      reader.releaseLock();
+    }
   }
   let parsed: unknown;
   try {
@@ -122,6 +155,7 @@ async function fetchPayPal(
   try {
     return await (config.fetcher ?? fetch)(url, {
       ...init,
+      redirect: 'error',
       signal: init.signal ?? AbortSignal.timeout(config.timeoutMs ?? 10_000),
     });
   } catch (error) {
@@ -150,10 +184,12 @@ async function accessToken(config: PayPalClientConfig, forceRefresh = false): Pr
   }, config);
   const parsed = await responseJson(response);
   if (!response.ok || typeof parsed.access_token !== 'string'
-      || !Number.isFinite(Number(parsed.expires_in))) {
+      || !/^\S{1,8192}$/.test(parsed.access_token)
+      || typeof parsed.expires_in !== 'number'
+      || !Number.isFinite(parsed.expires_in) || parsed.expires_in <= 0) {
     throw new PayPalIntegrationError('PayPal authentication failed', 502, 'paypal_auth_failed');
   }
-  const expiresIn = Math.max(60, Math.min(Number(parsed.expires_in), 43_200));
+  const expiresIn = Math.min(parsed.expires_in, 43_200);
   tokenCache.set(cacheKey, {
     token: parsed.access_token,
     expiresAt: Date.now() + expiresIn * 1000,
@@ -581,9 +617,14 @@ export interface PayPalRefund extends Record<string, unknown> {
   links?: Array<Record<string, unknown>>;
 }
 
+// Payments v2 custom_id is optional. POST provenance is the capture endpoint +
+// durable PayPal-Request-Id; subsequent GETs must match the already bound Refund ID.
 export function validatePayPalRefund(
   refund: PayPalRefund,
-  local: { id: string; amount: number | string; currency: string; parent_provider_reference: string },
+  local: {
+    id: string; amount: number | string; currency: string;
+    provider_reference: string | null; parent_provider_reference: string;
+  },
   enforceExpectedMoney = true,
 ): void {
   requirePayPalId(refund.id, 'refund id');
@@ -593,7 +634,8 @@ export function validatePayPalRefund(
       || (refund.update_time !== undefined
           && (typeof refund.update_time !== 'string'
               || !Number.isFinite(Date.parse(refund.update_time))))
-      || refund.custom_id !== local.id
+      || (local.provider_reference !== null && refund.id !== local.provider_reference)
+      || (refund.custom_id !== undefined && refund.custom_id !== local.id)
       || (enforceExpectedMoney
           && normalizeCheckoutAmount(refund.amount.value, refund.amount.currency_code)
              !== normalizeCheckoutAmount(local.amount, local.currency))) {
@@ -691,10 +733,35 @@ export function payPalApprovalUrl(order: PayPalOrder, livemode: boolean): string
   const hosts = livemode
     ? new Set(['paypal.com', 'www.paypal.com'])
     : new Set(['sandbox.paypal.com', 'www.sandbox.paypal.com']);
-  if (url.protocol !== 'https:' || !hosts.has(url.hostname)) {
+  if (url.protocol !== 'https:' || !hosts.has(url.hostname)
+      || url.username || url.password || (url.port && url.port !== '443')) {
     throw new PayPalIntegrationError('PayPal approval URL is untrusted', 502, 'paypal_bad_response');
   }
   return url.toString();
+}
+
+export function ingestPayPalCapture(
+  capture: PayPalCapture, local: LocalPayPalIntent, orderReference: string, livemode: boolean,
+): Promise<ProviderEventResult> {
+  return ingestApiPaymentEvent({
+    provider: 'paypal', resource: 'capture', reference: capture.id, status: capture.status,
+    eventType: 'paypal.capture.api_result', livemode,
+    occurredAt: paypalOccurredAt(capture.update_time ?? capture.create_time),
+    data: normalizedPayPalCaptureData(capture, local, orderReference),
+  });
+}
+
+export function ingestPayPalRefund(
+  refund: PayPalRefund,
+  local: { id: string; order_id: string; parent_provider_reference: string },
+  livemode: boolean,
+): Promise<ProviderEventResult> {
+  return ingestApiPaymentEvent({
+    provider: 'paypal', resource: 'refund', reference: refund.id, status: refund.status,
+    eventType: 'paypal.refund.api_result', livemode,
+    occurredAt: paypalOccurredAt(refund.update_time ?? refund.create_time),
+    data: normalizedPayPalRefundData(refund, local),
+  });
 }
 
 export function paypalOccurredAt(value: unknown): string {

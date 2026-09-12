@@ -6,8 +6,8 @@ export interface ProviderEventResult {
 }
 
 interface ApiPaymentEvent {
-  provider: 'stripe' | 'paypal';
-  resource: 'payment_intent' | 'capture' | 'refund';
+  provider: 'paypal';
+  resource: 'capture' | 'refund';
   reference: string;
   status: string;
   eventType: string;

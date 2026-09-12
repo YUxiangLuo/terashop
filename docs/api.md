@@ -55,10 +55,9 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 
 | Edge Function | 调用方 | 请求 |
 | --- | --- | --- |
-| `stripe-create-payment-intent` | 客户 | `order_id`、`idempotency_key`；取得 `client_secret` 后由 Stripe 客户端确认 |
 | `paypal-create-order` | 客户 | `order_id`、`idempotency_key`；跳转返回的 `approve_url` |
 | `paypal-capture-order` | 客户 | 买家批准后传 `payment_intent_id` |
-| `stripe-create-refund` / `paypal-create-refund` | 管理员 | `order_id`、`idempotency_key`、可选 `items` 或 `amount`、`restock`、`reason` |
+| `paypal-create-refund` | 管理员 | `order_id`、`idempotency_key`、可选 `items` 或 `amount`、`restock`、`reason` |
 
 退款示例：
 

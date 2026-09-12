@@ -21,8 +21,8 @@
 已支付订单的商品、价格、税、运费和地址快照不可原地重算，trigger 同样约束 service role；退款字段仅由受控流程单向推进。
 后续商业变更必须由 Order Edit、Adjustment、补扣或退款事实表达，而不是覆盖原始记录。
 
-活动 PaymentIntent 同样锁定未支付订单的商业快照；已绑定、但未确认 Stripe 渠道取消的本地 failed/cancelled 意图也继续保护快照。
-金额/币种错配的意图由取消 Worker 回收并对账，不改写意图金额来掩盖错配。
+活动 PaymentIntent 同样锁定未支付订单的商业快照。
+金额/币种错配的资金进入对账，不改写意图金额来掩盖错配。
 地址编辑与意图创建共用 quote → order 锁；结算使用 intent → quote → order，不能先锁 order 再等待 intent。
 直接商品行写入只以 NOWAIT 获取订单锁，竞争时返回 409，避免在已持商品行锁时反向等待订单锁。
 
@@ -68,15 +68,15 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 ## ADR-009：支付信任边界与 Outbox
 
 支付创建/捕获和 Worker RPC 仅授予 service role，浏览器不得持有该凭据。
-客户/管理员 Edge 入口通过 Auth `/user` 验证身份，Stripe 另有网关 JWT 验证；数据库最终检查归属/管理员。
-Stripe 对 raw body 做 HMAC-SHA256 验签；PayPal 通过 OAuth2 调官方 postback API 验证 transmission headers；验签后才能入箱。
+客户/管理员 Edge 入口通过 Auth `/user` 验证身份；数据库最终检查归属/管理员。
+PayPal 通过 OAuth2 调官方 postback API 验证 transmission headers；验签后才能入箱。
 库存消费、订单状态、交易、审计和 Outbox 在同一事务提交；同一订单最多一个活跃 PaymentIntent。
-Stripe 换卡复用意图，PayPal Capture declined 后终结当前意图并允许新建 Order。
+PayPal Capture declined 后终结当前意图并允许新建 Order。
 
 PayPal Capture POST 前必须调用 `prepare_paypal_capture`，按 intent → quote → order 顺序复核归属、金额、订单及预占，并持久化捕获标记。
 普通取消不能穿透该标记，网络错误不清除它；重试先查询渠道，再复用原意图 UUID 作为幂等键。
 Quote 到期仍可释放库存并取消订单，不无限延长 hold；无 Quote 的不明捕获需显式重试/对账，不猜测失败。
-`mark_order_paid` 不得先取消仍能扣款的线上意图再手工收款；本地终态不等于渠道终态，撤销 Worker 也扫描不可支付订单上的意图。
+`mark_order_paid` 不得先取消仍能扣款的线上意图再手工收款；不明 Capture 保留保护，已终结失败的 Capture 才允许新支付尝试。
 
 ## ADR-010：Quote 的价格与预占边界
 
@@ -86,21 +86,15 @@ Quote 不提前占用促销 usage；转单时按固定锁顺序锁库存与有�
 
 ## ADR-011：渠道事件、外部资金与异步退款
 
-Inbox 只保存原始事件的 SHA-256 与 allowlist 归一化字段，不保存 card/customer/payer/payee email、OAuth token 或 `client_secret`。
+Inbox 只保存原始事件的 SHA-256 与 allowlist 归一化字段，不保存 customer/payer/payee email 或 OAuth token。
 真实成功 capture/refund 先写不可删除的 `provider_money_movements`，再匹配内部交易；金额冲突、订单取消或预占失效时标记 `action_required` 并写 Outbox，不能丢弃资金、伪造库存或静默复活订单。
-超出 USD 结账能力的成功资金仍作为 unmatched 外部事实保存；Stripe 另存 minor units、charge exponent 和精确 major amount，避免零小数币种误算。
-
-### Stripe
-
-- 只接受平台账户 snapshot Webhook，不支持 Connect / organization context。
-- 按 `occurred_at` 阻止旧非资金事件回退新状态，成功资金始终优先持久化。
-- 可信 API 绑定的 provider reference 优先于可变 metadata；仅有 metadata 的早到事件先 unmatched，绑定后重试，不能自动绑定本地对象。
-- Inbox 持久化后即使业务处理失败仍向 Stripe 返回 2xx，由重试 Worker 恢复。
-- Quote/订单过期后还须以稳定幂等键取消渠道 PaymentIntent；取消与成功竞态仍按真实资金入箱。短 hold 默认禁用 redirect；开放长异步支付前须另定预占与晚到资金策略。
-- Refund API 没有 `livemode`，模式来自已校验密钥；Webhook 模式来自已验签 envelope。绑定退款不回退 processing/requires_action，终态由 Inbox 推进。
-- 退款除本地 UUID 外还必须核对父 PaymentIntent / Charge；成功但关联冲突的退款先记资金事实再对账。
+超出 USD 结账能力的成功资金仍按 PayPal 返回的十进制金额保存并对账，不能推进 USD 订单。
 
 ### PayPal
+
+PayPal 是唯一线上渠道，数据库约束意图、Inbox、渠道资金和异步退款的 provider；保留管理员手工收付款账本。
+只用 API 绑定的 Order / Refund ID 或已入账 Capture 匹配本地对象，不能靠可变 metadata 自动绑定；早到事件先 unmatched，绑定后由 Worker 重试。
+Refund API 的 `custom_id` 可缺省，已绑定 ID 和存在的父 Capture 引用必须匹配；金额/币种错配和 Webhook 父引用冲突先保存成功资金，再对账，不能提前回库。
 
 Order ID 是批准对象，Capture ID 才是资金引用；只有 COMPLETED 消费库存，PENDING 等后续事件。
 REVERSED 记录外部退款方向异常、阻止继续退款并触发对账；即使先于 completed 到达，也不消费库存、标记已支付或伪造本地退款。
@@ -110,7 +104,7 @@ pending Refund 由 Worker 查询具体资源，`PAYMENT.CAPTURE.REFUNDED` 仅作
 
 退款请求先预留金额/数量，渠道成功后才在单事务写成功账本、更新订单并按原扣减仓回库；failed/cancelled 释放预留。
 同步 `refund_order` 仅用于手工/测试流程，不能穿透活跃渠道退款请求。
-Stripe disputes/chargebacks、payout/balance reconciliation 与 PayPal disputes 仍需 Dashboard 人工监控；没有专用账本前不接入自动退款/库存状态机。
+PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard 人工监控；没有专用账本前不接入自动退款/库存状态机。
 
 ## ADR-012：客户写入与默认地址
 

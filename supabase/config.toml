@@ -174,20 +174,6 @@ policy = "per_worker"
 inspector_port = 8083
 deno_version = 2
 
-# Stripe commands: gateway JWT + handler Auth /user verification.
-# Webhooks: provider signatures. Workers: handler service-token verification.
-[functions.stripe-create-payment-intent]
-verify_jwt = true
-
-[functions.stripe-webhook]
-verify_jwt = false
-
-[functions.stripe-create-refund]
-verify_jwt = true
-
-[functions.stripe-reconcile-payment-intents]
-verify_jwt = false
-
 # PayPal customer/admin commands verify JWT in the handler, not the gateway.
 [functions.paypal-create-order]
 verify_jwt = false

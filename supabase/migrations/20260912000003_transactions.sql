@@ -260,7 +260,7 @@ CREATE FUNCTION private.order_item_fulfillment_balance(p_order_item_id uuid, p_u
              select sum(l.cancelled_quantity) from commerce.refund_request_lines l
              join commerce.refund_requests r on r.id = l.refund_request_id
              where l.order_item_id = oi.id
-               and r.status in ('requested', 'submitted', 'processing', 'requires_action')
+               and r.status in ('requested', 'submitted', 'processing')
                and (p_exclude_request_id is null or r.id <> p_exclude_request_id)
            ), 0)::integer as reserved
     from public.order_items oi where oi.id = p_order_item_id
@@ -330,7 +330,7 @@ begin
         select 1 from commerce.refund_request_lines l
         join commerce.refund_requests r on r.id = l.refund_request_id
         where l.order_item_id = oi.id
-          and r.status in ('requested', 'submitted', 'processing', 'requires_action')
+          and r.status in ('requested', 'submitted', 'processing')
       )
     )
   ) then

@@ -1,6 +1,6 @@
 # tera-headless
 
-基于 Supabase 的 Headless 电商后端。PostgreSQL 承担交易逻辑与权限控制，TypeScript Edge Functions 适配 Stripe / PayPal；不包含商城前台和管理后台。
+基于 Supabase 的 Headless 电商后端。PostgreSQL 承担交易逻辑与权限控制，TypeScript Edge Functions 适配 PayPal；不包含商城前台和管理后台。
 
 面向全球客户的单店后端，统一使用 **USD** 定价和结账，不做多币种或自动换汇。美元不代表美国地址：收货国家必须显式提供，不预设任何国家或税率。当前税务仅支持可配置的国家级比例规则，复杂税务及自动争议/结算对账不在范围内。
 
@@ -25,7 +25,7 @@ Google OAuth 默认关闭；启用前必须吊销并轮换历史已暴露的凭�
 | 商品 | 分类、商品选项/SKU、图片、多仓库存数据；当前结账使用默认仓 |
 | 结账 | 统一计价、促销、运费/税、Quote 库存预占、幂等转单 |
 | 交易 | 支付、部分退款、履约、关系化账本、审计、Inbox / Outbox |
-| 支付渠道 | Stripe PaymentIntent；PayPal Order / Capture；异步退款与对账入口 |
+| 支付渠道 | PayPal Order / Capture；异步退款与对账入口 |
 | 客户与内容 | 地址簿、评价审核、Metafields / Metaobjects |
 
 ```text
@@ -60,7 +60,7 @@ bun run stop
 无数据库时可运行支付适配与共享逻辑的独立测试：
 
 ```bash
-bun test tests/stripe-edge.test.ts tests/paypal-edge.test.ts tests/payment-shared.test.ts
+bun test tests/paypal-edge.test.ts tests/payment-shared.test.ts
 ```
 
 完整测试需要本地 Supabase；handler 回归使用真实 Auth/PostgreSQL，仅 mock 渠道 HTTP，并以事务屏障验证锁竞争。它们不能替代真实渠道 Sandbox 和部署后网关测试。

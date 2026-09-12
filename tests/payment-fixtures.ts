@@ -1,5 +1,4 @@
 import { api, rpc, TEST_ADDRESS, type TestUser } from './helpers';
-import { decimalToMinorUnits } from '../supabase/functions/_shared/stripe.ts';
 import { sha256Hex } from '../supabase/functions/_shared/provider-events.ts';
 
 export interface PaymentFixture {
@@ -73,14 +72,12 @@ export async function fixtureOrder(
 }
 
 export async function fixtureIntent(
-  order: FixtureOrder, buyer: TestUser, provider: 'stripe' | 'paypal' = 'stripe',
+  order: FixtureOrder, buyer: TestUser, provider: 'paypal' = 'paypal',
 ): Promise<FixtureIntent> {
   const intent = await checked<FixtureIntent>(rpc('create_payment_intent_for_customer', {
     order_id: order.id, customer_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
   }, undefined, true));
-  const reference = provider === 'stripe'
-    ? `pi_${crypto.randomUUID().replaceAll('-', '')}`
-    : `ORDER${crypto.randomUUID().replaceAll('-', '')}`;
+  const reference = `ORDER${crypto.randomUUID().replaceAll('-', '')}`;
   return checked<FixtureIntent>(rpc('bind_payment_intent_provider', {
     payment_intent_id: intent.id, provider_reference: reference,
     provider_status: 'requires_action', amount: intent.amount, currency: intent.currency,
@@ -88,7 +85,7 @@ export async function fixtureIntent(
 }
 
 export async function paymentEvent(
-  provider: 'stripe' | 'paypal', eventType: string,
+  provider: 'paypal', eventType: string,
   reference: string, data: Record<string, unknown>,
 ): Promise<{ status: string; outcome: string }> {
   return checked(rpc('ingest_payment_provider_event', {
@@ -99,13 +96,7 @@ export async function paymentEvent(
 }
 
 export async function settleIntent(intent: FixtureIntent): Promise<void> {
-  const result = intent.provider === 'stripe'
-    ? await paymentEvent('stripe', 'payment_intent.succeeded', intent.provider_reference, {
-        object_type: 'payment_intent', status: 'succeeded',
-        amount_minor: decimalToMinorUnits(intent.amount, intent.currency), currency: intent.currency,
-        metadata: { tera_payment_intent_id: intent.id },
-      })
-    : await paymentEvent('paypal', 'PAYMENT.CAPTURE.COMPLETED', `CAPTURE${intent.id.replaceAll('-', '')}`, {
+  const result = await paymentEvent('paypal', 'PAYMENT.CAPTURE.COMPLETED', `CAPTURE${intent.id.replaceAll('-', '')}`, {
         object_type: 'capture', status: 'completed', amount: intent.amount.toFixed(2),
         currency: intent.currency, order_reference: intent.provider_reference,
         metadata: { tera_payment_intent_id: intent.id },

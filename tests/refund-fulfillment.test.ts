@@ -4,7 +4,7 @@ import {
   checked, paymentFixture, fixtureOrder, fixtureIntent, paymentEvent, settleIntent,
   type PaymentFixture, type FixtureOrder,
 } from './payment-fixtures';
-import { decimalToMinorUnits } from '../supabase/functions/_shared/stripe.ts';
+import { normalizeCheckoutAmount } from '../supabase/functions/_shared/paypal.ts';
 
 let admin: TestUser;
 let buyer: TestUser;
@@ -52,7 +52,7 @@ async function itemRefund(order: FixtureOrder, quantity: number): Promise<void> 
 }
 async function requestRefund(order: FixtureOrder, quantity: number): Promise<RefundRequest> {
   return checked(rpc('create_refund_request', {
-    order_id: order.id, actor_id: admin.userId, provider: 'stripe',
+    order_id: order.id, actor_id: admin.userId, provider: 'paypal',
     idempotency_key: crypto.randomUUID(), items: shipmentItems(order, quantity), restock: true,
   }, undefined, true));
 }
@@ -172,10 +172,10 @@ describe('Refund cancellation and fulfillment quantities', () => {
         expect((await fulfill(order, 1)).status).toBe(200);
         expect((await fulfill(order, 1)).status).toBe(400);
       }
-      const result = await paymentEvent('stripe', 'refund.updated', reference, {
-        object_type: 'refund', status,
-        amount_minor: decimalToMinorUnits(request.amount, request.currency), currency: request.currency,
-        payment_intent_reference: intent.provider_reference,
+      const result = await paymentEvent('paypal', 'paypal.refund.api_result', reference, {
+        object_type: 'refund', status: status === 'succeeded' ? 'completed' : status,
+        amount: normalizeCheckoutAmount(request.amount, request.currency), currency: request.currency,
+        capture_reference: `CAPTURE${intent.id.replaceAll('-', '')}`,
         metadata: { tera_refund_request_id: request.id },
       });
       expect(result).toMatchObject({ status: 'processed', outcome: status === 'succeeded' ? 'refunded' : 'failed' });

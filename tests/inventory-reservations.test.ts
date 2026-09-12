@@ -239,7 +239,7 @@ describe('Quote 转单与支付确认', () => {
 
     const intent = await rpc('create_payment_intent', {
       order_id: order.id,
-      provider: 'stripe',
+      provider: 'paypal',
       idempotency_key: `intent-${crypto.randomUUID()}`,
     }, undefined, true);
     expect(intent.status).toBe(200);
@@ -341,12 +341,6 @@ describe('Quote 转单与支付确认', () => {
     const quote = quoted.data as QuoteResult;
     const converted = await rpc('create_order_from_quote', { quote_id: quote.id }, buyerA.token);
     const orderId = (converted.data as { id: string }).id;
-    const intent = await rpc('create_payment_intent', {
-      order_id: orderId, provider: 'manual-provider',
-      idempotency_key: `manual-intent-${crypto.randomUUID()}`,
-    }, undefined, true);
-    expect(intent.status).toBe(200);
-
     const paid = await rpc('mark_order_paid', {
       order_id: orderId, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
     }, admin.token);
@@ -358,7 +352,7 @@ describe('Quote 转单与支付确认', () => {
     expect((storedQuote.data as QuoteResult).status).toBe('completed');
     const ledger = await rpc('get_order_ledger', { order_id: orderId }, buyerA.token);
     const intents = (ledger.data as { payment_intents: Array<{ status: string }> }).payment_intents;
-    expect(intents[0].status).toBe('cancelled');
+    expect(intents).toEqual([]);
   });
 });
 

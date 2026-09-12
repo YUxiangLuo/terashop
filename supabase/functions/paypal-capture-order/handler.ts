@@ -5,38 +5,19 @@ import {
   errorResponse,
   HttpError,
   jsonResponse,
-  optionalEnv,
   readJsonBody,
-  requiredEnv,
   requireUuid,
   serviceRpc,
 } from '../_shared/http.ts';
 import {
   extractPayPalCapture,
   type LocalPayPalIntent,
-  normalizedPayPalCaptureData,
-  payPalApiBase,
-  parsePayPalLivemode,
-  type PayPalCapture,
   type PayPalOrder,
   payPalRequest,
-  paypalOccurredAt,
   validatePayPalOrder,
+  ingestPayPalCapture,
+  payPalClientConfig,
 } from '../_shared/paypal.ts';
-import { ingestApiPaymentEvent, type ProviderEventResult } from '../_shared/provider-events.ts';
-
-async function ingestCapture(
-  capture: PayPalCapture,
-  local: LocalPayPalIntent,
-  livemode: boolean,
-): Promise<ProviderEventResult> {
-  const data = normalizedPayPalCaptureData(capture, local, local.provider_reference!);
-  const occurredAt = paypalOccurredAt(capture.update_time ?? capture.create_time);
-  return ingestApiPaymentEvent({
-    provider: 'paypal', resource: 'capture', reference: capture.id, status: capture.status,
-    eventType: 'paypal.capture.api_result', livemode, occurredAt, data,
-  });
-}
 
 export async function handlePayPalCaptureOrder(request: Request): Promise<Response> {
   let cors: Record<string, string> = {};
@@ -56,13 +37,8 @@ export async function handlePayPalCaptureOrder(request: Request): Promise<Respon
     if (!local.provider_reference) {
       throw new HttpError('PayPal Order has not been created', 409, 'provider_reference_missing');
     }
-    const livemode = parsePayPalLivemode(optionalEnv('PAYPAL_LIVEMODE', 'false'));
-    const config = {
-      livemode,
-      clientId: requiredEnv('PAYPAL_CLIENT_ID'),
-      clientSecret: requiredEnv('PAYPAL_CLIENT_SECRET'),
-      apiBase: payPalApiBase(livemode, optionalEnv('PAYPAL_API_BASE')),
-    };
+    const config = payPalClientConfig();
+    const { livemode } = config;
     let order = await payPalRequest<PayPalOrder>(
       `/v2/checkout/orders/${encodeURIComponent(local.provider_reference)}`,
       { ...config, method: 'GET' },
@@ -107,7 +83,7 @@ export async function handlePayPalCaptureOrder(request: Request): Promise<Respon
     if (!capture) {
       throw new HttpError('PayPal did not return a Capture', 502, 'paypal_bad_response');
     }
-    const result = await ingestCapture(capture, local, livemode);
+    const result = await ingestPayPalCapture(capture, local, local.provider_reference, livemode);
     if (result.status === 'failed') {
       throw new HttpError(
         'PayPal captured the order but local reconciliation is pending',

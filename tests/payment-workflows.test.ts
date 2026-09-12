@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { handleStripeCreateRefund } from '../supabase/functions/stripe-create-refund/handler.ts';
+import { handlePayPalCreateRefund } from '../supabase/functions/paypal-create-refund/handler.ts';
 import { handlePayPalCaptureOrder } from '../supabase/functions/paypal-capture-order/handler.ts';
-import { type StripeRefundResponse } from '../supabase/functions/_shared/stripe.ts';
+import { type PayPalRefund } from '../supabase/functions/_shared/paypal.ts';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import {
   checked, paymentFixture, fixtureOrder, fixtureIntent, paymentEvent, settleIntent,
@@ -34,21 +34,14 @@ function operations(orderId: string): Promise<Operations> {
   return checked(rpc('get_payment_operations', { order_id: orderId }, buyer.token));
 }
 
-function refundFixture(form: URLSearchParams, status: string): StripeRefundResponse {
+function refundFixture(body: Record<string, any>, status: string): PayPalRefund {
   return {
-    id: `re_${crypto.randomUUID().replaceAll('-', '')}`,
-    object: 'refund',
-    amount: Number(form.get('amount')),
-    currency: 'usd',
+    id: `REFUND${crypto.randomUUID().replaceAll('-', '')}`,
+    amount: body.amount,
     status,
-    created: Math.floor(Date.now() / 1000),
-    payment_intent: form.get('payment_intent'),
-    charge: 'ch_workflow_parent',
-    metadata: {
-      tera_refund_request_id: form.get('metadata[tera_refund_request_id]')!,
-      tera_order_id: form.get('metadata[tera_order_id]')!,
-    },
-    // The official 2026-02-25.clover Refund shape has no livemode field.
+    create_time: new Date().toISOString(),
+    invoice_id: body.invoice_id,
+    // custom_id is optional in the official Payments v2 Refund schema.
   };
 }
 
@@ -80,8 +73,8 @@ function oauthResponse(request: Request): Response | null {
     ? Response.json({ access_token: 'workflow-mock-token', expires_in: 3600 }) : null;
 }
 
-describe('Stripe refund handler contracts', () => {
-  test('官方无 livemode Refund 响应可落账；重试同一命令不重复退款或回库', async () => {
+describe('PayPal refund handler contracts', () => {
+  test('官方未返回 custom_id 的 Refund 响应可落账；重试同一命令不重复退款或回库', async () => {
     const order = await fixtureOrder(fixture, buyer, 2);
     const intent = await fixtureIntent(order, buyer);
     await settleIntent(intent);
@@ -90,24 +83,25 @@ describe('Stripe refund handler contracts', () => {
       order_id: order.id, idempotency_key: crypto.randomUUID(),
       items: [{ order_item_id: order.itemId, quantity: 1 }], restock: true,
     };
-    let refund: StripeRefundResponse;
+    let refund: PayPalRefund;
     let posts = 0;
     let gets = 0;
     const modes: boolean[] = [];
     await withPaymentProviderMock(async request => {
-      expect(new URL(request.url).hostname).toBe('api.stripe.com');
+      const oauth = oauthResponse(request);
+      if (oauth) return oauth;
+      expect(new URL(request.url).hostname).toBe('api-m.sandbox.paypal.com');
       if (request.method === 'POST') {
         posts += 1;
-        const form = new URLSearchParams(await request.text());
-        refund = refundFixture(form, 'succeeded');
-        expect(request.headers.get('Idempotency-Key'))
-          .toBe(`tera-refund-request-${refund.metadata!.tera_refund_request_id}`);
-        expect(Object.hasOwn(refund, 'livemode')).toBe(false);
+        const body = await request.json();
+        refund = refundFixture(body, 'COMPLETED');
+        expect(request.headers.get('PayPal-Request-Id')).toBe(body.custom_id);
+        expect(Object.hasOwn(refund, 'custom_id')).toBe(false);
       } else gets += 1;
       return Response.json(refund!);
     }, async () => {
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const response = await handleStripeCreateRefund(paymentRequest(command, admin.token));
+        const response = await handlePayPalCreateRefund(paymentRequest(command, admin.token));
         const data = await response.json();
         expect({ status: response.status, data }).toMatchObject({
           status: 200, data: { processing_status: 'refunded', pending_reconciliation: false },
@@ -129,31 +123,32 @@ describe('Stripe refund handler contracts', () => {
   });
 
   for (const [initial, terminal] of [
-    ['pending', 'succeeded'], ['pending', 'failed'],
-    ['requires_action', 'succeeded'], ['requires_action', 'failed'],
+    ['PENDING', 'COMPLETED'], ['PENDING', 'FAILED'], ['PENDING', 'CANCELLED'],
   ]) {
     test(`${initial} 退款重试观察到 ${terminal}，不回退 submitted 且可处理终态`, async () => {
       const order = await fixtureOrder(fixture, buyer);
       const intent = await fixtureIntent(order, buyer);
       await settleIntent(intent);
       const command = { order_id: order.id, idempotency_key: crypto.randomUUID(), amount: '1.00' };
-      let refund: StripeRefundResponse;
+      let refund: PayPalRefund;
       await withPaymentProviderMock(async request => {
+        const oauth = oauthResponse(request);
+        if (oauth) return oauth;
         if (request.method === 'POST') {
-          refund = refundFixture(new URLSearchParams(await request.text()), initial);
+          refund = refundFixture(await request.json(), initial);
         } else refund = { ...refund!, status: terminal };
         return Response.json(refund);
       }, async () => {
-        const pending = await handleStripeCreateRefund(paymentRequest(command, admin.token));
+        const pending = await handlePayPalCreateRefund(paymentRequest(command, admin.token));
         expect(pending.status).toBe(200);
         expect((await operations(order.id)).refund_requests[0].status)
-          .toBe(initial === 'pending' ? 'processing' : 'requires_action');
-        const complete = await handleStripeCreateRefund(paymentRequest(command, admin.token));
+          .toBe('processing');
+        const complete = await handlePayPalCreateRefund(paymentRequest(command, admin.token));
         expect({ status: complete.status, data: await complete.json() }).toMatchObject({
-          status: 200, data: { processing_status: terminal === 'succeeded' ? 'refunded' : 'failed' },
+          status: 200, data: { processing_status: terminal === 'COMPLETED' ? 'refunded' : terminal.toLowerCase() },
         });
       });
-      expect((await operations(order.id)).refund_requests[0].status).toBe(terminal);
+      expect((await operations(order.id)).refund_requests[0].status).toBe(terminal === 'COMPLETED' ? 'succeeded' : terminal.toLowerCase());
     });
   }
 
@@ -162,14 +157,16 @@ describe('Stripe refund handler contracts', () => {
     await settleIntent(await fixtureIntent(order, buyer));
     const modes: boolean[] = [];
     await withPaymentProviderMock(async request => {
-      expect(request.headers.get('Authorization')).toBe('Bearer sk_live_workflow_placeholder');
-      return Response.json(refundFixture(new URLSearchParams(await request.text()), 'succeeded'));
+      expect(new URL(request.url).hostname).toBe('api-m.paypal.com');
+      const oauth = oauthResponse(request);
+      if (oauth) return oauth;
+      return Response.json(refundFixture(await request.json(), 'COMPLETED'));
     }, async () => {
-      const response = await handleStripeCreateRefund(paymentRequest({
+      const response = await handlePayPalCreateRefund(paymentRequest({
         order_id: order.id, idempotency_key: crypto.randomUUID(), amount: '1.00',
       }, admin.token));
       expect(response.status).toBe(200);
-    }, { STRIPE_LIVEMODE: 'true', STRIPE_SECRET_KEY: 'sk_live_workflow_placeholder' }, async request => {
+    }, { PAYPAL_LIVEMODE: 'true' }, async request => {
       if (request.url.endsWith('/rpc/ingest_payment_provider_event')) modes.push((await request.json()).livemode);
     });
     expect(modes).toEqual([true]);
@@ -180,7 +177,7 @@ describe('Stripe refund handler contracts', () => {
     await settleIntent(await fixtureIntent(order, buyer));
     let calls = 0;
     await withPaymentProviderMock(() => { calls += 1; throw new Error('unexpected provider request'); }, async () => {
-      const response = await handleStripeCreateRefund(paymentRequest({
+      const response = await handlePayPalCreateRefund(paymentRequest({
         order_id: order.id, idempotency_key: crypto.randomUUID(), amount: '1.00',
       }, buyer.token));
       expect(response.status).toBeGreaterThanOrEqual(400);
@@ -319,9 +316,9 @@ describe('PayPal capture dispatch and cancellation', () => {
   });
 });
 
-describe('Manual payment and Stripe provider cancellation', () => {
+describe('Manual payment with PayPal intents', () => {
   for (const [provider, bound] of [
-    ['stripe', false], ['stripe', true], ['paypal', false], ['paypal', true],
+    ['paypal', false], ['paypal', true],
   ] as const) {
     test(`${provider} ${bound ? '已绑定' : '未绑定'}意图未终结时，手工支付不得先取消本地意图再记收款`, async () => {
       const order = await fixtureOrder(fixture, buyer);
@@ -339,37 +336,13 @@ describe('Manual payment and Stripe provider cancellation', () => {
     });
   }
 
-  test('渠道已确认取消但本地意图仍 active 时，可安全终结本地意图并手工收款', async () => {
+  test('PayPal Capture declined 终结意图后允许手工支付', async () => {
     const order = await fixtureOrder(fixture, buyer);
     const intent = await fixtureIntent(order, buyer);
-    await checked(rpc('complete_stripe_payment_intent_cancel', {
-      payment_intent_id: intent.id, succeeded: true, provider_status: 'canceled',
-    }, undefined, true));
-    expect((await operations(order.id)).payment_intents[0].status).toBe('requires_action');
-    expect((await rpc('mark_order_paid', { order_id: order.id }, admin.token)).status).toBe(200);
-    expect((await operations(order.id)).payment_intents[0].status).toBe('cancelled');
-  });
-
-  test('本地 cancelled 的 Stripe 意图仍可被 Worker claim；渠道终态确认后才允许手工支付', async () => {
-    const order = await fixtureOrder(fixture, buyer);
-    const intent = await fixtureIntent(order, buyer);
-    await paymentEvent('stripe', 'payment_intent.canceled', intent.provider_reference, {
-      status: 'canceled', amount_minor: String(Math.round(intent.amount * 100)),
-      currency: intent.currency, metadata: { tera_payment_intent_id: intent.id },
-    });
-    const blocked = await rpc('mark_order_paid', { order_id: order.id }, admin.token);
-    expect(blocked.status).toBe(400);
-    const candidates = await checked<Array<{ id: string }>>(rpc('claim_expired_stripe_payment_intents', {
-      max_intents: 100,
-    }, undefined, true));
-    expect(candidates.some(candidate => candidate.id === intent.id)).toBe(true);
-    await checked(rpc('complete_stripe_payment_intent_cancel', {
-      payment_intent_id: intent.id, succeeded: true, provider_status: 'canceled',
-    }, undefined, true));
-    const again = await checked<Array<{ id: string }>>(rpc('claim_expired_stripe_payment_intents', {
-      max_intents: 100, as_of: '2100-01-01T00:00:00Z',
-    }, undefined, true));
-    expect(again.some(candidate => candidate.id === intent.id)).toBe(false);
+    expect(await paymentEvent('paypal', 'PAYMENT.CAPTURE.DECLINED', `CAPTURE${intent.id}`, {
+      status: 'declined', amount: intent.amount.toFixed(2), currency: intent.currency,
+      order_reference: intent.provider_reference,
+    })).toMatchObject({ outcome: 'failed' });
     expect((await rpc('mark_order_paid', { order_id: order.id }, admin.token)).status).toBe(200);
   });
 });

@@ -209,11 +209,8 @@ CREATE FUNCTION private.order_snapshot_has_payment_intent(p_order_id uuid) RETUR
     SET search_path TO ''
     AS $$
   select exists (
-    select 1 from commerce.payment_intents i where i.order_id = p_order_id and (
-      i.status in ('requires_payment_method', 'requires_action', 'processing')
-      or (i.provider = 'stripe' and i.provider_reference is not null
-          and i.provider_terminal_status is distinct from 'canceled')
-    )
+    select 1 from commerce.payment_intents i where i.order_id = p_order_id
+      and i.status in ('requires_action', 'processing')
   );
 $$;
 
@@ -263,7 +260,7 @@ begin
      and exists (
        select 1 from commerce.refund_requests r
        where r.order_id = new.order_id
-         and r.status in ('requested', 'submitted', 'processing', 'requires_action')
+         and r.status in ('requested', 'submitted', 'processing')
      ) then
     raise exception 'order has an active asynchronous refund request';
   end if;
@@ -296,13 +293,7 @@ begin
   where id = v_event.id;
 
   begin
-    if v_event.provider = 'stripe'
-       and v_event.event_type like 'payment_intent.%' then
-      v_result := private.process_stripe_payment_event(v_event);
-    elsif v_event.provider = 'stripe'
-          and v_event.event_type in ('refund.created', 'refund.updated', 'refund.failed', 'refund.api_result') then
-      v_result := private.process_stripe_refund_event(v_event);
-    elsif v_event.provider = 'paypal'
+    if v_event.provider = 'paypal'
           and (v_event.event_type like 'PAYMENT.CAPTURE.%'
                or v_event.event_type = 'paypal.capture.api_result') then
       v_result := private.process_paypal_payment_event(v_event);
@@ -346,7 +337,6 @@ declare
   v_intent commerce.payment_intents;
   v_capture commerce.payment_transactions;
   v_reversal commerce.provider_money_movements;
-  v_metadata_id text := p_event.data -> 'metadata' ->> 'tera_payment_intent_id';
   v_order_reference text := nullif(p_event.data ->> 'order_reference', '');
   v_status text := lower(p_event.data ->> 'status');
   v_amount numeric(12, 2);
@@ -370,11 +360,9 @@ begin
   end if;
 
   v_amount := private.provider_decimal_amount(p_event.data ->> 'amount', v_currency);
-  if v_metadata_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
-    select * into v_intent from commerce.payment_intents i
-    where i.id = v_metadata_id::uuid and i.provider = 'paypal' for update;
-  end if;
-  if v_intent.id is null and v_order_reference is not null then
+  -- Provider bindings, not mutable custom_id metadata, establish ownership.
+  -- Early webhooks remain retryable until the API response binds the Order ID.
+  if v_order_reference is not null then
     select * into v_intent from commerce.payment_intents i
     where i.provider = 'paypal' and i.provider_reference = v_order_reference for update;
   end if;
@@ -572,7 +560,6 @@ CREATE FUNCTION private.process_paypal_refund_event(p_event commerce.payment_pro
 declare
   v_request commerce.refund_requests;
   v_parent commerce.payment_transactions;
-  v_metadata_id text := p_event.data -> 'metadata' ->> 'tera_refund_request_id';
   v_capture_reference text := nullif(p_event.data ->> 'capture_reference', '');
   v_status text := lower(p_event.data ->> 'status');
   v_amount numeric(12, 2);
@@ -583,11 +570,8 @@ declare
   v_error text;
 begin
   v_amount := private.provider_decimal_amount(p_event.data ->> 'amount', v_currency);
-  if v_metadata_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
-    select * into v_request from commerce.refund_requests r
-    where r.id = v_metadata_id::uuid and r.provider = 'paypal' for update;
-  end if;
-  if v_request.id is null and p_event.object_reference is not null then
+  -- Refund IDs are bound only by trusted API responses, never by metadata.
+  if p_event.object_reference is not null then
     select * into v_request from commerce.refund_requests r
     where r.provider = 'paypal' and r.provider_reference = p_event.object_reference
     for update;
@@ -597,7 +581,7 @@ begin
     select * into v_parent from commerce.payment_transactions t
     where t.id = v_request.parent_transaction_id;
     if v_parent.provider_reference is distinct from v_capture_reference then
-      raise exception 'PayPal refund capture reference mismatch';
+      v_error := 'PayPal refund capture reference mismatch';
     end if;
   end if;
 
@@ -618,9 +602,10 @@ begin
                                 'resource_type', 'refund_request',
                                 'resource_id', v_request.id);
     end if;
-    if (v_request.amount, v_request.currency) is distinct from (v_amount, v_currency) then
+    if v_error is not null
+       or (v_request.amount, v_request.currency) is distinct from (v_amount, v_currency) then
       perform private.require_reconciliation(
-        v_movement.id, 'PayPal refund amount or currency mismatch',
+        v_movement.id, coalesce(v_error, 'PayPal refund amount or currency mismatch'),
         v_request.order_id, null,
         case when v_request.currency = v_currency then v_request.id else null end
       );
@@ -654,6 +639,7 @@ begin
   if v_request.id is null then
     return jsonb_build_object('status', 'received', 'outcome', 'unmatched_refund');
   end if;
+  if v_error is not null then raise exception '%', v_error; end if;
   if (v_request.amount, v_request.currency) is distinct from (v_amount, v_currency) then
     raise exception 'PayPal refund amount or currency mismatch';
   end if;
@@ -661,421 +647,14 @@ begin
     return jsonb_build_object('status', 'ignored', 'outcome', 'stale_refund_event',
                               'resource_type', 'refund_request', 'resource_id', v_request.id);
   end if;
-  if v_request.provider_reference is null then
-    update commerce.refund_requests
-    set provider_reference = p_event.object_reference,
-        submitted_at = coalesce(submitted_at, now())
-    where id = v_request.id;
-  elsif v_request.provider_reference <> p_event.object_reference then
-    raise exception 'PayPal refund reference mismatch';
-  end if;
-
   if v_status = 'pending' then
     update commerce.refund_requests set status = 'processing'
-    where id = v_request.id and status in ('requested', 'submitted', 'requires_action');
-  elsif v_status = 'requires_action' then
-    update commerce.refund_requests set status = 'requires_action'
-    where id = v_request.id and status in ('requested', 'submitted', 'processing');
+    where id = v_request.id and status in ('requested', 'submitted');
   elsif v_status in ('failed', 'cancelled', 'canceled') then
     update commerce.refund_requests
     set status = case when v_status = 'failed' then 'failed' else 'cancelled' end,
         failure_code = left(p_event.data ->> 'failure_code', 200),
         failure_message = left(p_event.data ->> 'failure_message', 2000),
-        processed_at = now()
-    where id = v_request.id and status not in ('succeeded', 'failed', 'cancelled');
-  else
-    return jsonb_build_object('status', 'ignored', 'outcome', 'unsupported_refund_status');
-  end if;
-  return jsonb_build_object('status', 'processed', 'outcome', v_status,
-                            'resource_type', 'refund_request', 'resource_id', v_request.id);
-end;
-$_$;
-
-CREATE FUNCTION private.process_stripe_payment_event(p_event commerce.payment_provider_events) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $_$
-declare
-  v_intent commerce.payment_intents;
-  v_metadata_id text := p_event.data -> 'metadata' ->> 'tera_payment_intent_id';
-  v_amount numeric(20, 8);
-  v_amount_minor text := p_event.data ->> 'amount_minor';
-  v_currency text := upper(p_event.data ->> 'currency');
-  v_transaction_id uuid;
-  v_transaction commerce.payment_transactions;
-  v_movement commerce.provider_money_movements;
-  v_target_status text;
-  v_error text;
-begin
-  -- A provider reference bound by the trusted API path is authoritative;
-  -- mutable Stripe metadata is only a candidate when no binding exists yet.
-  if p_event.object_reference is not null then
-    select * into v_intent from commerce.payment_intents i
-    where i.provider = p_event.provider
-      and i.provider_reference = p_event.object_reference for update;
-  end if;
-  if v_intent.id is null
-     and v_metadata_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
-    select * into v_intent from commerce.payment_intents i
-    where i.id = v_metadata_id::uuid and i.provider = p_event.provider for update;
-  end if;
-
-  if p_event.event_type = 'payment_intent.succeeded' then
-    if coalesce(v_amount_minor, '') !~ '^[1-9][0-9]{0,11}$' then
-      raise exception 'invalid Stripe capture amount';
-    end if;
-    v_amount := v_amount_minor::numeric
-      / pg_catalog.power(10::numeric, private.stripe_currency_exponent(v_currency));
-    v_movement := private.record_stripe_money_movement(
-      p_event, 'capture', v_amount_minor, v_currency,
-      case when v_intent.id is null then null else v_intent.order_id end,
-      case when v_intent.currency = v_currency
-                  and v_intent.provider_reference = p_event.object_reference
-           then v_intent.id else null end,
-      null
-    );
-    if v_intent.id is null or v_intent.provider_reference is null then
-      return jsonb_build_object('status', 'received', 'outcome', 'unmatched_payment_intent',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end if;
-    if v_movement.reconciliation_status = 'matched' then
-      return jsonb_build_object('status', 'processed', 'outcome', 'captured',
-                                'resource_type', 'payment_transaction',
-                                'resource_id', v_movement.payment_transaction_id);
-    end if;
-    if v_intent.provider_reference <> p_event.object_reference then
-      perform private.require_reconciliation(
-        v_movement.id, 'provider reference conflicts with payment intent',
-        v_intent.order_id, null, null
-      );
-      return jsonb_build_object('status', 'processed', 'outcome', 'action_required',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end if;
-    if (v_intent.amount, v_intent.currency)
-       is distinct from (v_amount, v_currency) then
-      v_error := format('provider capture %s %s does not match intent %s %s',
-                        v_amount, v_currency, v_intent.amount, v_intent.currency);
-      perform private.require_reconciliation(
-        v_movement.id, v_error, v_intent.order_id,
-        case when v_intent.currency = v_currency then v_intent.id else null end,
-        null
-      );
-      return jsonb_build_object('status', 'processed', 'outcome', 'action_required',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end if;
-    select * into v_transaction from commerce.payment_transactions t
-    where t.payment_intent_id = v_intent.id and t.kind = 'capture'
-      and t.status = 'succeeded' and t.provider_reference = p_event.object_reference
-    order by t.created_at, t.id limit 1;
-    if found then
-      update commerce.provider_money_movements m
-      set order_id = v_intent.order_id, payment_intent_id = v_intent.id,
-          payment_transaction_id = v_transaction.id,
-          reconciliation_status = 'matched', matched_at = now(), last_error = null
-      where m.id = v_movement.id;
-      return jsonb_build_object('status', 'processed', 'outcome', 'captured',
-                                'resource_type', 'payment_transaction',
-                                'resource_id', v_transaction.id);
-    end if;
-
-    begin
-      select (public.capture_payment_intent(
-        v_intent.id, p_event.object_reference, p_event.provider_event_id, p_event.data
-      ) ->> 'id')::uuid into v_transaction_id;
-      update commerce.provider_money_movements m
-      set order_id = v_intent.order_id, payment_intent_id = v_intent.id,
-          payment_transaction_id = v_transaction_id,
-          reconciliation_status = 'matched', matched_at = now(), last_error = null
-      where m.id = v_movement.id;
-      return jsonb_build_object('status', 'processed', 'outcome', 'captured',
-                                'resource_type', 'payment_transaction',
-                                'resource_id', v_transaction_id);
-    exception when others then
-      v_error := sqlerrm;
-      perform private.require_reconciliation(
-        v_movement.id, v_error, v_intent.order_id, v_intent.id, null
-      );
-      return jsonb_build_object('status', 'processed', 'outcome', 'action_required',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end;
-  end if;
-
-  if v_intent.id is null then
-    return jsonb_build_object('status', 'received', 'outcome', 'unmatched_payment_intent');
-  end if;
-  if p_event.object_reference is null then raise exception 'payment event has no object reference'; end if;
-  if v_intent.provider_reference is null then
-    return jsonb_build_object('status', 'received', 'outcome', 'unbound_payment_event',
-                              'resource_type', 'payment_intent', 'resource_id', v_intent.id);
-  elsif v_intent.provider_reference <> p_event.object_reference then
-    return jsonb_build_object('status', 'ignored', 'outcome', 'payment_reference_mismatch',
-                              'resource_type', 'payment_intent', 'resource_id', v_intent.id);
-  end if;
-
-  if v_intent.status in ('succeeded', 'failed', 'cancelled') then
-    return jsonb_build_object('status', 'ignored', 'outcome', 'stale_payment_event',
-                              'resource_type', 'payment_intent', 'resource_id', v_intent.id);
-  end if;
-  if exists (
-    select 1 from commerce.payment_provider_events e
-    where e.provider = p_event.provider
-      and e.object_reference = p_event.object_reference
-      and e.id <> p_event.id
-      and e.status in ('processed', 'ignored')
-      and e.event_type in (
-        'payment_intent.processing', 'payment_intent.requires_action',
-        'payment_intent.payment_failed', 'payment_intent.canceled'
-      )
-      and (
-        e.occurred_at > p_event.occurred_at
-        or (
-          e.occurred_at = p_event.occurred_at
-          and case e.event_type
-                when 'payment_intent.canceled' then 4
-                when 'payment_intent.payment_failed' then 3
-                when 'payment_intent.requires_action' then 2
-                else 1
-              end
-              >= case p_event.event_type
-                   when 'payment_intent.canceled' then 4
-                   when 'payment_intent.payment_failed' then 3
-                   when 'payment_intent.requires_action' then 2
-                   else 1
-                 end
-        )
-      )
-  ) then
-    return jsonb_build_object('status', 'ignored', 'outcome', 'stale_payment_event',
-                              'resource_type', 'payment_intent', 'resource_id', v_intent.id);
-  end if;
-
-  if p_event.event_type = 'payment_intent.processing' then
-    v_target_status := 'processing';
-  elsif p_event.event_type = 'payment_intent.requires_action' then
-    v_target_status := 'requires_action';
-  elsif p_event.event_type = 'payment_intent.payment_failed' then
-    v_target_status := 'requires_payment_method';
-  elsif p_event.event_type = 'payment_intent.canceled' then
-    v_target_status := 'cancelled';
-  else
-    return jsonb_build_object('status', 'ignored', 'outcome', 'unsupported_payment_event');
-  end if;
-
-  if v_intent.status not in ('succeeded', 'failed', 'cancelled')
-     and v_intent.status <> v_target_status then
-    update commerce.payment_intents set status = v_target_status where id = v_intent.id;
-  end if;
-  if p_event.event_type = 'payment_intent.payment_failed' then
-    insert into commerce.payment_transactions (
-      order_id, payment_intent_id, provider, kind, status, amount, currency,
-      provider_reference, idempotency_key, failure_code, failure_message,
-      metadata, processed_at
-    ) values (
-      v_intent.order_id, v_intent.id, v_intent.provider, 'capture', 'failed',
-      v_intent.amount, v_intent.currency, p_event.object_reference,
-      p_event.provider_event_id, left(p_event.data ->> 'failure_code', 200),
-      null, p_event.data, now()
-    ) on conflict (provider, idempotency_key) where idempotency_key is not null do nothing;
-  end if;
-  return jsonb_build_object('status', 'processed', 'outcome', v_target_status,
-                            'resource_type', 'payment_intent', 'resource_id', v_intent.id);
-end;
-$_$;
-
-CREATE FUNCTION private.process_stripe_refund_event(p_event commerce.payment_provider_events) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $_$
-declare
-  v_request commerce.refund_requests;
-  v_metadata_id text := p_event.data -> 'metadata' ->> 'tera_refund_request_id';
-  v_status text := lower(p_event.data ->> 'status');
-  v_amount numeric(20, 8);
-  v_amount_minor text := p_event.data ->> 'amount_minor';
-  v_currency text := upper(p_event.data ->> 'currency');
-  v_movement commerce.provider_money_movements;
-  v_refund_id uuid;
-  v_transaction_id uuid;
-  v_parent_reference text;
-  v_parent_mismatch boolean := false;
-  v_error text;
-begin
-  if coalesce(v_amount_minor, '') !~ '^[1-9][0-9]{0,11}$' then
-    raise exception 'invalid Stripe refund amount';
-  end if;
-  v_amount := v_amount_minor::numeric
-    / pg_catalog.power(10::numeric, private.stripe_currency_exponent(v_currency));
-  if p_event.object_reference is not null then
-    select * into v_request from commerce.refund_requests r
-    where r.provider = p_event.provider
-      and r.provider_reference = p_event.object_reference for update;
-  end if;
-  if v_request.id is null
-     and v_metadata_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' then
-    select * into v_request from commerce.refund_requests r
-    where r.id = v_metadata_id::uuid and r.provider = p_event.provider for update;
-  end if;
-
-  if v_request.id is not null then
-    select t.provider_reference into v_parent_reference
-    from commerce.payment_transactions t
-    where t.id = v_request.parent_transaction_id;
-    v_parent_mismatch := case
-      when v_parent_reference like 'pi\_%' escape '\'
-        then coalesce(p_event.data ->> 'payment_intent_reference', '') <> v_parent_reference
-      when v_parent_reference like 'ch\_%' escape '\'
-        then coalesce(p_event.data ->> 'charge_reference', '') <> v_parent_reference
-      else true
-    end;
-  end if;
-
-  if v_status = 'succeeded' then
-    v_movement := private.record_stripe_money_movement(
-      p_event, 'refund', v_amount_minor, v_currency,
-      case when v_request.id is null then null else v_request.order_id end,
-      null,
-      case when v_request.currency = v_currency
-                  and v_request.provider_reference = p_event.object_reference
-           then v_request.id else null end
-    );
-    if v_request.id is null then
-      return jsonb_build_object('status', 'received', 'outcome', 'unmatched_refund',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end if;
-    if v_movement.reconciliation_status = 'matched' then
-      return jsonb_build_object('status', 'processed', 'outcome', 'refunded',
-                                'resource_type', 'refund_request',
-                                'resource_id', v_request.id);
-    end if;
-    if v_parent_mismatch then
-      perform private.require_reconciliation(
-        v_movement.id, 'provider refund parent reference mismatch',
-        v_request.order_id, null, null
-      );
-      return jsonb_build_object('status', 'processed', 'outcome', 'action_required',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end if;
-    if v_request.provider_reference is null then
-      return jsonb_build_object('status', 'received', 'outcome', 'unmatched_refund',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end if;
-    if v_request.provider_reference <> p_event.object_reference then
-      perform private.require_reconciliation(
-        v_movement.id, 'provider refund reference mismatch',
-        v_request.order_id, null, null
-      );
-      return jsonb_build_object('status', 'processed', 'outcome', 'action_required',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end if;
-    if (v_request.amount, v_request.currency)
-       is distinct from (v_amount, v_currency) then
-      perform private.require_reconciliation(
-        v_movement.id, 'provider refund amount or currency mismatch',
-        v_request.order_id, null,
-        case when v_request.currency = v_currency then v_request.id else null end
-      );
-      return jsonb_build_object('status', 'processed', 'outcome', 'action_required',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end if;
-    begin
-      v_refund_id := private.finalize_refund_request(v_request.id, p_event, p_event.data);
-      select r.payment_transaction_id into v_transaction_id
-      from commerce.refunds r where r.id = v_refund_id;
-      update commerce.provider_money_movements m
-      set order_id = v_request.order_id, refund_request_id = v_request.id,
-          payment_transaction_id = v_transaction_id,
-          reconciliation_status = 'matched', matched_at = now(), last_error = null
-      where m.id = v_movement.id;
-      return jsonb_build_object('status', 'processed', 'outcome', 'refunded',
-                                'resource_type', 'refund_request',
-                                'resource_id', v_request.id);
-    exception when others then
-      v_error := sqlerrm;
-      perform private.require_reconciliation(
-        v_movement.id, v_error, v_request.order_id, null, v_request.id
-      );
-      return jsonb_build_object('status', 'processed', 'outcome', 'action_required',
-                                'resource_type', 'provider_money_movement',
-                                'resource_id', v_movement.id);
-    end;
-  end if;
-
-  if v_request.id is null then
-    return jsonb_build_object('status', 'received', 'outcome', 'unmatched_refund');
-  end if;
-  if v_parent_mismatch then
-    return jsonb_build_object('status', 'ignored', 'outcome', 'refund_parent_mismatch',
-                              'resource_type', 'refund_request', 'resource_id', v_request.id);
-  end if;
-  if v_request.provider_reference is null then
-    return jsonb_build_object('status', 'received', 'outcome', 'unbound_refund_event',
-                              'resource_type', 'refund_request', 'resource_id', v_request.id);
-  elsif v_request.provider_reference <> p_event.object_reference then
-    return jsonb_build_object('status', 'ignored', 'outcome', 'refund_reference_mismatch',
-                              'resource_type', 'refund_request', 'resource_id', v_request.id);
-  end if;
-  if (v_request.amount, v_request.currency)
-     is distinct from (v_amount, v_currency) then
-    raise exception 'provider refund amount or currency mismatch';
-  end if;
-  if v_request.status in ('succeeded', 'failed', 'cancelled') then
-    return jsonb_build_object('status', 'ignored', 'outcome', 'stale_refund_event',
-                              'resource_type', 'refund_request', 'resource_id', v_request.id);
-  end if;
-  if exists (
-    select 1 from commerce.payment_provider_events e
-    where e.provider = p_event.provider
-      and e.object_reference = p_event.object_reference
-      and e.id <> p_event.id
-      and e.status in ('processed', 'ignored')
-      and lower(e.data ->> 'status') in (
-        'pending', 'requires_action', 'failed', 'canceled', 'cancelled'
-      )
-      and (
-        e.occurred_at > p_event.occurred_at
-        or (
-          e.occurred_at = p_event.occurred_at
-          and case lower(e.data ->> 'status')
-                when 'failed' then 3
-                when 'canceled' then 3
-                when 'cancelled' then 3
-                when 'requires_action' then 2
-                else 1
-              end
-              >= case v_status
-                   when 'failed' then 3
-                   when 'canceled' then 3
-                   when 'cancelled' then 3
-                   when 'requires_action' then 2
-                   else 1
-                 end
-        )
-      )
-  ) then
-    return jsonb_build_object('status', 'ignored', 'outcome', 'stale_refund_event',
-                              'resource_type', 'refund_request', 'resource_id', v_request.id);
-  end if;
-
-  if v_status = 'pending' then
-    update commerce.refund_requests set status = 'processing'
-    where id = v_request.id and status in ('requested', 'submitted', 'requires_action');
-  elsif v_status = 'requires_action' then
-    update commerce.refund_requests set status = 'requires_action'
-    where id = v_request.id and status in ('requested', 'submitted', 'processing');
-  elsif v_status in ('failed', 'canceled', 'cancelled') then
-    update commerce.refund_requests
-    set status = case when v_status = 'failed' then 'failed' else 'cancelled' end,
-        failure_code = left(p_event.data ->> 'failure_code', 200),
-        failure_message = null,
         processed_at = now()
     where id = v_request.id and status not in ('succeeded', 'failed', 'cancelled');
   else
@@ -1111,7 +690,7 @@ begin
     select 1 from commerce.payment_intents i
     where i.order_id = old.id and i.provider = 'paypal'
       and i.provider_capture_requested_at is not null
-      and i.status in ('requires_payment_method', 'requires_action', 'processing')
+      and i.status in ('requires_action', 'processing')
   ) then
     if new.status = 'cancelled' and old.status <> 'cancelled'
        and not exists (
@@ -1203,21 +782,6 @@ begin
 end;
 $_$;
 
-CREATE FUNCTION private.provider_minor_amount(p_minor text, p_currency text) RETURNS numeric
-    LANGUAGE plpgsql IMMUTABLE STRICT
-    SET search_path TO ''
-    AS $_$
-begin
-  if upper(p_currency) <> 'USD' then
-    raise exception 'provider currency % is outside the current USD capability', p_currency;
-  end if;
-  if p_minor !~ '^[1-9][0-9]*$' then
-    raise exception 'provider amount_minor must be a positive integer';
-  end if;
-  return round(p_minor::numeric / 100, 2);
-end;
-$_$;
-
 CREATE FUNCTION private.provider_payment_intent_json(p_intent commerce.payment_intents) RETURNS jsonb
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
@@ -1258,49 +822,6 @@ begin
   return v_movement;
 end;
 $$;
-
-CREATE FUNCTION private.record_stripe_money_movement(p_event commerce.payment_provider_events, p_kind text, p_amount_minor text, p_currency text, p_order_id uuid DEFAULT NULL::uuid, p_payment_intent_id uuid DEFAULT NULL::uuid, p_refund_request_id uuid DEFAULT NULL::uuid) RETURNS commerce.provider_money_movements
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $_$
-declare
-  v_movement commerce.provider_money_movements;
-  v_currency text := upper(btrim(p_currency));
-  v_exponent smallint := private.stripe_currency_exponent(p_currency);
-  v_minor numeric(20, 0);
-  v_amount numeric(20, 8);
-begin
-  if p_event.provider <> 'stripe' or p_event.object_reference is null
-     or p_kind not in ('capture', 'refund')
-     or coalesce(p_amount_minor, '') !~ '^[1-9][0-9]{0,11}$' then
-    raise exception 'invalid Stripe money movement';
-  end if;
-  v_minor := p_amount_minor::numeric;
-  v_amount := v_minor / pg_catalog.power(10::numeric, v_exponent);
-  insert into commerce.provider_money_movements (
-    provider_event_id, provider, kind, provider_reference, amount, currency,
-    provider_amount_minor, provider_currency_exponent,
-    order_id, payment_intent_id, refund_request_id
-  ) values (
-    p_event.id, p_event.provider, p_kind, p_event.object_reference, v_amount, v_currency,
-    v_minor, v_exponent, p_order_id, p_payment_intent_id, p_refund_request_id
-  ) on conflict on constraint provider_money_movements_provider_kind_provider_reference_key do update
-  set order_id = coalesce(commerce.provider_money_movements.order_id, excluded.order_id),
-      payment_intent_id = coalesce(commerce.provider_money_movements.payment_intent_id,
-                                   excluded.payment_intent_id),
-      refund_request_id = coalesce(commerce.provider_money_movements.refund_request_id,
-                                   excluded.refund_request_id)
-  returning * into v_movement;
-  if (v_movement.provider, v_movement.kind, v_movement.provider_reference,
-      v_movement.amount, v_movement.currency, v_movement.provider_amount_minor,
-      v_movement.provider_currency_exponent)
-     is distinct from
-     ('stripe', p_kind, p_event.object_reference, v_amount, v_currency, v_minor, v_exponent) then
-    raise exception 'provider event conflicts with an existing money movement';
-  end if;
-  return v_movement;
-end;
-$_$;
 
 CREATE FUNCTION private.refund_request_json(p_request commerce.refund_requests) RETURNS jsonb
     LANGUAGE sql STABLE
@@ -1362,27 +883,6 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.stripe_currency_exponent(p_currency text) RETURNS smallint
-    LANGUAGE plpgsql IMMUTABLE SECURITY DEFINER
-    SET search_path TO ''
-    AS $_$
-declare
-  v_currency text := upper(btrim(p_currency));
-begin
-  if v_currency is null or v_currency !~ '^[A-Z]{3}$' then
-    raise exception 'invalid Stripe currency';
-  end if;
-  if v_currency in (
-    'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA',
-    'PYG', 'RWF', 'VND', 'VUV', 'XAF', 'XOF', 'XPF'
-  ) then return 0; end if;
-  -- Stripe API charge amounts are otherwise two-decimal. ISK and UGX use a
-  -- backward-compatible exponent of 2 with amounts ending in 00; HUF/TWD
-  -- charge rules are also exponent 2 (their special restrictions are payouts).
-  return 2;
-end;
-$_$;
-
 CREATE FUNCTION private.validate_payment_intent() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -1402,7 +902,7 @@ begin
     if exists (
       select 1 from commerce.payment_intents i
       where i.order_id = new.order_id
-        and i.status in ('requires_payment_method', 'requires_action', 'processing')
+        and i.status in ('requires_action', 'processing')
     ) then
       raise exception 'order already has an active payment intent';
     end if;
@@ -1417,9 +917,8 @@ begin
       raise exception 'payment intent provider reference is immutable';
     end if;
     if new.status <> old.status and not (
-      (old.status = 'requires_payment_method' and new.status in ('requires_action', 'processing', 'succeeded', 'failed', 'cancelled'))
-      or (old.status = 'requires_action' and new.status in ('requires_payment_method', 'processing', 'succeeded', 'failed', 'cancelled'))
-      or (old.status = 'processing' and new.status in ('requires_payment_method', 'requires_action', 'succeeded', 'failed', 'cancelled'))
+      (old.status = 'requires_action' and new.status in ('processing', 'succeeded', 'failed', 'cancelled'))
+      or (old.status = 'processing' and new.status in ('requires_action', 'succeeded', 'failed', 'cancelled'))
     ) then
       raise exception 'invalid payment intent transition: % -> %', old.status, new.status;
     end if;
@@ -1499,12 +998,10 @@ begin
   end if;
   if tg_op = 'UPDATE' then
     if (new.provider_event_id, new.provider, new.kind, new.provider_reference,
-        new.amount, new.currency, new.provider_amount_minor,
-        new.provider_currency_exponent, new.created_at)
+        new.amount, new.currency, new.created_at)
        is distinct from
        (old.provider_event_id, old.provider, old.kind, old.provider_reference,
-        old.amount, old.currency, old.provider_amount_minor,
-        old.provider_currency_exponent, old.created_at) then
+        old.amount, old.currency, old.created_at) then
       raise exception 'provider money facts are immutable';
     end if;
     if old.order_id is not null and new.order_id is distinct from old.order_id
@@ -1578,10 +1075,9 @@ begin
       raise exception 'completed refund request is immutable';
     end if;
     if new.status <> old.status and not (
-      (old.status = 'requested' and new.status in ('submitted', 'processing', 'requires_action', 'succeeded', 'failed', 'cancelled'))
-      or (old.status = 'submitted' and new.status in ('processing', 'requires_action', 'succeeded', 'failed', 'cancelled'))
-      or (old.status = 'processing' and new.status in ('requires_action', 'succeeded', 'failed', 'cancelled'))
-      or (old.status = 'requires_action' and new.status in ('processing', 'succeeded', 'failed', 'cancelled'))
+      (old.status = 'requested' and new.status in ('submitted', 'processing', 'succeeded', 'failed', 'cancelled'))
+      or (old.status = 'submitted' and new.status in ('processing', 'succeeded', 'failed', 'cancelled'))
+      or (old.status = 'processing' and new.status in ('succeeded', 'failed', 'cancelled'))
     ) then
       raise exception 'invalid refund request transition: % -> %', old.status, new.status;
     end if;
@@ -1616,7 +1112,7 @@ begin
   from commerce.refund_request_lines l
   join commerce.refund_requests r on r.id = l.refund_request_id
   where l.order_item_id = new.order_item_id
-    and r.status in ('requested', 'submitted', 'processing', 'requires_action');
+    and r.status in ('requested', 'submitted', 'processing');
   if v_item.refunded_quantity + v_active_qty + new.quantity > v_item.quantity then
     raise exception 'refund request line exceeds available quantity';
   end if;
@@ -1643,7 +1139,7 @@ declare
 begin
   if auth.role() <> 'service_role' then raise exception 'service role only'; end if;
   if coalesce(v_reference, '') = '' then raise exception 'provider_reference is required'; end if;
-  if v_status not in ('requires_payment_method', 'requires_action', 'processing') then
+  if v_status not in ('requires_action', 'processing') then
     raise exception 'provider status % must be confirmed by webhook', v_status;
   end if;
   select * into v_intent from commerce.payment_intents i
@@ -1683,7 +1179,7 @@ declare
 begin
   if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
   if coalesce(v_reference, '') = '' then raise exception 'provider_reference is required'; end if;
-  if v_status is null or v_status not in ('pending', 'requires_action', 'succeeded', 'failed', 'canceled', 'cancelled') then
+  if v_status is null or v_status not in ('pending', 'succeeded', 'failed', 'canceled', 'cancelled') then
     raise exception 'unsupported provider refund status %', v_status;
   end if;
   select * into v_request from commerce.refund_requests r
@@ -1707,7 +1203,6 @@ begin
       status = case
         when r.status not in ('requested', 'submitted') then r.status
         when v_status = 'pending' then 'processing'
-        when v_status = 'requires_action' then 'requires_action'
         else 'submitted' end,
       submitted_at = coalesce(r.submitted_at, now())
   where r.id = v_request.id returning * into v_request;
@@ -1788,7 +1283,7 @@ begin
     );
   end if;
   if v_intent.status = 'succeeded' then raise exception 'payment intent is already captured'; end if;
-  if v_intent.status not in ('requires_payment_method', 'requires_action', 'processing') then
+  if v_intent.status not in ('requires_action', 'processing') then
     raise exception 'payment intent cannot be captured from status %', v_intent.status;
   end if;
   if v_intent.expires_at is not null and v_intent.expires_at <= clock_timestamp() then
@@ -1843,115 +1338,6 @@ begin
   );
 end;
 $$;
-
-CREATE FUNCTION public.claim_expired_stripe_payment_intents(max_intents integer DEFAULT 20, as_of timestamp with time zone DEFAULT now()) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_id uuid;
-  v_intent commerce.payment_intents;
-  v_results jsonb := '[]'::jsonb;
-begin
-  if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
-  if max_intents is null or max_intents not between 1 and 100 then
-    raise exception 'max_intents must be between 1 and 100';
-  end if;
-  if as_of is null then raise exception 'as_of is required'; end if;
-  for v_id in
-    select i.id from commerce.payment_intents i join public.orders o on o.id = i.order_id
-    where i.provider = 'stripe' and i.provider_reference is not null
-      and i.status <> 'succeeded' and i.provider_terminal_status is null
-      and i.provider_cancel_attempts < 100
-      and (i.expires_at <= as_of or i.status in ('failed', 'cancelled')
-           or o.status <> 'open' or o.financial_status <> 'pending'
-           or (o.total, o.currency) is distinct from (i.amount, i.currency))
-      and (i.provider_cancel_claimed_at is null
-           or i.provider_cancel_claimed_at <= clock_timestamp() - interval '5 minutes')
-    order by coalesce(i.expires_at, o.cancelled_at, i.created_at), i.id
-    for update of i skip locked limit max_intents
-  loop
-    update commerce.payment_intents i
-    set provider_cancel_claimed_at = clock_timestamp(),
-        provider_cancel_attempts = i.provider_cancel_attempts + 1,
-        provider_cancel_last_error = null
-    where i.id = v_id returning * into v_intent;
-    v_results := v_results || jsonb_build_array(jsonb_build_object(
-      'id', v_intent.id, 'order_id', v_intent.order_id,
-      'provider_reference', v_intent.provider_reference, 'status', v_intent.status,
-      'amount', v_intent.amount, 'currency', v_intent.currency,
-      'expires_at', v_intent.expires_at, 'cancel_attempt', v_intent.provider_cancel_attempts
-    ));
-  end loop;
-  return v_results;
-end;
-$$;
-
-CREATE FUNCTION public.complete_stripe_payment_intent_cancel(payment_intent_id uuid, succeeded boolean, error_code text DEFAULT NULL::text, provider_status text DEFAULT NULL::text) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $_$
-declare
-  v_intent commerce.payment_intents;
-  v_error text := lower(btrim(error_code));
-  v_provider_status text := lower(btrim(provider_status));
-begin
-  if auth.role() <> 'service_role' then raise exception 'service role only'; end if;
-  if succeeded is null then raise exception 'succeeded is required'; end if;
-  if succeeded and coalesce(v_provider_status, '') not in ('succeeded', 'canceled') then
-    raise exception 'terminal provider_status is required';
-  end if;
-  if not succeeded and (
-    coalesce(v_error, '') = '' or v_error !~ '^[a-z0-9_:-]{1,200}$'
-    or v_provider_status is not null
-  ) then
-    raise exception 'safe error_code is required for a failed attempt';
-  end if;
-  select * into v_intent from commerce.payment_intents i
-  where i.id = complete_stripe_payment_intent_cancel.payment_intent_id
-    and i.provider = 'stripe' for update;
-  if not found then raise exception 'Stripe payment intent not found'; end if;
-  if v_intent.provider_terminal_status is not null and (
-    not succeeded or v_intent.provider_terminal_status <> v_provider_status
-  ) then
-    raise exception 'Stripe provider terminal status is immutable';
-  end if;
-  update commerce.payment_intents i
-  set provider_cancel_claimed_at = case when succeeded then null else clock_timestamp() end,
-      provider_cancel_last_error = case when succeeded then null else v_error end,
-      provider_terminal_status = case when succeeded
-                                      then coalesce(i.provider_terminal_status, v_provider_status)
-                                      else i.provider_terminal_status end,
-      provider_terminal_observed_at = case when succeeded
-                                           then coalesce(i.provider_terminal_observed_at,
-                                                         clock_timestamp())
-                                           else i.provider_terminal_observed_at end
-  where i.id = v_intent.id
-  returning * into v_intent;
-  if not succeeded then
-    perform private.enqueue_outbox_event(
-      'payment_intent', v_intent.id, 'stripe.payment_intent_cancel_failed',
-      jsonb_build_object(
-        'payment_intent_id', v_intent.id,
-        'order_id', v_intent.order_id,
-        'provider_reference', v_intent.provider_reference,
-        'cancel_attempt', v_intent.provider_cancel_attempts,
-        'error_code', v_intent.provider_cancel_last_error
-      ),
-      'stripe-payment-intent:' || v_intent.id
-        || ':cancel-failed:' || v_intent.provider_cancel_attempts
-    );
-  end if;
-  return jsonb_build_object(
-    'id', v_intent.id,
-    'status', v_intent.status,
-    'provider_reference', v_intent.provider_reference,
-    'cancel_attempts', v_intent.provider_cancel_attempts,
-    'last_error', v_intent.provider_cancel_last_error,
-    'provider_terminal_status', v_intent.provider_terminal_status
-  );
-end;
-$_$;
 
 CREATE FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb DEFAULT '{}'::jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
@@ -2139,7 +1525,7 @@ begin
   select coalesce(sum(r.amount), 0) into v_reserved
   from commerce.refund_requests r
   where r.parent_transaction_id = v_parent.id
-    and r.status in ('requested', 'submitted', 'processing', 'requires_action');
+    and r.status in ('requested', 'submitted', 'processing');
   v_available := v_parent.amount - v_refunded - v_reserved;
   if v_available <= 0 then raise exception 'capture has no refundable balance'; end if;
 
@@ -2159,7 +1545,7 @@ begin
       from commerce.refund_request_lines l
       join commerce.refund_requests r on r.id = l.refund_request_id
       where l.order_item_id = v_line.id
-        and r.status in ('requested', 'submitted', 'processing', 'requires_action');
+        and r.status in ('requested', 'submitted', 'processing');
       if v_line.refunded_quantity + v_active_qty + v_qty > v_line.quantity then
         raise exception 'refund quantity exceeds available request balance for item %', v_line.id;
       end if;
@@ -2347,7 +1733,7 @@ begin
     from commerce.refund_requests candidate
     where candidate.provider = v_provider
       and candidate.provider_reference is not null
-      and candidate.status in ('submitted', 'processing', 'requires_action')
+      and candidate.status in ('submitted', 'processing')
       and (candidate.last_provider_poll_at is null
            or candidate.last_provider_poll_at < clock_timestamp() - interval '5 minutes')
     order by coalesce(candidate.last_provider_poll_at, candidate.created_at),
@@ -2394,22 +1780,13 @@ begin
     raise exception 'order is not open (current: %)', v_order.status;
   end if;
   if exists (
-    select 1 from commerce.payment_intents i where i.order_id = v_order.id and (
-      ((i.provider in ('stripe', 'paypal') or i.provider_reference is not null)
-       and i.status in ('requires_payment_method', 'requires_action', 'processing')
-       and (i.provider <> 'stripe' or i.provider_terminal_status is distinct from 'canceled'))
-      or (i.provider = 'stripe' and i.provider_reference is not null
-          and i.provider_terminal_status is distinct from 'canceled')
-    )
+    select 1 from commerce.payment_intents i where i.order_id = v_order.id
+      and i.status in ('requires_action', 'processing')
   ) then
     raise exception 'online payment intent must be reconciled or cancelled at the provider before manual payment';
   end if;
 
   perform private.consume_order_reservation(v_order.id);
-  -- Preserve unbound manual/test-provider compatibility, never real online intents.
-  update commerce.payment_intents i set status = 'cancelled'
-  where i.order_id = v_order.id
-    and i.status in ('requires_payment_method', 'requires_action', 'processing');
   if v_order.total > 0 then
     return private.mark_order_paid(v_order.id, provider, provider_ref);
   end if;
@@ -2454,7 +1831,7 @@ begin
     raise exception 'order total changed after payment intent creation';
   end if;
   if v_intent.provider_reference is null
-     or v_intent.status not in ('requires_payment_method', 'requires_action', 'processing') then
+     or v_intent.status not in ('requires_action', 'processing') then
     raise exception 'PayPal payment intent is not capturable';
   end if;
   if v_intent.expires_at <= clock_timestamp()

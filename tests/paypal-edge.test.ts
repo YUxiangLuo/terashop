@@ -43,6 +43,76 @@ function webhookHeaders(certHost = 'api-m.sandbox.paypal.com'): Headers {
 }
 
 describe('PayPal Edge 安全边界', () => {
+  test('401 仅刷新一次，重试保留 POST body 和幂等键；不自动重放 5xx', async () => {
+    const posts: Request[] = [];
+    let tokens = 0;
+    const requestId = crypto.randomUUID();
+    const fetcher: PayPalFetcher = async (input, init) => {
+      if (String(input).endsWith('/v1/oauth2/token')) {
+        tokens++;
+        return Response.json({ access_token: `token-${tokens}`, expires_in: 3600 });
+      }
+      posts.push(new Request(input, init));
+      return posts.length === 1 ? Response.json({}, { status: 401 }) : Response.json({ id: 'ORDER12345' });
+    };
+    await payPalRequest('/v2/checkout/orders', { ...config, fetcher, body: { intent: 'CAPTURE' }, idempotencyKey: requestId });
+    expect(tokens).toBe(2);
+    expect(posts.map(post => post.headers.get('Authorization'))).toEqual(['Bearer token-1', 'Bearer token-2']);
+    for (const post of posts) {
+      expect(post.headers.get('PayPal-Request-Id')).toBe(requestId);
+      expect(await post.json()).toEqual({ intent: 'CAPTURE' });
+    }
+    let calls = 0;
+    for (const status of [401, 503]) {
+      await expect(payPalRequest('/v2/checkout/orders', {
+        ...config, idempotencyKey: requestId,
+        fetcher: async (input) => {
+          if (String(input).endsWith('/v1/oauth2/token')) return Response.json({ access_token: 'fresh-token', expires_in: 3600 });
+          calls++;
+          return Response.json({}, { status });
+        },
+      })).rejects.toMatchObject({ status: 502 });
+    }
+    expect(calls).toBe(3);
+  });
+
+  test('流式响应超限立即取消，响应中断归一为 502；错误 JSON 不误认为成功', async () => {
+    let cancelled = false;
+    const oversized = new Response(new ReadableStream({
+      pull(controller) { controller.enqueue(new Uint8Array(600_000)); },
+      cancel() { cancelled = true; },
+    }));
+    for (const [response, code] of [
+      [oversized, 'paypal_bad_response'],
+      [new Response(new ReadableStream({ start(controller) { controller.error(new Error('disconnected')); } })), 'paypal_unavailable'],
+      [new Response('<html>provider failed</html>'), 'paypal_bad_response'],
+      [Response.json([]), 'paypal_bad_response'],
+    ] as const) {
+      await expect(payPalRequest('/v2/checkout/orders', {
+        ...config, fetcher: async input => String(input).endsWith('/v1/oauth2/token')
+          ? Response.json({ access_token: 'bounded-token', expires_in: 3600 }) : response,
+      })).rejects.toMatchObject({ status: 502, code });
+    }
+    expect(cancelled).toBe(true);
+  });
+
+  test('无效 OAuth token/有效期不缓存，也不发送业务请求', async () => {
+    for (const token of [
+      { access_token: '', expires_in: 3600 }, { access_token: 'bad token', expires_in: 3600 },
+      { access_token: 'valid-token', expires_in: 0 }, { access_token: 'valid-token', expires_in: null },
+    ]) {
+      let calls = 0;
+      await expect(payPalRequest('/v2/checkout/orders', {
+        ...config, fetcher: async input => {
+          calls++;
+          expect(String(input)).toEndWith('/v1/oauth2/token');
+          return Response.json(token);
+        },
+      })).rejects.toMatchObject({ code: 'paypal_auth_failed' });
+      expect(calls).toBe(1);
+    }
+  });
+
   test('OAuth2、Bearer、PayPal-Request-Id 和 token cache 均按协议发送', async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const fetcher: PayPalFetcher = async (input, init) => {
@@ -73,6 +143,7 @@ describe('PayPal Edge 安全边界', () => {
       method: 'GET',
     });
     expect(calls).toHaveLength(3);
+    expect(calls.every(call => call.init?.redirect === 'error')).toBe(true);
     const oauthHeaders = new Headers(calls[0].init?.headers);
     expect(oauthHeaders.get('Authorization')).toBe(
       `Basic ${btoa('sandbox-client:sandbox-secret')}`,
@@ -203,10 +274,9 @@ describe('PayPal Edge 安全边界', () => {
       amount: '11.00', currency: 'EUR',
     });
     expect(payPalApprovalUrl(order, false)).toContain('sandbox.paypal.com');
-    expect(() => payPalApprovalUrl({
-      ...order,
-      links: [{ rel: 'approve', href: 'https://attacker.example/pay' }],
-    }, false)).toThrow('untrusted');
+    for (const href of ['https://attacker.example/pay', 'https://user:pass@www.sandbox.paypal.com/pay', 'https://www.sandbox.paypal.com:444/pay']) {
+      expect(() => payPalApprovalUrl({ ...order, links: [{ rel: 'approve', href }] }, false)).toThrow('untrusted');
+    }
 
     expect(payPalShippingUnit({
       recipient_name: 'Alex Morgan', country: 'US', region: 'NY', city: 'New York',
@@ -244,9 +314,15 @@ describe('PayPal Edge 安全边界', () => {
     };
     const localRefund = {
       id: refund.custom_id!, order_id: local.order_id, amount: '5.00', currency: 'USD',
-      parent_provider_reference: 'CAPTURE12345',
+      provider_reference: refund.id, parent_provider_reference: 'CAPTURE12345',
     };
     expect(() => validatePayPalRefund(refund, localRefund)).not.toThrow();
+    const withoutCustomId = { ...refund };
+    delete withoutCustomId.custom_id;
+    expect(() => validatePayPalRefund(withoutCustomId, localRefund)).not.toThrow();
+    expect(() => validatePayPalRefund({ ...refund, id: 'REFUNDWRONG' }, localRefund, false)).toThrow('does not match');
+    expect(() => validatePayPalRefund({ ...refund, custom_id: crypto.randomUUID() }, localRefund, false)).toThrow('does not match');
+    expect(() => validatePayPalRefund({ ...refund, links: [{ rel: 'up', href: 'https://api-m.paypal.com/v2/payments/captures/CAPTUREWRONG' }] }, localRefund, false)).toThrow('capture reference changed');
     expect(normalizedPayPalRefundData(refund, localRefund)).toMatchObject({
       amount: '5.00', capture_reference: 'CAPTURE12345',
     });

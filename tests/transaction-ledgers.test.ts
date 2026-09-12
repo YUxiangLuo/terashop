@@ -237,19 +237,19 @@ describe('支付交易与已支付快照', () => {
     const intentKey = `pi-${crypto.randomUUID()}`;
 
     const denied = await rpc('create_payment_intent', {
-      order_id: orderId, provider: 'stripe', idempotency_key: intentKey,
+      order_id: orderId, provider: 'paypal', idempotency_key: intentKey,
     }, owner.token);
     expect(denied.status).toBe(403);
     expect((denied.data as { code: string }).code).toBe('42501');
 
     const first = await rpc('create_payment_intent', {
       order_id: orderId,
-      provider: 'STRIPE',
+      provider: 'PAYPAL',
       idempotency_key: intentKey,
       metadata: { checkout: 'test' },
     }, undefined, true);
     const second = await rpc('create_payment_intent', {
-      order_id: orderId, provider: 'stripe', idempotency_key: intentKey,
+      order_id: orderId, provider: 'paypal', idempotency_key: intentKey,
     }, undefined, true);
     expect(first.status).toBe(200);
     expect((second.data as { id: string }).id).toBe((first.data as { id: string }).id);
@@ -283,7 +283,7 @@ describe('支付交易与已支付快照', () => {
     expect(value.payment_intents[0].status).toBe('succeeded');
     expect(value.transactions[0]).toMatchObject({
       payment_intent_id: (first.data as { id: string }).id,
-      provider: 'stripe', kind: 'capture', status: 'succeeded',
+      provider: 'paypal', kind: 'capture', status: 'succeeded',
     });
 
     const conflictingReplay = await rpc('capture_payment_intent', {

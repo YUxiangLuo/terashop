@@ -1,4 +1,5 @@
 import { HttpError, requireIdempotencyKey, requireUuid } from './http.ts';
+import { normalizeCheckoutAmount } from './paypal.ts';
 
 export interface RefundRequestDto {
   id: string;
@@ -29,10 +30,7 @@ function normalizeItems(value: unknown): Array<{ order_item_id: string; quantity
   });
 }
 
-export function parseRefundRequest(
-  body: Record<string, unknown>,
-  validateAmount: (value: string | number, currency: string) => unknown,
-) {
+export function parseRefundRequest(body: Record<string, unknown>) {
   const order_id = requireUuid(body.order_id, 'order_id');
   const idempotency_key = requireIdempotencyKey(body.idempotency_key);
   const items = normalizeItems(body.items);
@@ -41,8 +39,7 @@ export function parseRefundRequest(
   if (amount !== null && typeof amount !== 'string' && typeof amount !== 'number') {
     throw new HttpError('amount must be a decimal');
   }
-  // Preserve each provider's decimal validation and error contract.
-  if (amount !== null) validateAmount(amount, 'USD');
+  if (amount !== null) normalizeCheckoutAmount(amount, 'USD');
   if (body.reason !== undefined && body.reason !== null && typeof body.reason !== 'string') {
     throw new HttpError('reason must be text');
   }

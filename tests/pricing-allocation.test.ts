@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked } from './payment-fixtures';
-import { decimalToMinorUnits } from '../supabase/functions/_shared/stripe.ts';
+import { normalizeCheckoutAmount } from '../supabase/functions/_shared/paypal';
 
 interface Line { variant_id: string; quantity: number; unit_price: number; discount_total: number; line_total: number }
 interface Price {
@@ -13,7 +13,7 @@ let admin: TestUser;
 let buyer: TestUser;
 let productId: string;
 const variants = Array.from({ length: 8 }, () => crypto.randomUUID()).sort();
-const minor = (value: number) => value === 0 ? 0n : BigInt(decimalToMinorUnits(value, 'USD'));
+const minor = (value: number) => value === 0 ? 0n : BigInt(normalizeCheckoutAmount(value, 'USD').replace('.', ''));
 const decimal = (value: bigint | number) => {
   const cents = BigInt(value);
   return `${cents / 100n}.${(cents % 100n).toString().padStart(2, '0')}`;

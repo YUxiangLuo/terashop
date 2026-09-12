@@ -1522,10 +1522,6 @@ export type Database = {
         }
         Returns: Json
       }
-      claim_expired_stripe_payment_intents: {
-        Args: { as_of?: string; max_intents?: number }
-        Returns: Json
-      }
       claim_outbox_events: {
         Args: { lease_seconds?: number; max_events?: number; worker_id: string }
         Returns: Json
@@ -1538,15 +1534,6 @@ export type Database = {
           worker_id: string
         }
         Returns: boolean
-      }
-      complete_stripe_payment_intent_cancel: {
-        Args: {
-          error_code?: string
-          payment_intent_id: string
-          provider_status?: string
-          succeeded: boolean
-        }
-        Returns: Json
       }
       create_checkout_quote: {
         Args: {

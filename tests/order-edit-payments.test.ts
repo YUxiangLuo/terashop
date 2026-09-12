@@ -22,7 +22,7 @@ afterAll(async () => {
   await database.close();
 });
 
-for (const [provider, bound] of [['stripe', false], ['stripe', true], ['paypal', true]] as const) {
+for (const [provider, bound] of [['paypal', false], ['paypal', true]] as const) {
   test(`${provider} ${bound ? '已绑定' : '未绑定'}活动意图锁定兼容订单的地址和金额`, async () => {
     const order = await fixtureOrder(fixture, buyer, 1, false);
     if (bound) await fixtureIntent(order, buyer, provider);
@@ -51,7 +51,7 @@ test('无意图时仍可改价；V2 兼容订单创建意图后也受同样约�
   }, buyer.token));
   expect(changed.total).toBe(10);
   const intent = await checked<{ amount: number }>(rpc('create_payment_intent_for_customer', {
-    order_id: order.id, customer_id: buyer.userId, provider: 'stripe', idempotency_key: crypto.randomUUID(),
+    order_id: order.id, customer_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
   }, undefined, true));
   expect(intent.amount).toBe(10);
   expect((await rpc('update_order_address', { order_id: order.id, address: TEST_ADDRESS }, buyer.token)).status).toBe(400);
@@ -76,17 +76,14 @@ test('地址簿引用不能穿透锁；service role 也不能直接改商业快�
   expect(item.data).toMatchObject({ message: expect.stringContaining('payment intent') });
 });
 
-test('Stripe 本地 cancelled 不足以解锁；渠道终结后可改价并创建新金额意图', async () => {
+test('PayPal declined 后可改价并创建新金额意图', async () => {
   const order = await fixtureOrder(fixture, buyer, 1, false);
   const intent = await fixtureIntent(order, buyer);
-  await paymentEvent('stripe', 'payment_intent.canceled', intent.provider_reference, {
-    status: 'canceled', amount_minor: String(Math.round(intent.amount * 100)), currency: intent.currency,
-    metadata: { tera_payment_intent_id: intent.id },
+  const result = await paymentEvent('paypal', 'PAYMENT.CAPTURE.DECLINED', `CAPTURE${intent.id}`, {
+    status: 'declined', amount: intent.amount.toFixed(2), currency: intent.currency,
+    order_reference: intent.provider_reference, metadata: { tera_payment_intent_id: intent.id },
   });
-  expect((await rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, buyer.token)).status).toBe(400);
-  await checked(rpc('complete_stripe_payment_intent_cancel', {
-    payment_intent_id: intent.id, succeeded: true, provider_status: 'canceled',
-  }, undefined, true));
+  expect(result.outcome).toBe('failed');
   expect((await rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, buyer.token)).status).toBe(200);
   const next = await fixtureIntent(order, buyer);
   expect(next.id).not.toBe(intent.id);
@@ -104,7 +101,7 @@ for (const first of ['intent', 'edit']) {
       if (first === 'intent') {
         await transaction`select public.create_payment_intent_for_customer(
           order_id => ${order.id}::uuid, customer_id => ${buyer.userId}::uuid,
-          provider => 'stripe', idempotency_key => ${key})`;
+          provider => 'paypal', idempotency_key => ${key})`;
       } else {
         await transaction`select public.update_order_address(
           order_id => ${order.id}::uuid, address => ${JSON.stringify(OTHER_ADDRESS)}::text::jsonb)`;
@@ -112,7 +109,7 @@ for (const first of ['intent', 'edit']) {
     }, () => first === 'intent'
       ? rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, buyer.token)
       : rpc('create_payment_intent_for_customer', {
-          order_id: order.id, customer_id: buyer.userId, provider: 'stripe', idempotency_key: key,
+          order_id: order.id, customer_id: buyer.userId, provider: 'paypal', idempotency_key: key,
         }, undefined, true));
     expect(result.status).toBe(first === 'intent' ? 400 : 200);
     const [row] = await database`

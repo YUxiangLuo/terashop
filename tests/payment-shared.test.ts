@@ -3,73 +3,67 @@ import { createHash } from 'node:crypto';
 import { HttpError } from '../supabase/functions/_shared/http.ts';
 import { ingestApiPaymentEvent, sha256Hex } from '../supabase/functions/_shared/provider-events.ts';
 import { parseRefundRequest } from '../supabase/functions/_shared/refunds.ts';
-import { decimalToMinorUnits, StripeIntegrationError } from '../supabase/functions/_shared/stripe.ts';
-import { normalizeCheckoutAmount, PayPalIntegrationError } from '../supabase/functions/_shared/paypal.ts';
+import { PayPalIntegrationError } from '../supabase/functions/_shared/paypal.ts';
 
 const orderId = '11111111-1111-4111-8111-111111111111';
 const itemId = '22222222-2222-4222-8222-222222222222';
 const base = { order_id: orderId, idempotency_key: ' refund-command ' };
 const item = { order_item_id: itemId, quantity: 1 };
 
-for (const [provider, validateAmount, ErrorType] of [
-  ['stripe', decimalToMinorUnits, StripeIntegrationError],
-  ['paypal', normalizeCheckoutAmount, PayPalIntegrationError],
-] as const) {
-  describe(`${provider} 共用退款参数`, () => {
-    test('保留默认值、原始金额及商品行，丢弃额外字段', () => {
-      const expected = {
-        order_id: orderId, idempotency_key: 'refund-command',
-        items: null, amount: null, reason: null, restock: false,
-      };
-      expect(parseRefundRequest(base, validateAmount)).toEqual(expected);
-      for (const amount of [10, '10.0', '0.01']) {
-        expect(parseRefundRequest({ ...base, amount }, validateAmount))
-          .toEqual({ ...expected, amount });
-      }
-      expect(parseRefundRequest({
-        ...base, items: [{ ...item, ignored: true }, item], restock: true, reason: '',
-        actor_id: 'untrusted', provider: 'untrusted',
-      }, validateAmount)).toEqual({ ...expected, items: [item, item], restock: true, reason: '' });
-      expect(parseRefundRequest({
-        ...base, items: null, amount: null, reason: null,
-      }, validateAmount)).toEqual(expected);
-      expect(parseRefundRequest({
-        ...base, items: Array(100).fill(item), reason: 'x'.repeat(1000),
-      }, validateAmount).items).toHaveLength(100);
-    });
-
-    test('保留请求边界校验与错误信息', () => {
-      const invalid: Array<[Record<string, unknown>, string]> = [
-        [{ order_id: 'bad' }, 'order_id must be a UUID'],
-        [{ idempotency_key: '' }, 'idempotency_key is required'],
-        [{ items: [] }, 'at most 100 lines'],
-        [{ items: Array(101).fill(item) }, 'at most 100 lines'],
-        [{ items: {} }, 'at most 100 lines'],
-        [{ items: [null] }, 'Invalid refund item'],
-        [{ items: [[]] }, 'Invalid refund item'],
-        [{ items: [{ ...item, order_item_id: 'bad' }] }, 'order_item_id must be a UUID'],
-        ...[0, -1, 1.5, '1', Number.MAX_SAFE_INTEGER + 1].map(quantity => [
-          { items: [{ ...item, quantity }] }, 'Refund quantity must be a positive integer',
-        ] as [Record<string, unknown>, string]),
-        [{ items: [item], amount: '10.00' }, 'Pass either items or amount'],
-        [{ amount: {} }, 'amount must be a decimal'],
-        [{ reason: 1 }, 'reason must be text'],
-        [{ reason: 'x'.repeat(1001) }, 'reason must be at most 1000 characters'],
-        [{ restock: null }, 'restock must be boolean'],
-        [{ restock: 'true' }, 'restock must be boolean'],
-      ];
-      for (const [overrides, message] of invalid) {
-        expect(() => parseRefundRequest({ ...base, ...overrides }, validateAmount)).toThrow(message);
-      }
-    });
-
-    test('金额校验仍使用渠道自己的错误类型', () => {
-      for (const amount of [0, -1, NaN, Infinity, '1.001', '10000000000']) {
-        expect(() => parseRefundRequest({ ...base, amount }, validateAmount)).toThrow(ErrorType);
-      }
-    });
+describe('PayPal 退款参数', () => {
+  test('保留默认值、原始金额及商品行，丢弃额外字段', () => {
+    const expected = {
+      order_id: orderId, idempotency_key: 'refund-command',
+      items: null, amount: null, reason: null, restock: false,
+    };
+    expect(parseRefundRequest(base)).toEqual(expected);
+    for (const amount of [10, '10.0', '0.01']) {
+      expect(parseRefundRequest({ ...base, amount }))
+        .toEqual({ ...expected, amount });
+    }
+    expect(parseRefundRequest({
+      ...base, items: [{ ...item, ignored: true }, item], restock: true, reason: '',
+      actor_id: 'untrusted', provider: 'untrusted',
+    })).toEqual({ ...expected, items: [item, item], restock: true, reason: '' });
+    expect(parseRefundRequest({
+      ...base, items: null, amount: null, reason: null,
+    })).toEqual(expected);
+    expect(parseRefundRequest({
+      ...base, items: Array(100).fill(item), reason: 'x'.repeat(1000),
+    }).items).toHaveLength(100);
   });
-}
+
+  test('保留请求边界校验与错误信息', () => {
+    const invalid: Array<[Record<string, unknown>, string]> = [
+      [{ order_id: 'bad' }, 'order_id must be a UUID'],
+      [{ idempotency_key: '' }, 'idempotency_key is required'],
+      [{ items: [] }, 'at most 100 lines'],
+      [{ items: Array(101).fill(item) }, 'at most 100 lines'],
+      [{ items: {} }, 'at most 100 lines'],
+      [{ items: [null] }, 'Invalid refund item'],
+      [{ items: [[]] }, 'Invalid refund item'],
+      [{ items: [{ ...item, order_item_id: 'bad' }] }, 'order_item_id must be a UUID'],
+      ...[0, -1, 1.5, '1', Number.MAX_SAFE_INTEGER + 1].map(quantity => [
+        { items: [{ ...item, quantity }] }, 'Refund quantity must be a positive integer',
+      ] as [Record<string, unknown>, string]),
+      [{ items: [item], amount: '10.00' }, 'Pass either items or amount'],
+      [{ amount: {} }, 'amount must be a decimal'],
+      [{ reason: 1 }, 'reason must be text'],
+      [{ reason: 'x'.repeat(1001) }, 'reason must be at most 1000 characters'],
+      [{ restock: null }, 'restock must be boolean'],
+      [{ restock: 'true' }, 'restock must be boolean'],
+    ];
+    for (const [overrides, message] of invalid) {
+      expect(() => parseRefundRequest({ ...base, ...overrides })).toThrow(message);
+    }
+  });
+
+  test('金额校验仍使用渠道自己的错误类型', () => {
+    for (const amount of [0, -1, NaN, Infinity, '1.001', '10000000000']) {
+      expect(() => parseRefundRequest({ ...base, amount })).toThrow(PayPalIntegrationError);
+    }
+  });
+});
 
 test('SHA-256 保留原始 UTF-8 字节与空白差异', async () => {
   for (const raw of ['', 'abc', '{"note":"支付"}', '{"note":"支付"}\n']) {
@@ -101,9 +95,6 @@ test('API 入箱保持既有哈希、事件 ID、时间戳、模式与错误行�
   }) as typeof fetch;
   try {
     for (const [provider, resource, reference, status, eventType, livemode] of [
-      ['stripe', 'payment_intent', 'pi_test', 'succeeded', 'payment_intent.succeeded', false],
-      ['stripe', 'payment_intent', 'pi_test', 'canceled', 'payment_intent.canceled', true],
-      ['stripe', 'refund', 're_test', 'succeeded', 'refund.api_result', true],
       ['paypal', 'capture', 'CAPTURE123', 'COMPLETED', 'paypal.capture.api_result', false],
       ['paypal', 'refund', 'REFUND123', 'PENDING', 'paypal.refund.api_result', true],
     ] as const) {
