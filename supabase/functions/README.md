@@ -39,6 +39,7 @@ PAYMENT.REFUND.FAILED
 Order ID 与实际资金 Capture ID 不同。Capture POST 前必须持久化 `prepare_paypal_capture`；重试先 GET，再复用本地意图 UUID 作为 `PayPal-Request-Id`，网络错误不清除捕获保护。
 `PAYMENT.CAPTURE.REFUNDED` 仅唤醒轮询，具体退款终态以 Refund 资源为准。
 Refund POST 前必须持久化 `prepare_paypal_refund`；发出后即使未绑定 ID，也不得无渠道确认取消或释放退款额度。原键重试保留同一请求 UUID，已绑定时只 GET 已知 Refund；未绑定终态在 POST 前拒绝。
+退款发送金额只取数据库计划：商品退款包含对应税，`shipping_amount` 表示明确选退的净运费并另退配送税，`amount` 则为互斥的未分配金额。请求组成在成功时原样入账，不按渠道返回时间重算。
 退款校验已绑定 Refund ID、可选 `custom_id` 与父 Capture 引用；API 重试不回退 processing 或终态。HTTP 请求禁止重定向；401 最多刷新 token 后重试一次，其他失败交由原幂等命令重试。
 Webhook 入箱后处理失败返回 500；已识别的瞬时数据库故障保留为 received / transient_database_error 并确认收件，按 `next_attempt_at` 退避后由 Inbox Worker 重试。即便渠道停止重试，也必须能恢复本地入账。
 使用真实 Sandbox 交易演练：Webhook Simulator 不能通过 postback 验签。

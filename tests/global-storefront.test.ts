@@ -15,7 +15,7 @@ afterAll(async () => {
 const items = () => [{ variant_id: variantId, quantity: 1 }];
 
 test('单一 USD 与配送国家无关，seed 不暗中安装任何税率', async () => {
-  expect(await checked<Array<{ id: string }>>(api('/rest/v1/tax_rates?select=id', { service: true }))).toEqual([]);
+  expect(await checked<Array<{ id: string }>>(api('/rest/v1/tax_rates?is_active=eq.true&select=id', { service: true }))).toEqual([]);
   const [product] = await checked<Array<{ currency: string }>>(api('/rest/v1/product_listing?select=currency&limit=1'));
   expect(product.currency).toBe('USD');
   for (const country of ['US', 'GB', 'JP', 'HK', 'CN']) {

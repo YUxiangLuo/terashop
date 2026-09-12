@@ -108,7 +108,7 @@ export async function installTestTax(country = 'US', rate = 0.13): Promise<() =>
   if (created.status >= 400) throw new Error(`test tax setup failed: ${JSON.stringify(created.data)}`);
   const [{ id }] = created.data as { id: string }[];
   return async () => {
-    const deleted = await api(`/rest/v1/tax_rates?id=eq.${id}`, { service: true, method: 'DELETE' });
+    const deleted = await api(`/rest/v1/tax_rates?id=eq.${id}`, { service: true, method: 'PATCH', body: { is_active: false } });
     if (deleted.status >= 400) throw new Error(`test tax cleanup failed: ${JSON.stringify(deleted.data)}`);
   };
 }

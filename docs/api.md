@@ -52,7 +52,8 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 | `get_order_checkout_quote` | `order_id` |
 | `cancel_checkout_quote` | `quote_id`、可选 `reason` |
 | `cancel_order` | `order_id`、可选 `reason`；仅未支付未发货且无捕获保护的订单 |
-| `get_order_ledger` | `order_id`；安全交易账本 DTO |
+| `get_order_ledger` | `order_id`；安全交易账本 DTO，退款含金额组成 |
+| `get_order_pricing` | `order_id`；客户本人/admin/service 可读的价格、优惠、税与配送快照 |
 | `get_order_fulfillment_balance` | `order_id`；每行订购/履约/取消/退款预留/可履约数量 |
 | `update_order_address` | `order_id`、`address` 或 `address_id`；仅符合编辑条件的非 Quote 订单 |
 
@@ -79,19 +80,42 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 属性是不可变交易快照中的客户文本，不是服务端授权指令；前端显示时必须转义，不应包含密钥或不必要的个人信息。终态 Quote 的地址/备注清理不包含行属性。
 当前只是保存商业配置，不包含收费定制、订阅、套装或持久购物车。
 
+## 价格明细与税务依据
+
+预览、Quote 和 `get_order_pricing` 使用相同的金额口径：
+
+- `lines[].discount_allocations[]`：`promotion_id`、`label`、`amount`，合计等于该商业行 `discount_total`。
+- `promotions[].snapshot`：实际使用的规则类型、参数、优先级、目标和 `application_index`；不是指向可变规则的实时视图。
+- `shipping_line`：当前最多一条，含毛运费 `gross_amount`、减免 `discount_total`、配送政策减免 `threshold_discount`、净运费 `total`，以及政策、优惠分摊和税明细。免邮仍保存原收费与减免；满额包邮不虚构促销。
+- 商品行和配送行的 `tax_lines[]`：规则 ID、名称、适用国家/`*`、比例 `rate`、折后计税基数 `taxable_amount`、税额 `amount`。订单明细另有稳定 `id`，退款组件引用它。
+- `tax_context`：`not_calculated`（无目的地预览）、`no_rule`（无匹配规则）、`calculated`（包括显式零税率），保存目的地、实际规则与算法 `country_rate_variant_line_v1`。`unrecorded` 仅供无税额的受信订单构建，不是免税证明。
+
+税先按 SKU/配送、再按商业行进行整数分最大余数分配，合计等于折后应税基数乘单一税率的舍入结果。拆属性不能改变 SKU 税额。当前不支持多税种、含税价格、州/邮编税、免税证书或税务发票。
+商品净额 + 净运费 + 税 = 订单总额；促销免邮收益不重复计入商品折扣。被订单明细引用的税率、运法、促销应停用，不可删除；修改配置不会改写已支付快照。仅符合条件的即时未付订单改地址会重建目的地税，不重新计算商品优惠/运费。
+
 ## 支付与退款
 
 | Edge Function | 调用方 | 请求 |
 | --- | --- | --- |
 | `paypal-create-order` | 客户 | `order_id`、`idempotency_key`；跳转返回的 `approve_url` |
 | `paypal-capture-order` | 客户 | 买家批准后传 `payment_intent_id` |
-| `paypal-create-refund` | 管理员 | `order_id`、`idempotency_key`、可选 `items` 或 `amount`、`restock`、`reason` |
+| `paypal-create-refund` | 管理员 | `order_id`、`idempotency_key`、可选 `items`、`shipping_amount` 或互斥的 `amount`，以及 `restock`、`reason` |
 
 退款示例：
 
 ```json
 {"order_id":"<uuid>","idempotency_key":"refund-command-id","items":[{"order_item_id":"<uuid>","quantity":1}],"restock":true,"reason":"破损"}
 ```
+
+手工 `refund_order` / `refund_order_v2` 与 PayPal 使用同一组成合同：
+
+- `items` 按独立 `order_item_id` / 数量退**商品净额及对应税**。净额仍在 `refund_lines.amount`，税另列组件，不能把两者重复相加。
+- `shipping_amount` 是明确选退的**折后运费、不含税**，可单独传或与 `items` 同传；系统另退对应配送税。省略不退运费，免邮没有正运费可退。
+- `amount` 与 `items` / `shipping_amount` 互斥，保存为 `unallocated`，不猜税、运费或商品数量；三者全省略表示退当前可退余额，同样是未分配金额。
+- 金额必须是有限正 USD、至多两位小数。各净额/税分别按比例舍入并钳制剩余额度，最后一份吸收余数；总额必须大于零且不超过实收可退余额。`restock=true` 必须有商品行。
+- `get_order_ledger.refunds[].components` 与退款请求 DTO 的 `components` 返回 `tax` / `shipping` / `unallocated`、来源 ID、金额；商品行金额 + 组件金额 = 退款总额。异步成功使用请求时的原分摊，不按最新税率或剩余请求重算。
+
+例如只退 4 USD 净运费，传 `{"order_id":"<uuid>","idempotency_key":"shipping-refund-1","shipping_amount":"4.00"}`；若原配送税为 13%，渠道实际收到的本次退款额为 4.52 USD（未发生余数调整时）。
 
 退款请求被接受不等于渠道退款成功；确认前仅预留可退额度/数量，不回库。已发出的退款即使尚无渠道 ID，也不能无确认取消或释放额度。
 PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复用同一个键。支付/退款响应 `pending_reconciliation=true` 也可能表示可重试的本地数据库故障，不能当作已完成交易。
@@ -132,4 +156,4 @@ PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复
 - `refund_order` / `refund_order_v2`：同步手工/测试退款，不代表真实渠道已退款；不能穿透活跃异步退款请求。
 
 金额口径：`order_items.total` 为毛额，`line_total` 为扣行折扣后的净额；`orders.discount_total` 只含商品折扣。
-免邮收益记录于 `order_promotions.amount`，同时将 `shipping_total` 置零；`payments.amount` 恒正，方向由 `kind` 表达。
+免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payments.amount` 恒正，方向由 `kind` 表达。退款不等于退货收货，当前 `restock` 仍是管理员在成功退款时选择回库，尚无 Return/Receipt 模块。

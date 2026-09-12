@@ -655,6 +655,7 @@ export type Database = {
           name: string
           order_id: string
           promotion_id: string
+          snapshot: Json
         }
         Insert: {
           amount: number
@@ -663,6 +664,7 @@ export type Database = {
           name: string
           order_id: string
           promotion_id: string
+          snapshot?: Json
         }
         Update: {
           amount?: number
@@ -671,6 +673,7 @@ export type Database = {
           name?: string
           order_id?: string
           promotion_id?: string
+          snapshot?: Json
         }
         Relationships: [
           {
@@ -715,6 +718,7 @@ export type Database = {
           shipping_total: number
           status: string
           subtotal: number
+          tax_context: Json
           tax_total: number
           total: number
           updated_at: string
@@ -744,6 +748,7 @@ export type Database = {
           shipping_total?: number
           status?: string
           subtotal: number
+          tax_context?: Json
           tax_total?: number
           total: number
           updated_at?: string
@@ -773,6 +778,7 @@ export type Database = {
           shipping_total?: number
           status?: string
           subtotal?: number
+          tax_context?: Json
           tax_total?: number
           total?: number
           updated_at?: string
@@ -1436,16 +1442,6 @@ export type Database = {
       }
     }
     Functions: {
-      _line_in_scope: {
-        Args: {
-          p_category_ids: string[]
-          p_product_id: string
-          p_promotion_id: string
-          p_role: string
-          p_variant_id: string
-        }
-        Returns: boolean
-      }
       adjust_inventory: {
         Args: {
           delta: number
@@ -1651,6 +1647,7 @@ export type Database = {
           provider: string
           reason?: string
           restock?: boolean
+          shipping_amount?: number
         }
         Returns: Json
       }
@@ -1673,6 +1670,7 @@ export type Database = {
         Returns: Json
       }
       get_order_ledger: { Args: { order_id: string }; Returns: Json }
+      get_order_pricing: { Args: { order_id: string }; Returns: Json }
       get_payment_intent_for_customer: {
         Args: {
           customer_id: string
@@ -1728,6 +1726,7 @@ export type Database = {
           shipping_total: number
           status: string
           subtotal: number
+          tax_context: Json
           tax_total: number
           total: number
           updated_at: string
@@ -1784,6 +1783,7 @@ export type Database = {
           provider?: string
           reason?: string
           restock?: boolean
+          shipping_amount?: number
         }
         Returns: Json
       }
@@ -1796,6 +1796,7 @@ export type Database = {
           provider?: string
           reason?: string
           restock?: boolean
+          shipping_amount?: number
         }
         Returns: Json
       }

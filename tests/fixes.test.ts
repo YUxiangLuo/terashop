@@ -328,9 +328,10 @@ describe('修复：退款闭环', () => {
 
   beforeAll(async () => {
     owner = await signup();
-    // 马克杯×3：满3件7折 → line_total 20.79，税 2.70，total 23.49
+    // 商品净额 20.79、商品税 2.70；另留 8 运费，验证商品退完不自动退配送费。
     const { data: o } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 3 }], address: TEST_ADDRESS,
+      shipping_method_id: await shippingByName('Standard shipping'),
     }, owner.token);
     orderId = (o as { id: string }).id;
     const { data: items } = await api(`/rest/v1/order_items?order_id=eq.${orderId}&select=id`, { token: owner.token });
@@ -343,7 +344,7 @@ describe('修复：退款闭环', () => {
     expect((data as { message: string }).message).toBe('admin only');
   });
 
-  test('按行部分退款：金额按 line_total 比例，推進 partially_refunded', async () => {
+  test('按行部分退款：净额与对应税按数量分摊，推进 partially_refunded', async () => {
     const { data } = await rpc('refund_order', {
       order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }], reason: '破损一件',
     }, admin.token);
@@ -351,7 +352,7 @@ describe('修复：退款闭环', () => {
 
     const { data: pays } = await api(
       `/rest/v1/payments?order_id=eq.${orderId}&kind=eq.refund&select=amount,status`, { service: true });
-    expect(Number((pays as { amount: number }[])[0].amount)).toBeCloseTo(6.93);  // 20.79/3
+    expect(Number((pays as { amount: number }[])[0].amount)).toBeCloseTo(7.83);  // 商品 20.79/3 + 税 2.70/3
 
     const { data: items } = await api(
       `/rest/v1/order_items?id=eq.${orderItemId}&select=refunded_quantity,refunded_amount`, { service: true });
@@ -364,7 +365,7 @@ describe('修复：退款闭环', () => {
     const { data } = await rpc('refund_order', {
       order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 3 }], // 已退1，最多再退2
     }, admin.token);
-    expect((data as { message: string }).message).toContain('exceeds refundable');
+    expect((data as { message: string }).message).toContain('quantity exceeds available');
   });
 
   test('退完该行取剩余全部（无舍入误差）', async () => {
@@ -380,10 +381,10 @@ describe('修复：退款闭环', () => {
 
   test('自定义金额超额被拒；退剩余差额 → refunded', async () => {
     const over = await rpc('refund_order', { order_id: orderId, amount: 999 }, admin.token);
-    expect((over.data as { message: string }).message).toContain('exceeds refundable');
+    expect((over.data as { message: string }).message).toContain('exceeds available refundable balance');
 
-    // 行退款共 20.79，订单总额 23.49（含税 2.70）→ 剩余 2.70
-    const { data } = await rpc('refund_order', { order_id: orderId, reason: '税费随退' }, admin.token);
+    // 商品净额和对应税已退尽；剩余运费以显式未分配金额退款，不猜测组成。
+    const { data } = await rpc('refund_order', { order_id: orderId, reason: '剩余金额退款' }, admin.token);
     expect((data as { financial_status: string }).financial_status).toBe('refunded');
 
     // 已全额退款的订单不再可退（状态守卫先于余额检查触发）

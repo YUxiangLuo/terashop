@@ -11,7 +11,7 @@
 | --- | --- |
 | `00_schema.sql` | schema、表、约束、索引、RLS 开关与默认权限；Supabase 提供 Auth 基础对象 |
 | `01_catalog.sql` | 目录完整性/发布、商品扩展、客户、地址、评价、角色、库存调整 |
-| `02_checkout.sql` | 计价、促销、订单、Quote 与库存预占 |
+| `02_checkout.sql` | 计价/税分摊、价格快照、订单、Quote 与库存预占 |
 | `03_transactions.sql` | 账本、履约、退款、快照保护和 Outbox |
 | `04_payments.sql` | 支付意图、渠道 Inbox、外部资金与对账 |
 | `05_security.sql` | 视图、业务/Auth 触发器、RLS policy、显式 API 权限 |
@@ -42,9 +42,9 @@ bun run typecheck
 - 在同一事务中安装 `plpgsql_check`，从实际 `price_checkout` 定义提取两个建表语句，准备临时表；不调用业务函数，也不维护重复的临时表结构。
 - 成功或失败均回滚，扩展与检查用对象不会留下；无法识别临时表 DDL 时直接失败。
 - **所有未审阅的告警或错误均使命令返回非零状态**，现有 CI 已调用此命令。不接受函数注释关闭检查。
-- 仅有两类精确例外：两个 UUID/整数规范化函数中固定 JSON 聚合语句的 `STABLE` 告警；两个多表触发器中由固定 `TG_TABLE_NAME` 分支排除的字段访问。例外同时匹配诊断与实际源码位置/语句，触发器还匹配挂载表，不跳过整个函数。
+- 仅有两类精确例外：两个 UUID/整数规范化函数中固定 JSON 聚合语句的 `STABLE` 告警；Quote 多表触发器中由固定 `TG_TABLE_NAME` 分支排除的字段访问。例外同时匹配诊断与实际源码位置/语句，触发器还匹配挂载表，不跳过整个函数。
 
-库存规范化结果与幂等哈希在输入重排、UUID 大小写、拆行和不同会话设置下应保持一致；商业行仅合并相同属性，增加独立 ID 后 Quote 行已具有 `id` 字段，对应的旧缺列例外不再产生（当前共 5 个精确诊断）。回归也注入错误，验证缺列、变化的 JSON 表达式和错误的触发器分支不会被例外吞掉。更改这些语句后先审查新诊断，不扩大例外范围来消除报错。
+库存规范化结果与幂等哈希在输入重排、UUID 大小写、拆行和不同会话设置下应保持一致；商业行仅合并相同属性，Quote 行增加 ID、退款组成校验改为 JSON 取标识后，旧缺列例外已移除（当前共 3 个精确诊断）。回归也注入错误，验证缺列、变化的 JSON 表达式和错误的触发器分支不会被例外吞掉。更改这些语句后先审查新诊断，不扩大例外范围来消除报错。
 
 ## 深度审阅回归
 
@@ -56,7 +56,15 @@ bun run typecheck
 - [`catalog-integrity.test.ts`](../tests/catalog-integrity.test.ts)：草稿/发布、归属不可迁移、规格完整性/唯一性、分类环、发布竞态及 REPEATABLE READ 旧快照。
 - [`checkout-lines.test.ts`](../tests/checkout-lines.test.ts)：属性边界、key/幂等、同 SKU 多行库存合计、手工/PayPal 支付、逐行履约/退款及防促销拆行套利。
 
-`private.category_tree_guard` 是内部同步哨兵，不是新增业务 API；目录编辑要求整笔事务重试。生成的 `line_key` 不可直写，Quote 行 UUID 转单后继续使用。当前阶段未新增 Cart、独立客户、税费明细或 Return 模块。
+`private.category_tree_guard` 是内部同步哨兵，不是新增业务 API；目录编辑要求整笔事务重试。生成的 `line_key` 不可直写，Quote 行 UUID 转单后继续使用。当前仍未新增 Cart、独立客户或 Return 模块。
+
+## 价格明细与退款组成
+
+`commerce.order_shipping_lines` / `order_tax_lines` / `order_discount_allocations` 解释订单头同一组金额；`order_promotions` 保存实际规则与应用顺序。Quote 行用受校验、参与 hash 的 JSON 保存报价明细，转单再落关系表，不提前创建交易账本。
+退款商品净额继续使用 `refund_lines` / `refund_request_lines`；新增 `refund_components` / `refund_request_components` 保存税、配送和未分配金额。外键约束同一订单归属，提交时校验组成总额；事实不可改写，异步成功原样复制请求分摊。
+
+[`pricing-breakdown.test.ts`](../tests/pricing-breakdown.test.ts) 覆盖国家/wildcard/零税、拆属性与美分守恒、两条建单路径、历史快照、支付锁、缺失/跨单明细、混合/未分配退款、取消/逆序完成、handler 与受控并发。定价明细与意图创建均写订单行版本；退款请求 INSERT 同样写父订单并检查 Capture 剩余额度，拒绝旧 REPEATABLE READ 快照绕过保护。税规则清理使用停用，不能删除历史引用。
+这些测试不代表全球税务合规或生产吞吐验证；关系明细/逐行延迟校验的生产基数查询与批量写入仍须实测。
 
 ## 基线合并背景
 

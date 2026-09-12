@@ -59,6 +59,26 @@ INSERT INTO private.category_tree_guard DEFAULT VALUES;
 ALTER TABLE private.category_tree_guard ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.category_tree_guard FROM PUBLIC, anon, authenticated, service_role;
 
+CREATE FUNCTION private.valid_tax_context(p_context jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE STRICT SET search_path TO '' AS $$
+  select coalesce(jsonb_typeof(p_context) = 'object' and case p_context ->> 'status'
+    when 'unrecorded' then p_context = '{"status":"unrecorded"}'::jsonb
+    when 'not_calculated' then p_context -> 'destination_country' = 'null'::jsonb and p_context -> 'rule' = 'null'::jsonb
+      and p_context ->> 'method' = 'country_rate_variant_line_v1'
+    when 'no_rule' then p_context ->> 'destination_country' ~ '^[A-Z]{2}$' and p_context -> 'rule' = 'null'::jsonb
+      and p_context ->> 'method' = 'country_rate_variant_line_v1'
+    when 'calculated' then p_context ->> 'destination_country' ~ '^[A-Z]{2}$'
+      and p_context ->> 'method' = 'country_rate_variant_line_v1'
+      and jsonb_typeof(p_context -> 'rule') = 'object'
+      and p_context -> 'rule' ->> 'tax_rate_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      and jsonb_typeof(p_context -> 'rule' -> 'name') = 'string'
+      and p_context -> 'rule' ->> 'country' in (p_context ->> 'destination_country', '*')
+      and jsonb_typeof(p_context -> 'rule' -> 'include_shipping') = 'boolean'
+      and jsonb_typeof(p_context -> 'rule' -> 'rate') = 'number'
+      and (p_context -> 'rule' ->> 'rate')::numeric between 0 and 1
+    else false end, false);
+$$;
+
 -- Tables: catalog, customers and transaction facts
 
 CREATE TABLE public.orders (
@@ -75,6 +95,7 @@ CREATE TABLE public.orders (
     shipping_total numeric(12,2) DEFAULT 0 NOT NULL CONSTRAINT orders_shipping_total_finite CHECK (shipping_total NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
     tax_total numeric(12,2) DEFAULT 0 NOT NULL CONSTRAINT orders_tax_total_finite CHECK (tax_total NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
     total numeric(12,2) NOT NULL CONSTRAINT orders_total_finite CHECK (total NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
+    tax_context jsonb DEFAULT '{"status":"unrecorded"}'::jsonb NOT NULL CHECK (private.valid_tax_context(tax_context)),
     shipping_address jsonb NOT NULL,
     billing_address jsonb,
     shipping_method_id uuid,
@@ -116,6 +137,8 @@ CREATE TABLE commerce.checkout_quotes (
     shipping_total numeric(12,2) DEFAULT 0 NOT NULL CONSTRAINT checkout_quotes_shipping_total_finite CHECK (shipping_total NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
     tax_total numeric(12,2) DEFAULT 0 NOT NULL CONSTRAINT checkout_quotes_tax_total_finite CHECK (tax_total NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
     total numeric(12,2) NOT NULL CONSTRAINT checkout_quotes_total_finite CHECK (total NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
+    tax_context jsonb DEFAULT '{"status":"unrecorded"}'::jsonb NOT NULL CHECK (private.valid_tax_context(tax_context)),
+    shipping_line jsonb CHECK (jsonb_typeof(shipping_line) = 'object'),
     shipping_address jsonb NOT NULL,
     shipping_method_id uuid,
     shipping_method_name text,
@@ -290,7 +313,7 @@ CREATE TABLE commerce.refund_requests (
     CONSTRAINT refund_requests_provider_reference_check CHECK (((provider_reference IS NULL) OR ((length(provider_reference) >= 1) AND (length(provider_reference) <= 255)))),
     CONSTRAINT refund_requests_reason_check CHECK (((reason IS NULL) OR (char_length(reason) <= 1000))),
     CONSTRAINT refund_requests_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT refund_requests_source_check CHECK ((source = ANY (ARRAY['items'::text, 'custom_amount'::text, 'remaining'::text]))),
+    CONSTRAINT refund_requests_source_check CHECK ((source = ANY (ARRAY['items'::text, 'shipping'::text, 'custom_amount'::text, 'remaining'::text]))),
     CONSTRAINT refund_requests_status_check CHECK ((status = ANY (ARRAY['requested'::text, 'submitted'::text, 'processing'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
 
@@ -346,6 +369,8 @@ CREATE TABLE public.addresses (
 
 CREATE TABLE commerce.checkout_quote_lines (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    tax_lines jsonb DEFAULT '[]'::jsonb NOT NULL CHECK (jsonb_typeof(tax_lines) = 'array'),
+    discount_allocations jsonb DEFAULT '[]'::jsonb NOT NULL CHECK (jsonb_typeof(discount_allocations) = 'array'),
     quote_id uuid NOT NULL,
     variant_id uuid NOT NULL,
     attributes jsonb DEFAULT '{}'::jsonb NOT NULL CHECK (private.valid_line_attributes(attributes)),
@@ -520,7 +545,7 @@ CREATE TABLE commerce.refunds (
     CONSTRAINT refunds_amount_check CHECK ((amount > (0)::numeric)),
     CONSTRAINT refunds_currency_check CHECK (currency = 'USD'),
     CONSTRAINT refunds_metadata_check CHECK ((jsonb_typeof(metadata) = 'object'::text)),
-    CONSTRAINT refunds_source_check CHECK ((source = ANY (ARRAY['items'::text, 'custom_amount'::text, 'remaining'::text, 'legacy'::text]))),
+    CONSTRAINT refunds_source_check CHECK ((source = ANY (ARRAY['items'::text, 'shipping'::text, 'custom_amount'::text, 'remaining'::text, 'legacy'::text]))),
     CONSTRAINT refunds_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
 
@@ -660,6 +685,7 @@ CREATE TABLE public.order_items (
 );
 
 CREATE TABLE public.order_promotions (
+    snapshot jsonb DEFAULT '{}'::jsonb NOT NULL CHECK (jsonb_typeof(snapshot) = 'object'),
     order_id uuid NOT NULL,
     promotion_id uuid NOT NULL,
     name text NOT NULL,
@@ -816,6 +842,76 @@ CREATE TABLE public.tax_rates (
 CREATE TABLE public.variant_option_values (
     variant_id uuid NOT NULL,
     option_value_id uuid NOT NULL
+);
+
+-- Durable price facts; Quote keeps a hashed offer snapshot instead of a second ledger.
+CREATE TABLE commerce.order_shipping_lines (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    order_id uuid NOT NULL UNIQUE,
+    shipping_method_id uuid,
+    name text NOT NULL,
+    gross_amount numeric(12,2) NOT NULL CHECK (gross_amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND gross_amount >= 0),
+    discount_total numeric(12,2) NOT NULL DEFAULT 0 CHECK (discount_total NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND discount_total >= 0),
+    threshold_discount numeric(12,2) NOT NULL DEFAULT 0 CHECK (threshold_discount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND threshold_discount >= 0),
+    total numeric(12,2) GENERATED ALWAYS AS (gross_amount - discount_total) STORED CHECK (total NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
+    policy jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(policy) = 'object'),
+    UNIQUE (id, order_id),
+    CHECK (threshold_discount <= discount_total AND discount_total <= gross_amount)
+);
+CREATE TABLE commerce.order_tax_lines (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    order_id uuid NOT NULL,
+    order_item_id uuid,
+    shipping_line_id uuid,
+    tax_rate_id uuid NOT NULL,
+    name text NOT NULL,
+    country text NOT NULL CHECK (country = '*' OR country ~ '^[A-Z]{2}$'),
+    rate numeric(5,4) NOT NULL CHECK (rate NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND rate BETWEEN 0 AND 1),
+    taxable_amount numeric(12,2) NOT NULL CHECK (taxable_amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND taxable_amount >= 0),
+    amount numeric(12,2) NOT NULL CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND amount >= 0),
+    UNIQUE (id, order_id),
+    UNIQUE NULLS NOT DISTINCT (order_id, order_item_id, shipping_line_id, tax_rate_id),
+    CHECK (num_nonnulls(order_item_id, shipping_line_id) = 1),
+    CHECK (amount BETWEEN floor(taxable_amount * rate * 100) / 100 AND ceil(taxable_amount * rate * 100) / 100)
+);
+CREATE TABLE commerce.order_discount_allocations (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    order_id uuid NOT NULL,
+    order_item_id uuid,
+    shipping_line_id uuid,
+    promotion_id uuid,
+    label text NOT NULL CHECK (length(btrim(label)) > 0),
+    amount numeric(12,2) NOT NULL CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND amount > 0),
+    UNIQUE NULLS NOT DISTINCT (order_id, order_item_id, shipping_line_id, promotion_id),
+    CHECK (num_nonnulls(order_item_id, shipping_line_id) = 1)
+);
+-- Merchandise net refunds already live in refund[_request]_lines.amount.
+-- These additional components explain tax, shipping and explicitly unallocated money.
+CREATE TABLE commerce.refund_components (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    refund_id uuid NOT NULL,
+    order_id uuid NOT NULL,
+    kind text NOT NULL CHECK (kind IN ('tax', 'shipping', 'unallocated')),
+    tax_line_id uuid,
+    shipping_line_id uuid,
+    amount numeric(12,2) NOT NULL CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND amount > 0),
+    UNIQUE NULLS NOT DISTINCT (refund_id, kind, tax_line_id, shipping_line_id),
+    CHECK ((kind = 'tax' AND tax_line_id IS NOT NULL AND shipping_line_id IS NULL)
+        OR (kind = 'shipping' AND shipping_line_id IS NOT NULL AND tax_line_id IS NULL)
+        OR (kind = 'unallocated' AND tax_line_id IS NULL AND shipping_line_id IS NULL))
+);
+CREATE TABLE commerce.refund_request_components (
+    id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+    refund_request_id uuid NOT NULL,
+    order_id uuid NOT NULL,
+    kind text NOT NULL CHECK (kind IN ('tax', 'shipping', 'unallocated')),
+    tax_line_id uuid,
+    shipping_line_id uuid,
+    amount numeric(12,2) NOT NULL CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) AND amount > 0),
+    UNIQUE NULLS NOT DISTINCT (refund_request_id, kind, tax_line_id, shipping_line_id),
+    CHECK ((kind = 'tax' AND tax_line_id IS NOT NULL AND shipping_line_id IS NULL)
+        OR (kind = 'shipping' AND shipping_line_id IS NOT NULL AND tax_line_id IS NULL)
+        OR (kind = 'unallocated' AND tax_line_id IS NULL AND shipping_line_id IS NULL))
 );
 
 -- Identity sequences, keys and foreign keys
@@ -1351,6 +1447,33 @@ CREATE UNIQUE INDEX refund_requests_provider_reference_uk ON commerce.refund_req
 CREATE INDEX refunds_order_idx ON commerce.refunds USING btree (order_id, created_at DESC);
 CREATE INDEX addresses_customer_idx ON public.addresses USING btree (customer_id);
 CREATE UNIQUE INDEX addresses_one_default_per_customer_idx ON public.addresses USING btree (customer_id) WHERE is_default;
+ALTER TABLE commerce.order_shipping_lines
+  ADD FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (shipping_method_id) REFERENCES public.shipping_methods(id) ON DELETE RESTRICT;
+ALTER TABLE commerce.order_tax_lines
+  ADD FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (order_item_id, order_id) REFERENCES public.order_items(id, order_id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (shipping_line_id, order_id) REFERENCES commerce.order_shipping_lines(id, order_id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (tax_rate_id) REFERENCES public.tax_rates(id) ON DELETE RESTRICT;
+ALTER TABLE commerce.order_discount_allocations
+  ADD FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (order_item_id, order_id) REFERENCES public.order_items(id, order_id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (shipping_line_id, order_id) REFERENCES commerce.order_shipping_lines(id, order_id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (order_id, promotion_id) REFERENCES public.order_promotions(order_id, promotion_id) ON DELETE RESTRICT;
+ALTER TABLE commerce.refund_components
+  ADD FOREIGN KEY (refund_id, order_id) REFERENCES commerce.refunds(id, order_id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (tax_line_id, order_id) REFERENCES commerce.order_tax_lines(id, order_id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (shipping_line_id, order_id) REFERENCES commerce.order_shipping_lines(id, order_id) ON DELETE RESTRICT;
+ALTER TABLE commerce.refund_request_components
+  ADD FOREIGN KEY (refund_request_id, order_id) REFERENCES commerce.refund_requests(id, order_id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (tax_line_id, order_id) REFERENCES commerce.order_tax_lines(id, order_id) ON DELETE RESTRICT,
+  ADD FOREIGN KEY (shipping_line_id, order_id) REFERENCES commerce.order_shipping_lines(id, order_id) ON DELETE RESTRICT;
+CREATE INDEX order_tax_lines_item_idx ON commerce.order_tax_lines(order_item_id);
+CREATE INDEX refund_components_tax_idx ON commerce.refund_components(tax_line_id) WHERE tax_line_id IS NOT NULL;
+CREATE INDEX refund_components_shipping_idx ON commerce.refund_components(shipping_line_id) WHERE shipping_line_id IS NOT NULL;
+CREATE INDEX refund_request_components_tax_idx ON commerce.refund_request_components(tax_line_id) WHERE tax_line_id IS NOT NULL;
+CREATE INDEX refund_request_components_shipping_idx ON commerce.refund_request_components(shipping_line_id) WHERE shipping_line_id IS NOT NULL;
+
 CREATE INDEX categories_parent_idx ON public.categories USING btree (parent_id);
 CREATE INDEX discount_redemptions_lookup_idx ON public.discount_redemptions USING btree (promotion_id, customer_id);
 CREATE INDEX discount_redemptions_order_idx ON public.discount_redemptions USING btree (order_id);
@@ -1386,6 +1509,12 @@ CREATE UNIQUE INDEX promotion_targets_unique ON public.promotion_targets USING b
 CREATE INDEX promotion_targets_variant_idx ON public.promotion_targets USING btree (variant_id);
 CREATE UNIQUE INDEX tax_rates_one_active_country_idx ON public.tax_rates USING btree (country) WHERE is_active;
 CREATE INDEX variant_option_values_value_idx ON public.variant_option_values USING btree (option_value_id);
+
+ALTER TABLE commerce.order_shipping_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE commerce.order_tax_lines ENABLE ROW LEVEL SECURITY;
+ALTER TABLE commerce.order_discount_allocations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE commerce.refund_components ENABLE ROW LEVEL SECURITY;
+ALTER TABLE commerce.refund_request_components ENABLE ROW LEVEL SECURITY;
 
 -- All application tables require explicit RLS policies
 

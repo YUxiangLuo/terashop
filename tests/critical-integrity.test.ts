@@ -227,7 +227,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
       order_id: order.id,
       items: [{ order_item_id: lineId, quantity: 1 }],
     }, admin.token);
-    expect((second.data as { message: string }).message).toContain('exceeds captured amount');
+    expect((second.data as { message: string }).message).toContain('exceeds available refundable balance');
 
     const { data: payments } = await api(
       `/rest/v1/payments?order_id=eq.${order.id}&kind=eq.refund&status=eq.succeeded&select=amount`,

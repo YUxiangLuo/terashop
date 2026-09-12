@@ -65,6 +65,7 @@ begin
   if v_count = 0 or v_total <> v_quote.subtotal or v_discount <> v_quote.discount_total then
     raise exception 'checkout quote line totals do not match header %', v_quote_id;
   end if;
+  perform private.assert_pricing_breakdown(private.checkout_quote_json(v_quote));
   return coalesce(new, old);
 end;
 $$;
@@ -274,6 +275,225 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.calculate_checkout_tax(p_lines jsonb, p_shipping jsonb, p_country text) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_rule public.tax_rates;
+  v_common jsonb;
+  v_allocations jsonb;
+  v_total numeric := 0;
+  v_lines jsonb;
+  v_shipping jsonb := p_shipping;
+begin
+  select * into v_rule from public.tax_rates
+  where p_country is not null and is_active and country in (p_country, '*')
+  order by (country = '*'), id limit 1;
+  v_common := jsonb_build_object('tax_rate_id', v_rule.id, 'name', v_rule.name,
+    'country', v_rule.country, 'rate', v_rule.rate);
+  if v_rule.id is not null then
+    with bases as (
+      select 'item:' || (e ->> 'line_key') key,
+        'item:' || coalesce(e ->> 'variant_id', e ->> 'id', e ->> 'line_key') bucket,
+        (e ->> 'line_total')::numeric base from jsonb_array_elements(p_lines) e
+      union all select 'shipping', 'shipping', (p_shipping ->> 'total')::numeric
+      where p_shipping is not null and v_rule.include_shipping
+    ), grouped as (
+      select bucket, sum(base) base from bases group by bucket
+    ), group_shares as (
+      select bucket, floor(base * v_rule.rate * 100) floor_share,
+        mod(base * v_rule.rate * 100, 1) remainder,
+        round(sum(base) over () * v_rule.rate * 100) target from grouped
+    ), group_amounts as (
+      select bucket, floor_share + case when row_number() over (order by remainder desc, bucket collate "C")
+        <= target - sum(floor_share) over () then 1 else 0 end target from group_shares
+    ), shares as (
+      select b.key, b.bucket, g.target, floor(b.base * v_rule.rate * 100) floor_share,
+        mod(b.base * v_rule.rate * 100, 1) remainder from bases b join group_amounts g using (bucket)
+    ), allocated as (
+      select key, (floor_share + case when row_number() over (partition by bucket order by remainder desc, key collate "C")
+        <= target - sum(floor_share) over (partition by bucket) then 1 else 0 end) / 100 amount from shares
+    ) select coalesce(jsonb_object_agg(key, amount), '{}'), coalesce(sum(amount), 0)
+      into v_allocations, v_total from allocated;
+  end if;
+  select jsonb_agg(e || jsonb_build_object('tax_lines', case when v_rule.id is null then '[]'::jsonb
+    else jsonb_build_array(v_common || jsonb_build_object('taxable_amount', (e ->> 'line_total')::numeric,
+      'amount', (v_allocations ->> ('item:' || (e ->> 'line_key')))::numeric)) end) order by ord)
+  into v_lines from jsonb_array_elements(p_lines) with ordinality x(e, ord);
+  if p_shipping is not null then
+    v_shipping := p_shipping || jsonb_build_object('tax_lines',
+      case when v_rule.id is null or not v_rule.include_shipping then '[]'::jsonb
+      else jsonb_build_array(v_common || jsonb_build_object('taxable_amount', (p_shipping ->> 'total')::numeric,
+        'amount', (v_allocations ->> 'shipping')::numeric)) end);
+  end if;
+  return jsonb_build_object('lines', v_lines, 'shipping_line', v_shipping, 'tax_total', v_total,
+    'tax_context', jsonb_build_object('method', 'country_rate_variant_line_v1', 'status', case when p_country is null then 'not_calculated'
+      when v_rule.id is null then 'no_rule' else 'calculated' end, 'destination_country', p_country,
+      'rule', case when v_rule.id is not null then v_common || jsonb_build_object('include_shipping', v_rule.include_shipping) end));
+end;
+$$;
+
+CREATE FUNCTION private.assert_pricing_breakdown(p_price jsonb) RETURNS void
+    LANGUAGE plpgsql STABLE SET search_path TO '' AS $$
+declare
+  v_target jsonb;
+  v_alloc jsonb;
+  v_tax jsonb;
+  v_promo jsonb;
+  v_sum numeric;
+  v_tax_sum numeric := 0;
+  v_allocations jsonb := '[]'::jsonb;
+  v_shipping jsonb := nullif(p_price -> 'shipping_line', 'null'::jsonb);
+  v_context jsonb := p_price -> 'tax_context';
+  v_rule jsonb := v_context -> 'rule';
+  v_is_shipping boolean;
+  v_expected_count integer;
+begin
+  if private.valid_tax_context(v_context) is distinct from true then raise exception 'invalid tax calculation context'; end if;
+  if (v_shipping ->> 'shipping_method_id', v_shipping ->> 'name') is distinct from
+     (p_price ->> 'shipping_method_id', p_price ->> 'shipping_method_name') then
+    raise exception 'shipping identity does not match header';
+  end if;
+  if coalesce((v_shipping ->> 'total')::numeric, 0) <> (p_price ->> 'shipping_total')::numeric then
+    raise exception 'shipping details do not match header';
+  end if;
+  if v_shipping is not null and (
+    not (v_shipping ?& array['shipping_method_id','name','gross_amount','discount_total','threshold_discount','total','policy','tax_lines','discount_allocations'])
+    or jsonb_typeof(v_shipping -> 'policy') is distinct from 'object'
+    or jsonb_typeof(v_shipping -> 'gross_amount') is distinct from 'number'
+    or jsonb_typeof(v_shipping -> 'discount_total') is distinct from 'number'
+    or jsonb_typeof(v_shipping -> 'threshold_discount') is distinct from 'number'
+    or jsonb_typeof(v_shipping -> 'total') is distinct from 'number'
+    or (v_shipping ->> 'gross_amount')::numeric - (v_shipping ->> 'discount_total')::numeric <> (v_shipping ->> 'total')::numeric
+    or (v_shipping ->> 'threshold_discount')::numeric not between 0 and (v_shipping ->> 'discount_total')::numeric
+    or (v_shipping ->> 'total')::numeric < 0
+  ) then raise exception 'invalid shipping breakdown'; end if;
+  for v_target, v_is_shipping in
+    select e, false from jsonb_array_elements(p_price -> 'lines') e
+    union all select v_shipping, true where v_shipping is not null
+  loop
+    if jsonb_typeof(v_target -> 'tax_lines') is distinct from 'array'
+      or jsonb_typeof(v_target -> 'discount_allocations') is distinct from 'array' then
+      raise exception 'pricing target requires tax and discount arrays';
+    end if;
+    select coalesce(sum((e ->> 'amount')::numeric), 0) into v_sum
+      from jsonb_array_elements(v_target -> 'discount_allocations') e;
+    if v_sum + (case when v_is_shipping then (v_target ->> 'threshold_discount')::numeric else 0 end)
+       is distinct from (v_target ->> 'discount_total')::numeric then
+      raise exception 'discount allocations do not match target';
+    end if;
+    for v_alloc in select value from jsonb_array_elements(v_target -> 'discount_allocations') loop
+      if jsonb_typeof(v_alloc -> 'amount') is distinct from 'number' or (v_alloc ->> 'amount')::numeric <= 0 then
+        raise exception 'discount allocation must be positive money';
+      end if;
+      if v_alloc ->> 'promotion_id' is not null and not exists (
+        select 1 from jsonb_array_elements(p_price -> 'promotions') p where p ->> 'promotion_id' = v_alloc ->> 'promotion_id'
+      ) then raise exception 'discount allocation has no application'; end if;
+    end loop;
+    v_allocations := v_allocations || (v_target -> 'discount_allocations');
+    v_expected_count := case when v_context ->> 'status' = 'calculated'
+      and (not v_is_shipping or (v_rule ->> 'include_shipping')::boolean) then 1 else 0 end;
+    if jsonb_array_length(v_target -> 'tax_lines') is distinct from v_expected_count then
+      raise exception 'tax calculation is missing target details';
+    end if;
+    for v_tax in select value from jsonb_array_elements(v_target -> 'tax_lines') loop
+      if (v_tax -> 'tax_rate_id', v_tax -> 'name', v_tax -> 'country', v_tax -> 'rate') is distinct from
+         (v_rule -> 'tax_rate_id', v_rule -> 'name', v_rule -> 'country', v_rule -> 'rate')
+         or (v_tax ->> 'taxable_amount')::numeric is distinct from
+            (v_target ->> case when v_is_shipping then 'total' else 'line_total' end)::numeric
+         or jsonb_typeof(v_tax -> 'rate') is distinct from 'number'
+         or jsonb_typeof(v_tax -> 'amount') is distinct from 'number'
+         or (v_tax ->> 'rate')::numeric not between 0 and 1
+         or (v_tax ->> 'amount')::numeric not between
+            floor((v_tax ->> 'taxable_amount')::numeric * (v_tax ->> 'rate')::numeric * 100) / 100
+            and ceil((v_tax ->> 'taxable_amount')::numeric * (v_tax ->> 'rate')::numeric * 100) / 100 then
+        raise exception 'tax detail does not match calculation basis';
+      end if;
+      v_tax_sum := v_tax_sum + (v_tax ->> 'amount')::numeric;
+    end loop;
+  end loop;
+  for v_promo in select value from jsonb_array_elements(p_price -> 'promotions') loop
+    select coalesce(sum((e ->> 'amount')::numeric), 0) into v_sum from jsonb_array_elements(v_allocations) e
+    where e ->> 'promotion_id' = v_promo ->> 'promotion_id';
+    if v_sum is distinct from (v_promo ->> 'amount')::numeric then
+      raise exception 'discount application does not match allocations';
+    end if;
+  end loop;
+  if v_tax_sum is distinct from (p_price ->> 'tax_total')::numeric then raise exception 'tax details do not match header'; end if;
+  if v_context ->> 'status' = 'calculated' and v_tax_sum <> round((
+      (p_price ->> 'subtotal')::numeric - (p_price ->> 'discount_total')::numeric
+      + case when (v_rule ->> 'include_shipping')::boolean then (p_price ->> 'shipping_total')::numeric else 0 end
+    ) * (v_rule ->> 'rate')::numeric, 2) then raise exception 'tax header does not match rule'; end if;
+end;
+$$;
+
+CREATE FUNCTION private.order_pricing_json(p_order_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select jsonb_build_object('order_id', o.id, 'currency', o.currency, 'subtotal', o.subtotal,
+    'discount_total', o.discount_total, 'shipping_total', o.shipping_total, 'tax_total', o.tax_total,
+    'total', o.total, 'tax_context', o.tax_context, 'shipping_method_id', o.shipping_method_id, 'shipping_method_name', o.shipping_method_name,
+    'lines', (select coalesce(jsonb_agg(jsonb_build_object('id', i.id, 'line_key', i.line_key,
+      'variant_id', i.variant_id, 'product_id', i.product_id, 'name', i.name, 'sku', i.sku,
+      'variant_title', i.variant_title, 'options', i.options, 'attributes', i.attributes,
+      'unit_price', i.unit_price, 'quantity', i.quantity, 'total', i.total,
+      'discount_total', i.discount_total, 'line_total', i.line_total,
+      'discount_allocations', (select coalesce(jsonb_agg(jsonb_build_object('promotion_id', a.promotion_id,
+        'label', a.label, 'amount', a.amount) order by a.promotion_id), '[]') from commerce.order_discount_allocations a where a.order_item_id = i.id),
+      'tax_lines', (select coalesce(jsonb_agg(to_jsonb(t) - array['order_id','order_item_id','shipping_line_id'] order by t.tax_rate_id), '[]')
+        from commerce.order_tax_lines t where t.order_item_id = i.id)
+      ) order by i.variant_id, i.line_key), '[]') from public.order_items i where i.order_id = o.id),
+    'shipping_line', (select to_jsonb(s) - 'order_id' || jsonb_build_object(
+      'discount_allocations', (select coalesce(jsonb_agg(jsonb_build_object('promotion_id', a.promotion_id, 'label', a.label, 'amount', a.amount) order by a.promotion_id), '[]')
+        from commerce.order_discount_allocations a where a.shipping_line_id = s.id),
+      'tax_lines', (select coalesce(jsonb_agg(to_jsonb(t) - array['order_id','order_item_id','shipping_line_id'] order by t.tax_rate_id), '[]')
+        from commerce.order_tax_lines t where t.shipping_line_id = s.id)) from commerce.order_shipping_lines s where s.order_id = o.id),
+    'promotions', (select coalesce(jsonb_agg(jsonb_build_object('promotion_id', p.promotion_id, 'name', p.name,
+      'code', p.code, 'amount', p.amount, 'snapshot', p.snapshot) order by (p.snapshot ->> 'application_index')::integer, p.promotion_id), '[]') from public.order_promotions p where p.order_id = o.id)
+  ) from public.orders o where o.id = p_order_id;
+$$;
+
+CREATE FUNCTION private.store_order_tax_lines(p_order_id uuid, p_order_item_id uuid, p_shipping_line_id uuid, p_taxes jsonb) RETURNS void
+    LANGUAGE sql SECURITY DEFINER SET search_path TO '' AS $$
+  insert into commerce.order_tax_lines(order_id, order_item_id, shipping_line_id, tax_rate_id, name, country, rate, taxable_amount, amount)
+  select p_order_id, p_order_item_id, p_shipping_line_id, (e ->> 'tax_rate_id')::uuid, e ->> 'name', e ->> 'country',
+    (e ->> 'rate')::numeric, (e ->> 'taxable_amount')::numeric, (e ->> 'amount')::numeric from jsonb_array_elements(p_taxes) e;
+$$;
+
+CREATE FUNCTION private.store_order_pricing(p_order_id uuid, p_price jsonb) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_line jsonb; v_item_id uuid; v_shipping_id uuid; v_shipping jsonb := nullif(p_price -> 'shipping_line', 'null'::jsonb);
+begin
+  perform private.assert_pricing_breakdown(p_price);
+  if v_shipping is not null then
+    insert into commerce.order_shipping_lines(order_id, shipping_method_id, name, gross_amount, discount_total, threshold_discount, policy)
+    values (p_order_id, (v_shipping ->> 'shipping_method_id')::uuid, v_shipping ->> 'name',
+      (v_shipping ->> 'gross_amount')::numeric, (v_shipping ->> 'discount_total')::numeric,
+      (v_shipping ->> 'threshold_discount')::numeric, v_shipping -> 'policy') returning id into v_shipping_id;
+    insert into commerce.order_discount_allocations(order_id, shipping_line_id, promotion_id, label, amount)
+    select p_order_id, v_shipping_id, (e ->> 'promotion_id')::uuid, e ->> 'label', (e ->> 'amount')::numeric
+      from jsonb_array_elements(v_shipping -> 'discount_allocations') e;
+    perform private.store_order_tax_lines(p_order_id, null, v_shipping_id, v_shipping -> 'tax_lines');
+  end if;
+  for v_line in select value from jsonb_array_elements(p_price -> 'lines') loop
+    select id into strict v_item_id from public.order_items where order_id = p_order_id and line_key = v_line ->> 'line_key';
+    insert into commerce.order_discount_allocations(order_id, order_item_id, promotion_id, label, amount)
+    select p_order_id, v_item_id, (e ->> 'promotion_id')::uuid, e ->> 'label', (e ->> 'amount')::numeric
+      from jsonb_array_elements(v_line -> 'discount_allocations') e;
+    perform private.store_order_tax_lines(p_order_id, v_item_id, null, v_line -> 'tax_lines');
+  end loop;
+end;
+$$;
+
+CREATE FUNCTION public.get_order_pricing(order_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not exists (select 1 from public.orders o where o.id = get_order_pricing.order_id
+    and (o.customer_id = auth.uid() or public.is_admin() or auth.role() = 'service_role')) then
+    raise exception 'order not found';
+  end if;
+  return private.order_pricing_json(order_id);
+end;
+$$;
+
 CREATE FUNCTION private.checkout_pricing_hash(p_price jsonb) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT
     SET search_path TO ''
@@ -287,6 +507,7 @@ CREATE FUNCTION private.checkout_pricing_hash(p_price jsonb) RETURNS text
     'total', p_price -> 'total',
     'shipping_method_id', p_price -> 'shipping_method_id',
     'shipping_method_name', p_price -> 'shipping_method_name',
+    'shipping_line', p_price -> 'shipping_line', 'tax_context', p_price -> 'tax_context',
     'lines', (
       select coalesce(jsonb_agg(e.value order by e.value ->> 'variant_id', e.value ->> 'line_key'), '[]'::jsonb)
       from jsonb_array_elements(p_price -> 'lines') e
@@ -315,6 +536,7 @@ CREATE FUNCTION private.checkout_quote_json(p_quote commerce.checkout_quotes) RE
     'discount_total', p_quote.discount_total,
     'shipping_total', p_quote.shipping_total,
     'tax_total', p_quote.tax_total,
+    'tax_context', p_quote.tax_context, 'shipping_line', p_quote.shipping_line,
     'total', p_quote.total,
     'shipping_address', p_quote.shipping_address,
     'shipping_method_id', p_quote.shipping_method_id,
@@ -331,6 +553,7 @@ CREATE FUNCTION private.checkout_quote_json(p_quote commerce.checkout_quotes) RE
         'id', ql.id,
         'line_key', ql.line_key,
         'attributes', ql.attributes,
+        'tax_lines', ql.tax_lines, 'discount_allocations', ql.discount_allocations,
         'variant_id', ql.variant_id,
         'product_id', ql.product_id,
         'sku', ql.sku,
@@ -557,13 +780,14 @@ begin
 
   -- ----- 第 3 阶段：落账 -----
   insert into public.orders (
-    customer_id, email,
+    customer_id, email, tax_context,
     subtotal, discount_total, shipping_total, tax_total, total,
     shipping_address, shipping_method_id, shipping_method_name,
     discount_code, customer_note
   ) values (
     v_uid,
     (select email from public.profiles where id = v_uid),
+    v_price -> 'tax_context',
     (v_price ->> 'subtotal')::numeric,
     (v_price ->> 'discount_total')::numeric,
     (v_price ->> 'shipping_total')::numeric,
@@ -612,9 +836,9 @@ begin
 
   -- 促销落账 + 用量 + 输码核销
   for v_promo in select * from jsonb_array_elements(v_price -> 'promotions') loop
-    insert into public.order_promotions (order_id, promotion_id, name, code, amount)
+    insert into public.order_promotions (order_id, promotion_id, name, code, amount, snapshot)
     values (v_order.id, (v_promo ->> 'promotion_id')::uuid,
-            v_promo ->> 'name', v_promo ->> 'code', (v_promo ->> 'amount')::numeric);
+            v_promo ->> 'name', v_promo ->> 'code', (v_promo ->> 'amount')::numeric, v_promo -> 'snapshot');
 
     update public.promotions set used_count = used_count + 1
     where id = (v_promo ->> 'promotion_id')::uuid;
@@ -625,6 +849,7 @@ begin
     end if;
   end loop;
 
+  perform private.store_order_pricing(v_order.id, v_price);
   insert into public.order_events (order_id, actor_id, type, data)
   values (v_order.id, v_uid, 'order_created',
           jsonb_build_object('total', v_order.total, 'promotions', v_price -> 'promotions'));
@@ -662,8 +887,13 @@ declare
   v_discount_total numeric(12, 2) := 0;
   v_shipping_total numeric(12, 2) := 0;
   v_tax_total numeric(12, 2) := 0;
-  v_tax_rate numeric(5, 4);
-  v_tax_inc_ship boolean;
+  v_tax jsonb;
+  v_shipping_json jsonb;
+  v_shipping_discounts jsonb := '[]'::jsonb;
+  v_snapshot jsonb;
+  v_fs_snapshot jsonb;
+  v_deferred_snapshot jsonb;
+  v_threshold_discount numeric := 0;
   v_shipping public.shipping_methods;
   v_promo record;
   v_code_found boolean := false;
@@ -719,6 +949,8 @@ begin
     category_ids uuid[],
     track_inventory boolean,
     discount_total numeric(12, 2) not null default 0,
+    discount_before numeric(12, 2) not null default 0,
+    discount_allocations jsonb not null default '[]',
     check (discount_total between 0 and unit_price * quantity)
   ) on commit drop;
   if exists (select 1 from pg_catalog.pg_class
@@ -727,7 +959,7 @@ begin
     drop table _price_promos;
   end if;
   create temporary table _price_promos (
-    promotion_id uuid, name text, code text, amount numeric(12, 2), stackable boolean
+    idx serial primary key, promotion_id uuid, name text, code text, amount numeric(12, 2), stackable boolean, snapshot jsonb
   ) on commit drop;
 
   -- Canonical commercial lines: identical attributes merge; distinct ones survive.
@@ -803,19 +1035,26 @@ begin
         end if;
       end if;
     end if;
+    v_snapshot := jsonb_build_object('type', v_promo.type, 'params', v_promo.params,
+      'priority', v_promo.priority, 'stackable', v_promo.stackable,
+      'starts_at_epoch', extract(epoch from v_promo.starts_at), 'ends_at_epoch', extract(epoch from v_promo.ends_at),
+      'targets', (select coalesce(jsonb_agg(jsonb_build_object('role', t.role, 'product_id', t.product_id,
+        'variant_id', t.variant_id, 'category_id', t.category_id) order by t.id), '[]')
+        from public.promotion_targets t where t.promotion_id = v_promo.id));
+    update _price_lines set discount_before = discount_total where idx > 0;
     v_amount := 0;
     case v_promo.type
     when 'item_percentage' then
       v_pct := (v_promo.params ->> 'percent')::numeric;
       v_min_qty := coalesce((v_promo.params ->> 'min_quantity')::int, 0);
       select coalesce(sum(l.quantity), 0) into v_scope_qty from _price_lines l
-      where public._line_in_scope(v_promo.id, 'apply', l.variant_id, l.product_id, l.category_ids);
+      where private.line_in_scope(v_snapshot -> 'targets', 'apply', l.variant_id, l.product_id, l.category_ids);
       if v_scope_qty > 0 and v_scope_qty >= v_min_qty then
         for v_line in
           select l.variant_id, sum(l.unit_price * l.quantity) gross,
                  sum(l.unit_price * l.quantity - l.discount_total) room
           from _price_lines l
-          where public._line_in_scope(v_promo.id, 'apply', l.variant_id, l.product_id, l.category_ids)
+          where private.line_in_scope(v_snapshot -> 'targets', 'apply', l.variant_id, l.product_id, l.category_ids)
           group by l.variant_id order by l.variant_id
         loop
           -- Customer-controlled text must not multiply percentage-rounding benefits.
@@ -829,15 +1068,15 @@ begin
       v_get := (v_promo.params ->> 'get')::int;
       v_get_pct := coalesce((v_promo.params ->> 'get_percent')::numeric, 100);
       select coalesce(sum(l.quantity), 0) into v_scope_qty from _price_lines l
-      where public._line_in_scope(v_promo.id, 'apply', l.variant_id, l.product_id, l.category_ids);
+      where private.line_in_scope(v_snapshot -> 'targets', 'apply', l.variant_id, l.product_id, l.category_ids);
       v_get_role := case when exists (
-        select 1 from public.promotion_targets t where t.promotion_id = v_promo.id and t.role = 'get'
+        select 1 from jsonb_array_elements(v_snapshot -> 'targets') t where t ->> 'role' = 'get'
       ) then 'get' else 'apply' end;
       if v_get_role = 'get' then
         v_free := least(
           (floor(v_scope_qty / v_buy))::int * v_get,
           (select coalesce(sum(l.quantity), 0) from _price_lines l
-           where public._line_in_scope(v_promo.id, 'get', l.variant_id, l.product_id, l.category_ids))
+           where private.line_in_scope(v_snapshot -> 'targets', 'get', l.variant_id, l.product_id, l.category_ids))
         );
       else
         v_free := (floor(v_scope_qty / (v_buy + v_get)))::int * v_get;
@@ -845,7 +1084,7 @@ begin
       for v_line in
         select l.variant_id, l.unit_price, sum(l.quantity)::integer quantity, sum(l.discount_total) discount_total
         from _price_lines l
-        where public._line_in_scope(v_promo.id, v_get_role, l.variant_id, l.product_id, l.category_ids)
+        where private.line_in_scope(v_snapshot -> 'targets', v_get_role, l.variant_id, l.product_id, l.category_ids)
         group by l.variant_id, l.unit_price
         order by l.unit_price, l.variant_id
       loop
@@ -881,12 +1120,12 @@ begin
         if v_shipping.free_above is null or v_base < v_shipping.free_above then
           -- Prefer the earlier stackable candidate if it became useful after
           -- an intervening goods discount crossed the free-shipping threshold.
-          if v_deferred_fs.id is not null then v_fs := v_deferred_fs;
-          else v_fs := v_promo; end if;
+          if v_deferred_fs.id is not null then v_fs := v_deferred_fs; v_fs_snapshot := v_deferred_snapshot;
+          else v_fs := v_promo; v_fs_snapshot := v_snapshot; end if;
           v_applied := v_applied + 1;
           if not v_fs.stackable then v_has_exclusive := true; end if;
         elsif v_promo.stackable and v_deferred_fs.id is null then
-          v_deferred_fs := v_promo;
+          v_deferred_fs := v_promo; v_deferred_snapshot := v_snapshot;
         end if;
         -- Zero-benefit exclusive shipping never acquires the exclusivity flag.
       end if;
@@ -896,7 +1135,10 @@ begin
       if v_promo.type in ('order_percentage', 'order_fixed') then
         perform private.allocate_price_discount(v_amount);
       end if;
-      insert into _price_promos values (v_promo.id, v_promo.name, v_promo.code, v_amount, v_promo.stackable);
+      update _price_lines set discount_allocations = discount_allocations || jsonb_build_array(
+        jsonb_build_object('promotion_id', v_promo.id, 'label', v_promo.name, 'amount', discount_total - discount_before))
+      where discount_total > discount_before;
+      insert into _price_promos (promotion_id, name, code, amount, stackable, snapshot) values (v_promo.id, v_promo.name, v_promo.code, v_amount, v_promo.stackable, v_snapshot);
       v_applied := v_applied + 1;
       if not v_promo.stackable then v_has_exclusive := true; end if;
     end if;
@@ -908,33 +1150,40 @@ begin
 
   v_shipping_total := coalesce(v_shipping.price, 0);
   if v_shipping.free_above is not null and v_subtotal - v_discount_total >= v_shipping.free_above then
+    v_threshold_discount := v_shipping_total;
     v_shipping_total := 0;
   end if;
   if v_fs.id is null and v_shipping_total > 0 and not v_has_exclusive and v_deferred_fs.id is not null then
-    v_fs := v_deferred_fs;
+    v_fs := v_deferred_fs; v_fs_snapshot := v_deferred_snapshot;
   end if;
   if v_fs.id is not null and v_shipping_total > 0 then
-    insert into _price_promos values (v_fs.id, v_fs.name, v_fs.code, v_shipping_total, v_fs.stackable);
+    v_shipping_discounts := jsonb_build_array(jsonb_build_object('promotion_id', v_fs.id, 'label', v_fs.name, 'amount', v_shipping_total));
+    insert into _price_promos (promotion_id, name, code, amount, stackable, snapshot) values (v_fs.id, v_fs.name, v_fs.code, v_shipping_total, v_fs.stackable, v_fs_snapshot);
     v_shipping_total := 0;
   end if;
 
-  select t.rate, t.include_shipping into v_tax_rate, v_tax_inc_ship from public.tax_rates t
-  where v_country is not null and t.is_active and (t.country = v_country or t.country = '*')
-  order by (t.country = '*') asc limit 1;
-  v_tax_total := round(
-    (v_subtotal - v_discount_total + case when coalesce(v_tax_inc_ship, false) then v_shipping_total else 0 end)
-    * coalesce(v_tax_rate, 0), 2);
   select jsonb_agg(jsonb_build_object(
            'line_key', line_key, 'attributes', attributes,
            'variant_id', variant_id, 'product_id', product_id, 'sku', sku, 'name', name,
            'variant_title', variant_title, 'options', options, 'quantity', quantity,
-           'unit_price', unit_price, 'discount_total', discount_total, 'track_inventory', track_inventory,
+           'unit_price', unit_price, 'total', unit_price * quantity,
+           'discount_total', discount_total, 'discount_allocations', discount_allocations, 'track_inventory', track_inventory,
            'line_total', unit_price * quantity - discount_total
          ) order by idx) into v_lines_json from _price_lines;
   select coalesce(jsonb_agg(jsonb_build_object(
-           'promotion_id', promotion_id, 'name', name, 'code', code, 'amount', amount
-         )), '[]'::jsonb) into v_promos_json from _price_promos;
+           'promotion_id', promotion_id, 'name', name, 'code', code, 'amount', amount, 'snapshot', snapshot || jsonb_build_object('application_index', idx)
+         ) order by idx), '[]'::jsonb) into v_promos_json from _price_promos;
+  if v_shipping.id is not null then
+    v_shipping_json := jsonb_build_object('shipping_method_id', v_shipping.id, 'name', v_shipping.name,
+      'gross_amount', v_shipping.price, 'discount_total', v_shipping.price - v_shipping_total,
+      'threshold_discount', v_threshold_discount, 'total', v_shipping_total,
+      'discount_allocations', v_shipping_discounts,
+      'policy', jsonb_build_object('countries', v_shipping.countries, 'free_above', v_shipping.free_above));
+  end if;
+  v_tax := private.calculate_checkout_tax(v_lines_json, v_shipping_json, v_country);
+  v_lines_json := v_tax -> 'lines'; v_tax_total := (v_tax ->> 'tax_total')::numeric;
   return jsonb_build_object(
+    'tax_context', v_tax -> 'tax_context', 'shipping_line', v_tax -> 'shipping_line',
     'lines', v_lines_json, 'subtotal', v_subtotal, 'discount_total', v_discount_total,
     'promotions', v_promos_json, 'shipping_method_id', v_shipping.id, 'shipping_method_name', v_shipping.name,
     'shipping_total', v_shipping_total, 'tax_total', v_tax_total,
@@ -973,13 +1222,13 @@ begin
          new.discount_total, new.shipping_total, new.tax_total, new.total,
          new.shipping_address, new.billing_address, new.shipping_method_id,
          new.shipping_method_name, new.discount_code, new.customer_note,
-         new.created_at)
+         new.created_at, new.tax_context)
         is distinct from
         (old.customer_id, old.email, old.currency, old.subtotal,
          old.discount_total, old.shipping_total, old.tax_total, old.total,
          old.shipping_address, old.billing_address, old.shipping_method_id,
          old.shipping_method_name, old.discount_code, old.customer_note,
-         old.created_at) then
+         old.created_at, old.tax_context) then
     raise exception 'quoted order snapshot is immutable; create a new checkout quote';
   end if;
   return new;
@@ -1076,7 +1325,7 @@ CREATE FUNCTION private.storefront_order_json(p_order public.orders) RETURNS jso
     'subtotal', p_order.subtotal,
     'discount_total', p_order.discount_total,
     'shipping_total', p_order.shipping_total,
-    'tax_total', p_order.tax_total,
+    'tax_total', p_order.tax_total, 'tax_context', p_order.tax_context,
     'total', p_order.total,
     'shipping_address', p_order.shipping_address,
     'billing_address', p_order.billing_address,
@@ -1115,8 +1364,10 @@ CREATE FUNCTION private.update_order_address(order_id uuid, address jsonb DEFAUL
 declare
   v_order public.orders;
   v_address jsonb;
-  v_tax_rate numeric(5, 4);
-  v_tax_inc_ship boolean;
+  v_price jsonb;
+  v_tax jsonb;
+  v_line jsonb;
+  v_shipping_id uuid;
   v_tax_total numeric(12, 2);
 begin
   select * into v_order from public.orders where id = update_order_address.order_id for update;
@@ -1146,19 +1397,20 @@ begin
     raise exception 'shipping method not available for this country';
   end if;
 
-  -- 重新计税（按新收货国家匹配，'*' 兜底；遵循 include_shipping 开关）并同步 total
-  select t.rate, t.include_shipping into v_tax_rate, v_tax_inc_ship
-  from public.tax_rates t
-  where t.is_active and (t.country = v_address ->> 'country' or t.country = '*')
-  order by (t.country = '*') asc
-  limit 1;
-  v_tax_total := round(
-    (v_order.subtotal - v_order.discount_total
-     + case when coalesce(v_tax_inc_ship, false) then v_order.shipping_total else 0 end)
-    * coalesce(v_tax_rate, 0), 2);
-
+  -- Only destination tax changes; merchandise, discounts and shipping charges retain their snapshots.
+  v_price := private.order_pricing_json(v_order.id);
+  v_tax := private.calculate_checkout_tax(v_price -> 'lines', nullif(v_price -> 'shipping_line', 'null'::jsonb), v_address ->> 'country');
+  v_tax_total := (v_tax ->> 'tax_total')::numeric;
+  delete from commerce.order_tax_lines t where t.order_id = v_order.id;
+  for v_line in select value from jsonb_array_elements(v_tax -> 'lines') loop
+    perform private.store_order_tax_lines(v_order.id, (v_line ->> 'id')::uuid, null, v_line -> 'tax_lines');
+  end loop;
+  select s.id into v_shipping_id from commerce.order_shipping_lines s where s.order_id = v_order.id;
+  if v_shipping_id is not null then
+    perform private.store_order_tax_lines(v_order.id, null, v_shipping_id, v_tax -> 'shipping_line' -> 'tax_lines');
+  end if;
   update public.orders
-  set shipping_address = v_address,
+  set shipping_address = v_address, tax_context = v_tax -> 'tax_context',
       tax_total = v_tax_total,
       total = v_order.subtotal - v_order.discount_total + v_order.shipping_total + v_tax_total
   where id = v_order.id
@@ -1185,13 +1437,13 @@ begin
       new.currency, new.subtotal, new.discount_total, new.shipping_total,
       new.tax_total, new.total, new.shipping_address, new.shipping_method_id,
       new.shipping_method_name, new.requested_discount_code, new.customer_note,
-      new.promotions, new.expires_at, new.created_at)
+      new.promotions, new.expires_at, new.created_at, new.tax_context, new.shipping_line)
      is distinct from
      (old.customer_id, old.idempotency_key, old.request_hash, old.pricing_hash,
       old.currency, old.subtotal, old.discount_total, old.shipping_total,
       old.tax_total, old.total, old.shipping_address, old.shipping_method_id,
       old.shipping_method_name, old.requested_discount_code, old.customer_note,
-      old.promotions, old.expires_at, old.created_at) then
+      old.promotions, old.expires_at, old.created_at, old.tax_context, old.shipping_line) then
     raise exception 'checkout quote commercial fields are immutable';
   end if;
   if old.order_id is not null and new.order_id is distinct from old.order_id then
@@ -1271,23 +1523,12 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public._line_in_scope(p_promotion_id uuid, p_role text, p_variant_id uuid, p_product_id uuid, p_category_ids uuid[]) RETURNS boolean
-    LANGUAGE sql STABLE
-    SET search_path TO ''
-    AS $$
-  select case
-    when not exists (
-      select 1 from public.promotion_targets t
-      where t.promotion_id = p_promotion_id and t.role = p_role
-    ) then true   -- 无范围限制 = 全场
-    else exists (
-      select 1 from public.promotion_targets t
-      where t.promotion_id = p_promotion_id and t.role = p_role
-        and (t.variant_id = p_variant_id
-             or t.product_id = p_product_id
-             or t.category_id = any (p_category_ids))
-    )
-  end;
+CREATE FUNCTION private.line_in_scope(p_targets jsonb, p_role text, p_variant_id uuid, p_product_id uuid, p_category_ids uuid[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE SET search_path TO '' AS $$
+  select not exists (select 1 from jsonb_array_elements(p_targets) t where t ->> 'role' = p_role)
+    or exists (select 1 from jsonb_array_elements(p_targets) t where t ->> 'role' = p_role and (
+      (t ->> 'variant_id')::uuid = p_variant_id or (t ->> 'product_id')::uuid = p_product_id
+      or (t ->> 'category_id')::uuid = any(p_category_ids)));
 $$;
 
 CREATE FUNCTION public.cancel_checkout_quote(quote_id uuid, reason text DEFAULT 'checkout cancelled'::text) RETURNS jsonb
@@ -1432,7 +1673,7 @@ begin
   v_price := public.price_checkout(v_items, v_address, shipping_method_id, v_code);
   insert into commerce.checkout_quotes (
     customer_id, idempotency_key, request_hash, pricing_hash,
-    currency, subtotal, discount_total, shipping_total, tax_total, total,
+    currency, subtotal, discount_total, shipping_total, tax_total, total, tax_context, shipping_line,
     shipping_address, shipping_method_id, shipping_method_name,
     requested_discount_code, customer_note, promotions, expires_at
   ) values (
@@ -1441,6 +1682,7 @@ begin
     (v_price ->> 'discount_total')::numeric,
     (v_price ->> 'shipping_total')::numeric,
     (v_price ->> 'tax_total')::numeric, (v_price ->> 'total')::numeric,
+    v_price -> 'tax_context', nullif(v_price -> 'shipping_line', 'null'::jsonb),
     v_address, (v_price ->> 'shipping_method_id')::uuid,
     v_price ->> 'shipping_method_name', v_code, note,
     coalesce(v_price -> 'promotions', '[]'::jsonb),
@@ -1452,7 +1694,7 @@ begin
     insert into commerce.checkout_quote_lines (
       quote_id, variant_id, product_id, location_id, sku, name, variant_title,
       options, attributes, unit_price, quantity, discount_total, total, line_total,
-      track_inventory
+      track_inventory, tax_lines, discount_allocations
     ) values (
       v_quote.id, (v_line ->> 'variant_id')::uuid,
       (v_line ->> 'product_id')::uuid,
@@ -1463,7 +1705,7 @@ begin
       (v_line ->> 'discount_total')::numeric,
       round((v_line ->> 'unit_price')::numeric * (v_line ->> 'quantity')::integer, 2),
       (v_line ->> 'line_total')::numeric,
-      (v_line ->> 'track_inventory')::boolean
+      (v_line ->> 'track_inventory')::boolean, v_line -> 'tax_lines', v_line -> 'discount_allocations'
     );
   end loop;
   return private.checkout_quote_json(v_quote);
@@ -1590,7 +1832,7 @@ begin
     where p.value ->> 'code' is not null limit 1
   );
   insert into public.orders (
-    customer_id, email, currency, subtotal, discount_total, shipping_total, tax_total, total,
+    customer_id, email, currency, subtotal, discount_total, shipping_total, tax_total, total, tax_context,
     shipping_address, shipping_method_id, shipping_method_name,
     discount_code, customer_note, payment_expires_at
   ) values (
@@ -1599,7 +1841,7 @@ begin
     (v_price ->> 'discount_total')::numeric,
     (v_price ->> 'shipping_total')::numeric,
     (v_price ->> 'tax_total')::numeric,
-    (v_price ->> 'total')::numeric,
+    (v_price ->> 'total')::numeric, v_price -> 'tax_context',
     v_quote.shipping_address, (v_price ->> 'shipping_method_id')::uuid,
     v_price ->> 'shipping_method_name', v_code_used, v_quote.customer_note, v_quote.expires_at
   ) returning * into v_order;
@@ -1622,10 +1864,10 @@ begin
 
   for v_promo in select value from jsonb_array_elements(v_price -> 'promotions')
   loop
-    insert into public.order_promotions (order_id, promotion_id, name, code, amount)
+    insert into public.order_promotions (order_id, promotion_id, name, code, amount, snapshot)
     values (v_order.id, (v_promo ->> 'promotion_id')::uuid,
             v_promo ->> 'name', v_promo ->> 'code',
-            (v_promo ->> 'amount')::numeric);
+            (v_promo ->> 'amount')::numeric, v_promo -> 'snapshot');
     update public.promotions set used_count = used_count + 1
     where id = (v_promo ->> 'promotion_id')::uuid;
     if v_promo ->> 'code' is not null then
@@ -1634,6 +1876,7 @@ begin
     end if;
   end loop;
 
+  perform private.store_order_pricing(v_order.id, v_price);
   update commerce.checkout_quotes
   set status = 'converted', order_id = v_order.id
   where id = v_quote.id

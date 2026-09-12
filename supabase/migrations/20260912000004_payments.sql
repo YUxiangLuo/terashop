@@ -3,34 +3,6 @@
 begin;
 set local check_function_bodies = false;
 
-CREATE FUNCTION private.assert_refund_request_lines() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_id uuid;
-  v_request commerce.refund_requests;
-  v_count integer;
-  v_amount numeric(12, 2);
-begin
-  if tg_table_name = 'refund_requests' then
-    v_id := new.id;
-  else
-    v_id := coalesce(new.refund_request_id, old.refund_request_id);
-  end if;
-  select * into v_request from commerce.refund_requests r where r.id = v_id;
-  if not found then return coalesce(new, old); end if;
-  select count(*), coalesce(sum(l.amount), 0)
-  into v_count, v_amount
-  from commerce.refund_request_lines l where l.refund_request_id = v_id;
-  if (v_request.source = 'items' and (v_count = 0 or v_amount <> v_request.amount))
-     or (v_request.source <> 'items' and v_count <> 0) then
-    raise exception 'refund request lines do not match header %', v_id;
-  end if;
-  return coalesce(new, old);
-end;
-$$;
-
 CREATE FUNCTION private.finalize_refund_request(p_request_id uuid, p_event commerce.payment_provider_events, p_data jsonb) RETURNS uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -136,6 +108,16 @@ begin
     );
   end loop;
 
+  -- Item tax components were copied by the refund-line trigger; retain shipping
+  -- and unallocated reservations exactly, never reprice at provider completion.
+  for v_line in select c.* from commerce.refund_request_components c
+    left join commerce.order_tax_lines t on t.id = c.tax_line_id
+    where c.refund_request_id = v_request.id and (c.kind <> 'tax' or t.order_item_id is null)
+    order by (c.kind = 'tax'), c.id
+  loop
+    insert into commerce.refund_components(refund_id, order_id, kind, tax_line_id, shipping_line_id, amount)
+    values (v_refund_id, v_order.id, v_line.kind, v_line.tax_line_id, v_line.shipping_line_id, v_line.amount);
+  end loop;
   select coalesce(sum(p.amount), 0) into v_refunded
   from public.payments p
   where p.order_id = v_order.id and p.kind = 'refund' and p.status = 'succeeded';
@@ -776,12 +758,12 @@ begin
   if (new.customer_id, new.email, new.currency, new.subtotal, new.discount_total,
       new.shipping_total, new.tax_total, new.total, new.shipping_address,
       new.billing_address, new.shipping_method_id, new.shipping_method_name,
-      new.discount_code, new.customer_note, new.created_at)
+      new.discount_code, new.customer_note, new.created_at, new.tax_context)
      is distinct from
      (old.customer_id, old.email, old.currency, old.subtotal, old.discount_total,
       old.shipping_total, old.tax_total, old.total, old.shipping_address,
       old.billing_address, old.shipping_method_id, old.shipping_method_name,
-      old.discount_code, old.customer_note, old.created_at)
+      old.discount_code, old.customer_note, old.created_at, old.tax_context)
      and private.order_snapshot_has_payment_intent(old.id) then
     raise exception 'order snapshot is locked by a payment intent';
   end if;
@@ -858,6 +840,7 @@ CREATE FUNCTION private.refund_request_json(p_request commerce.refund_requests) 
     'provider', p_request.provider, 'status', p_request.status,
     'source', p_request.source, 'amount', p_request.amount,
     'currency', p_request.currency,
+    'components', private.refund_components_json(p_request.id, true),
     'provider_reference', p_request.provider_reference,
     'provider_refund_requested_at', p_request.provider_refund_requested_at,
     'parent_transaction_id', p_request.parent_transaction_id,
@@ -936,6 +919,8 @@ begin
     ) then
       raise exception 'order already has an active payment intent';
     end if;
+    -- Make intent creation visible as a write conflict to old commercial snapshots.
+    update public.orders set updated_at = now() where id = new.order_id;
   else
     if (new.order_id, new.provider, new.amount, new.currency, new.idempotency_key, new.expires_at)
        is distinct from
@@ -1051,6 +1036,16 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.capture_refund_available(p_capture_id uuid) RETURNS numeric
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select t.amount
+    - (select coalesce(sum(r.amount), 0) from commerce.payment_transactions r
+       where r.parent_transaction_id = t.id and r.kind = 'refund' and r.status = 'succeeded')
+    - (select coalesce(sum(r.amount), 0) from commerce.refund_requests r
+       where r.parent_transaction_id = t.id and r.status in ('requested','submitted','processing'))
+  from commerce.payment_transactions t where t.id = p_capture_id;
+$$;
+
 CREATE FUNCTION private.validate_refund_request() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -1072,6 +1067,15 @@ begin
      or v_parent.status <> 'succeeded' or v_parent.currency <> new.currency
      or new.amount > v_parent.amount then
     raise exception 'refund request does not match a succeeded capture';
+  end if;
+  if tg_op = 'INSERT' then
+    -- Serialize capacity for both RPC and trusted table writers, including old
+    -- REPEATABLE READ snapshots. NOWAIT avoids reverse child-to-order waiting.
+    perform 1 from public.orders where id = new.order_id for update nowait;
+    update public.orders set updated_at = now() where id = new.order_id;
+    if new.status <> 'requested' or new.amount > private.capture_refund_available(v_parent.id) then
+      raise exception 'refund request exceeds available capture balance or has invalid initial status';
+    end if;
   end if;
   if new.result_refund_id is not null then
     select * into v_refund from commerce.refunds r where r.id = new.result_refund_id;
@@ -1150,11 +1154,8 @@ begin
   if v_item.refunded_quantity + v_active_qty + new.quantity > v_item.quantity then
     raise exception 'refund request line exceeds available quantity';
   end if;
-  v_expected := case
-    when v_item.refunded_quantity + v_active_qty + new.quantity = v_item.quantity
-      then v_item.line_total - v_item.refunded_amount - v_active_amount
-    else round(v_item.line_total * new.quantity / v_item.quantity, 2)
-  end;
+  v_expected := private.proportional_refund(v_item.line_total, v_item.quantity, new.quantity,
+    v_item.refunded_quantity + v_active_qty, v_item.refunded_amount + v_active_amount);
   if new.amount <> v_expected or v_expected < 0 then
     raise exception 'refund request line amount does not match refundable allocation';
   end if;
@@ -1500,7 +1501,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.create_refund_request(order_id uuid, actor_id uuid, provider text, idempotency_key text, items jsonb DEFAULT NULL::jsonb, amount numeric DEFAULT NULL::numeric, reason text DEFAULT NULL::text, restock boolean DEFAULT false, metadata jsonb DEFAULT '{}'::jsonb) RETURNS jsonb
+CREATE FUNCTION public.create_refund_request(order_id uuid, actor_id uuid, provider text, idempotency_key text, items jsonb DEFAULT NULL::jsonb, amount numeric DEFAULT NULL::numeric, reason text DEFAULT NULL::text, restock boolean DEFAULT false, metadata jsonb DEFAULT '{}'::jsonb, shipping_amount numeric DEFAULT NULL) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1515,15 +1516,9 @@ declare
   v_source text;
   v_amount numeric(12, 2) := 0;
   v_available numeric(12, 2);
-  v_refunded numeric(12, 2);
-  v_reserved numeric(12, 2);
   v_item jsonb;
-  v_line public.order_items;
-  v_qty integer;
-  v_active_qty integer;
-  v_active_amount numeric(12, 2);
-  v_line_amount numeric(12, 2);
-  v_lines jsonb := '[]'::jsonb;
+  v_plan jsonb;
+  v_lines jsonb;
   v_request commerce.refund_requests;
 begin
   if auth.role() <> 'service_role' then raise exception 'service role only'; end if;
@@ -1561,7 +1556,8 @@ begin
     'order_id', order_id, 'actor_id', actor_id, 'provider', v_provider,
     'items', v_items,
     'amount', case when amount is null then null else round(amount, 2) end,
-    'reason', reason, 'restock', restock, 'metadata', metadata
+    'reason', reason, 'restock', restock, 'metadata', metadata,
+    'shipping_amount', case when shipping_amount is not null then round(shipping_amount, 2) end
   ));
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     'provider.refund:' || v_provider || ':' || v_key, 0));
@@ -1590,59 +1586,12 @@ begin
   for update;
   if not found then raise exception 'no succeeded provider capture is available for refund'; end if;
 
-  select coalesce(sum(t.amount), 0) into v_refunded
-  from commerce.payment_transactions t
-  where t.parent_transaction_id = v_parent.id
-    and t.kind = 'refund' and t.status = 'succeeded';
-  select coalesce(sum(r.amount), 0) into v_reserved
-  from commerce.refund_requests r
-  where r.parent_transaction_id = v_parent.id
-    and r.status in ('requested', 'submitted', 'processing');
-  v_available := v_parent.amount - v_refunded - v_reserved;
+  v_available := private.capture_refund_available(v_parent.id);
   if v_available <= 0 then raise exception 'capture has no refundable balance'; end if;
 
-  if v_items is not null then
-    v_source := 'items';
-    for v_item in select value from jsonb_array_elements(v_items)
-    loop
-      v_qty := (v_item ->> 'quantity')::integer;
-      select * into v_line from public.order_items oi
-      where oi.id = (v_item ->> 'order_item_id')::uuid
-        and oi.order_id = v_order.id for update;
-      if not found then
-        raise exception 'order item % does not belong to this order', v_item ->> 'order_item_id';
-      end if;
-      select coalesce(sum(l.quantity), 0), coalesce(sum(l.amount), 0)
-      into v_active_qty, v_active_amount
-      from commerce.refund_request_lines l
-      join commerce.refund_requests r on r.id = l.refund_request_id
-      where l.order_item_id = v_line.id
-        and r.status in ('requested', 'submitted', 'processing');
-      if v_line.refunded_quantity + v_active_qty + v_qty > v_line.quantity then
-        raise exception 'refund quantity exceeds available request balance for item %', v_line.id;
-      end if;
-      if v_line.refunded_quantity + v_active_qty + v_qty = v_line.quantity then
-        v_line_amount := v_line.line_total - v_line.refunded_amount - v_active_amount;
-      else
-        v_line_amount := round(v_line.line_total * v_qty / v_line.quantity, 2);
-      end if;
-      if v_line_amount < 0 then raise exception 'refund line amount became negative'; end if;
-      v_amount := v_amount + v_line_amount;
-      v_lines := v_lines || jsonb_build_array(jsonb_build_object(
-        'order_item_id', v_line.id, 'quantity', v_qty, 'amount', v_line_amount
-      ));
-    end loop;
-  elsif amount is not null then
-    v_source := 'custom_amount';
-    v_amount := round(amount, 2);
-    if v_amount <= 0 then raise exception 'refund amount must be positive'; end if;
-  else
-    v_source := 'remaining';
-    v_amount := v_available;
-  end if;
-  if v_amount <= 0 or v_amount > v_available then
-    raise exception 'refund request amount % exceeds available provider balance %', v_amount, v_available;
-  end if;
+  v_plan := private.plan_refund(v_order.id, v_items, amount, shipping_amount, v_available);
+  v_source := v_plan ->> 'source'; v_amount := (v_plan ->> 'amount')::numeric;
+  v_lines := v_plan -> 'lines';
 
   insert into commerce.refund_requests (
     order_id, parent_transaction_id, provider, source, amount, currency,
@@ -1660,6 +1609,11 @@ begin
       v_request.id, v_order.id, (v_item ->> 'order_item_id')::uuid,
       (v_item ->> 'quantity')::integer, (v_item ->> 'amount')::numeric
     );
+  end loop;
+  for v_item in select value from jsonb_array_elements(v_plan -> 'components') loop
+    insert into commerce.refund_request_components(refund_request_id, order_id, kind, tax_line_id, shipping_line_id, amount)
+    values (v_request.id, v_order.id, v_item ->> 'kind', (v_item ->> 'tax_line_id')::uuid,
+      (v_item ->> 'shipping_line_id')::uuid, (v_item ->> 'amount')::numeric);
   end loop;
   return private.refund_request_json(v_request);
 end;

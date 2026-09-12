@@ -35,7 +35,13 @@ export function parseRefundRequest(body: Record<string, unknown>) {
   const idempotency_key = requireIdempotencyKey(body.idempotency_key);
   const items = normalizeItems(body.items);
   const amount = body.amount === undefined || body.amount === null ? null : body.amount;
+  const shipping_amount = body.shipping_amount === undefined || body.shipping_amount === null ? null : body.shipping_amount;
   if (items && amount !== null) throw new HttpError('Pass either items or amount, not both');
+  if (amount !== null && shipping_amount !== null) throw new HttpError('Pass either shipping_amount or amount, not both');
+  if (shipping_amount !== null) {
+    if (typeof shipping_amount !== 'string' && typeof shipping_amount !== 'number') throw new HttpError('shipping_amount must be a decimal');
+    normalizeCheckoutAmount(shipping_amount, 'USD');
+  }
   if (amount !== null && typeof amount !== 'string' && typeof amount !== 'number') {
     throw new HttpError('amount must be a decimal');
   }
@@ -48,5 +54,5 @@ export function parseRefundRequest(body: Record<string, unknown>) {
   if (body.restock !== undefined && typeof body.restock !== 'boolean') {
     throw new HttpError('restock must be boolean');
   }
-  return { order_id, idempotency_key, items, amount, reason, restock: body.restock === true };
+  return { order_id, idempotency_key, items, amount, shipping_amount, reason, restock: body.restock === true };
 }

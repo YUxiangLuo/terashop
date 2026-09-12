@@ -56,8 +56,9 @@ export async function fixtureOrder(
   buyer: TestUser,
   quantity = 1,
   quoted = true,
+  options: { shipping_method_id?: string; address?: typeof TEST_ADDRESS } = {},
 ): Promise<FixtureOrder> {
-  const input = { items: [{ variant_id: fixture.variantId, quantity }], address: TEST_ADDRESS };
+  const input = { items: [{ variant_id: fixture.variantId, quantity }], address: TEST_ADDRESS, ...options };
   let quoteId: string | null = null;
   if (quoted) {
     const quote = await checked<{ id: string }>(rpc('create_checkout_quote', {

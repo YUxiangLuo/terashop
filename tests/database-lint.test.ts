@@ -34,8 +34,6 @@ test('SQL lint 覆盖业务函数与每个触发器挂载表，精确例外可�
     ['private.canonical_variant_quantities(jsonb)', null],
     ['private.canonical_order_item_quantities(jsonb)', null],
     ['private.assert_checkout_quote_totals()', 'commerce.checkout_quotes'],
-    ['private.assert_refund_request_lines()', 'commerce.refund_requests'],
-    ['private.assert_refund_request_lines()', 'commerce.refund_request_lines'],
   ].sort());
   expect(await lintObjects()).toEqual(before);
 });
@@ -76,10 +74,10 @@ test('多表触发器的表名分支或字段改变后，不再豁免缺列错�
   await withRollback(database, async sql => {
     await changeBody(sql, 'private.assert_checkout_quote_totals()', body =>
       body.replace("tg_table_name = 'checkout_quotes'", "tg_table_name = 'wrong_table'"));
-    await changeBody(sql, 'private.assert_refund_request_lines()', body =>
-      body.replace('v_id := new.id;', 'v_id := new.missing_id;'));
+    await changeBody(sql, 'private.assert_refund_composition()', body =>
+      body.replace('to_jsonb(new)', 'to_jsonb(new.missing_id)'));
     const report = await checkDatabase(sql);
-    for (const name of ['assert_checkout_quote_totals', 'assert_refund_request_lines']) {
+    for (const name of ['assert_checkout_quote_totals', 'assert_refund_composition']) {
       expect(report.issues).toContainEqual(expect.objectContaining({
         function: `private.${name}()`, level: 'error', sqlstate: '42703',
       }));

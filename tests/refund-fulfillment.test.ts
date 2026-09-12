@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { api, rpc, signup, makeAdmin, stockOf, installTestTax, type TestUser } from './helpers';
+import { api, rpc, signup, makeAdmin, stockOf, shippingByName, installTestTax, type TestUser } from './helpers';
 import {
   checked, paymentFixture, fixtureOrder, fixtureIntent, paymentEvent, settleIntent,
   type PaymentFixture, type FixtureOrder,
@@ -11,7 +11,6 @@ let buyer: TestUser;
 let fixture: PaymentFixture;
 let removeTax: (() => Promise<void>) | undefined;
 beforeAll(async () => {
-  // Leave tax outside line refunds so quantity guards are exercised before full-refund guards.
   removeTax = await installTestTax();
   admin = await signup(); buyer = await signup();
   await makeAdmin(admin.userId);
@@ -40,8 +39,9 @@ const fulfill = (order: FixtureOrder, quantity: number) => rpc('create_fulfillme
 const balance = (order: FixtureOrder): Promise<Balance> => checked(rpc('get_order_fulfillment_balance', {
   order_id: order.id,
 }, buyer.token));
-async function manualOrder(quantity: number): Promise<FixtureOrder> {
-  const order = await fixtureOrder(fixture, buyer, quantity);
+async function manualOrder(quantity: number, withShipping = false): Promise<FixtureOrder> {
+  const order = await fixtureOrder(fixture, buyer, quantity, true,
+    withShipping ? { shipping_method_id: await shippingByName('Standard shipping') } : {});
   await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
   return order;
 }
@@ -59,7 +59,8 @@ async function requestRefund(order: FixtureOrder, quantity: number): Promise<Ref
 
 describe('Refund cancellation and fulfillment quantities', () => {
   test('未发货商品退款回库后不能再发货，RPC 和受信表写入都被限制', async () => {
-    const order = await manualOrder(1);
+    // Keep shipping payable so quantity guards run before the fully-refunded guard.
+    const order = await manualOrder(1, true);
     const before = await stockOf(fixture.sku);
     await itemRefund(order, 1);
     expect((await balance(order)).lines[0]).toMatchObject({

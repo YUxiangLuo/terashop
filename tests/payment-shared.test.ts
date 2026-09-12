@@ -14,7 +14,7 @@ describe('PayPal 退款参数', () => {
   test('保留默认值、原始金额及商品行，丢弃额外字段', () => {
     const expected = {
       order_id: orderId, idempotency_key: 'refund-command',
-      items: null, amount: null, reason: null, restock: false,
+      items: null, amount: null, shipping_amount: null, reason: null, restock: false,
     };
     expect(parseRefundRequest(base)).toEqual(expected);
     for (const amount of [10, '10.0', '0.01']) {
@@ -58,9 +58,16 @@ describe('PayPal 退款参数', () => {
     }
   });
 
+  test('配送净额可单独或随商品退款，与未分配金额互斥', () => {
+    expect(parseRefundRequest({ ...base, shipping_amount: '4.00' })).toMatchObject({ shipping_amount: '4.00', items: null, amount: null });
+    expect(parseRefundRequest({ ...base, items: [item], shipping_amount: 4 })).toMatchObject({ shipping_amount: 4, items: [item] });
+    expect(() => parseRefundRequest({ ...base, shipping_amount: {}, amount: null })).toThrow('shipping_amount must be a decimal');
+    expect(() => parseRefundRequest({ ...base, shipping_amount: 1, amount: 2 })).toThrow('Pass either shipping_amount or amount');
+  });
+
   test('金额校验仍使用渠道自己的错误类型', () => {
-    for (const amount of [0, -1, NaN, Infinity, '1.001', '10000000000']) {
-      expect(() => parseRefundRequest({ ...base, amount })).toThrow(PayPalIntegrationError);
+    for (const key of ['amount', 'shipping_amount']) for (const amount of [0, -1, NaN, Infinity, '1.001', '10000000000']) {
+      expect(() => parseRefundRequest({ ...base, [key]: amount })).toThrow(PayPalIntegrationError);
     }
   });
 });

@@ -44,8 +44,6 @@ function reviewedTriggerBranch(issue: Issue, source: string): boolean {
   const guards = new Map([
     ['private.assert_checkout_quote_totals()',
       ['checkout_quotes', 'checkout_quote_lines', 'v_quote_id', 'quote_id']],
-    ['private.assert_refund_request_lines()',
-      ['refund_requests', 'refund_request_lines', 'v_id', 'refund_request_id']],
   ]);
   const guard = guards.get(issue.function);
   if (!guard || issue.level !== 'error' || issue.sqlstate !== '42703') return false;
