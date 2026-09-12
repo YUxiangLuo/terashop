@@ -20,15 +20,10 @@ import {
   type PayPalCapture,
   type PayPalOrder,
   payPalRequest,
-  payPalSha256Hex,
   paypalOccurredAt,
   validatePayPalOrder,
 } from '../_shared/paypal.ts';
-
-interface ProviderEventResult {
-  status: string;
-  outcome: string | null;
-}
+import { ingestApiPaymentEvent, type ProviderEventResult } from '../_shared/provider-events.ts';
 
 async function ingestCapture(
   capture: PayPalCapture,
@@ -37,17 +32,9 @@ async function ingestCapture(
 ): Promise<ProviderEventResult> {
   const data = normalizedPayPalCaptureData(capture, local, local.provider_reference!);
   const occurredAt = paypalOccurredAt(capture.update_time ?? capture.create_time);
-  const payloadHash = await payPalSha256Hex(JSON.stringify({ occurred_at: occurredAt, data }));
-  return serviceRpc<ProviderEventResult>('ingest_payment_provider_event', {
-    provider: 'paypal',
-    provider_event_id: `api:capture:${capture.id}:${capture.status}:${payloadHash.slice(0, 16)}`,
-    source: 'api_response',
-    event_type: 'paypal.capture.api_result',
-    object_reference: capture.id,
-    livemode,
-    occurred_at: occurredAt,
-    payload_hash: payloadHash,
-    data,
+  return ingestApiPaymentEvent({
+    provider: 'paypal', resource: 'capture', reference: capture.id, status: capture.status,
+    eventType: 'paypal.capture.api_result', livemode, occurredAt, data,
   });
 }
 

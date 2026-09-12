@@ -15,10 +15,10 @@ import {
   parsePayPalLivemode,
   type PayPalRefund,
   payPalRequest,
-  payPalSha256Hex,
   paypalOccurredAt,
   validatePayPalRefund,
 } from '../_shared/paypal.ts';
+import { ingestApiPaymentEvent } from '../_shared/provider-events.ts';
 
 interface RefundRequestDto {
   id: string;
@@ -27,11 +27,6 @@ interface RefundRequestDto {
   currency: string;
   provider_reference: string;
   parent_provider_reference: string;
-}
-
-interface ProviderEventResult {
-  status: string;
-  outcome: string | null;
 }
 
 Deno.serve(async (request) => {
@@ -64,17 +59,9 @@ Deno.serve(async (request) => {
         validatePayPalRefund(refund, local, false);
         const data = normalizedPayPalRefundData(refund, local);
         const occurredAt = paypalOccurredAt(refund.update_time ?? refund.create_time);
-        const payloadHash = await payPalSha256Hex(JSON.stringify({ occurred_at: occurredAt, data }));
-        const event = await serviceRpc<ProviderEventResult>('ingest_payment_provider_event', {
-          provider: 'paypal',
-          provider_event_id: `api:refund:${refund.id}:${refund.status}:${payloadHash.slice(0, 16)}`,
-          source: 'api_response',
-          event_type: 'paypal.refund.api_result',
-          object_reference: refund.id,
-          livemode,
-          occurred_at: occurredAt,
-          payload_hash: payloadHash,
-          data,
+        const event = await ingestApiPaymentEvent({
+          provider: 'paypal', resource: 'refund', reference: refund.id, status: refund.status,
+          eventType: 'paypal.refund.api_result', livemode, occurredAt, data,
         });
         results.push({ refund_request_id: local.id, status: event.status, outcome: event.outcome });
       } catch (error) {

@@ -11,10 +11,10 @@ import {
   normalizePayPalEvent,
   parsePayPalWebhookHeaders,
   payPalApiBase,
-  payPalSha256Hex,
   parsePayPalLivemode,
   verifyPayPalWebhook,
 } from '../_shared/paypal.ts';
+import { sha256Hex } from '../_shared/provider-events.ts';
 
 interface ProviderEventResult {
   provider_event_id: string;
@@ -66,7 +66,7 @@ Deno.serve(async (request) => {
       object_reference: event.objectReference,
       livemode,
       occurred_at: event.occurredAt,
-      payload_hash: await payPalSha256Hex(raw),
+      payload_hash: await sha256Hex(raw),
       data: event.data,
     });
     if (result.status === 'failed') {

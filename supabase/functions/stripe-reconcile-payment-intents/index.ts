@@ -14,13 +14,13 @@ import {
   normalizedStripePaymentIntentData,
   parseStripeHttpTimeout,
   parseStripeLivemode,
-  sha256Hex,
   stripeApiBase,
   stripeApiVersion,
   StripeIntegrationError,
   stripeRequest,
   type StripePaymentIntentResponse,
 } from '../_shared/stripe.ts';
+import { ingestApiPaymentEvent, type ProviderEventResult } from '../_shared/provider-events.ts';
 
 interface CancellationCandidate {
   id: string;
@@ -31,11 +31,6 @@ interface CancellationCandidate {
   currency: string;
   expires_at: string | null;
   cancel_attempt: number;
-}
-
-interface ProviderEventResult {
-  status: string;
-  outcome: string | null;
 }
 
 const ACTIVE_PROVIDER_STATUSES = new Set([
@@ -92,17 +87,9 @@ async function ingestTerminalIntent(
   const occurredAt = new Date(
     (stripe.status === 'canceled' ? Number(stripe.canceled_at) : stripe.created) * 1000,
   ).toISOString();
-  const payloadHash = await sha256Hex(JSON.stringify({ occurred_at: occurredAt, data }));
-  return serviceRpc<ProviderEventResult>('ingest_payment_provider_event', {
-    provider: 'stripe',
-    provider_event_id: `api:payment_intent:${stripe.id}:${stripe.status}:${payloadHash.slice(0, 16)}`,
-    source: 'api_response',
-    event_type: eventType,
-    object_reference: stripe.id,
-    livemode: stripe.livemode,
-    occurred_at: occurredAt,
-    payload_hash: payloadHash,
-    data,
+  return ingestApiPaymentEvent({
+    provider: 'stripe', resource: 'payment_intent', reference: stripe.id, status: stripe.status,
+    eventType, livemode: stripe.livemode, occurredAt, data,
   });
 }
 

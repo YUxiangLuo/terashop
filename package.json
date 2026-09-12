@@ -14,7 +14,7 @@
     "stop": "bunx supabase stop",
     "test": "bun run setup && set -a && eval \"$(bunx supabase status -o env)\" && set +a && bun test --parallel=1",
     "test:current": "set -a && eval \"$(bunx supabase status -o env)\" && set +a && bun test --parallel=1",
-    "db:lint": "bunx supabase db lint --local --schema public --level warning && bunx supabase db lint --local --schema commerce --level warning",
+    "db:lint": "bun scripts/db-lint.ts",
     "typecheck": "bunx tsc --noEmit",
     "types:generate": "bunx supabase gen types typescript --local > types/database.ts",
     "types:check": "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; bunx supabase gen types typescript --local > \"$tmp\" && diff -u types/database.ts \"$tmp\""

@@ -39,10 +39,6 @@ function constantTimeEqual(left: Uint8Array, right: Uint8Array): boolean {
   return difference === 0;
 }
 
-export async function sha256Hex(value: string): Promise<string> {
-  return hex(await crypto.subtle.digest('SHA-256', encoder.encode(value)));
-}
-
 export async function stripeSignatureForTest(
   payload: string,
   secret: string,
@@ -546,7 +542,6 @@ export async function stripeRequest<T extends Record<string, unknown>>(
     body = new URLSearchParams(options.form ?? {});
   }
   const safeToRetry = method === 'GET' || Boolean(options.idempotencyKey);
-  let lastNetworkError: unknown;
 
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     let response: Response;
@@ -561,7 +556,6 @@ export async function stripeRequest<T extends Record<string, unknown>>(
       text = await responseText(response);
     } catch (error) {
       if (error instanceof StripeIntegrationError) throw error;
-      lastNetworkError = error;
       if (!safeToRetry || attempt >= maxRetries) break;
       await retryDelay(null, attempt, options.retryDelayMs);
       continue;
@@ -594,7 +588,6 @@ export async function stripeRequest<T extends Record<string, unknown>>(
     return parsed as T;
   }
 
-  void lastNetworkError;
   throw new StripeIntegrationError('Stripe request failed', 502, 'stripe_unavailable');
 }
 

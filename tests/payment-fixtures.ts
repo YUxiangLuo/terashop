@@ -1,5 +1,6 @@
 import { api, rpc, CN_ADDRESS, type TestUser } from './helpers';
-import { decimalToMinorUnits, sha256Hex } from '../supabase/functions/_shared/stripe.ts';
+import { decimalToMinorUnits } from '../supabase/functions/_shared/stripe.ts';
+import { sha256Hex } from '../supabase/functions/_shared/provider-events.ts';
 
 export interface PaymentFixture {
   productId: string;

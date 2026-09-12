@@ -7,9 +7,7 @@ import {
   jsonResponse,
   optionalEnv,
   readJsonBody,
-  requireIdempotencyKey,
   requiredEnv,
-  requireUuid,
   serviceRpc,
 } from '../_shared/http.ts';
 import {
@@ -19,27 +17,12 @@ import {
   parsePayPalLivemode,
   type PayPalRefund,
   payPalRequest,
-  payPalSha256Hex,
   paypalOccurredAt,
   requirePayPalId,
   validatePayPalRefund,
 } from '../_shared/paypal.ts';
-
-interface RefundRequestDto {
-  id: string;
-  order_id: string;
-  provider: string;
-  status: string;
-  amount: number | string;
-  currency: string;
-  provider_reference: string | null;
-  parent_provider_reference: string;
-}
-
-interface ProviderEventResult {
-  status: string;
-  outcome: string | null;
-}
+import { ingestApiPaymentEvent, type ProviderEventResult } from '../_shared/provider-events.ts';
+import { parseRefundRequest, type RefundRequestDto } from '../_shared/refunds.ts';
 
 function localRefundStatus(status: string): string {
   switch (status.toUpperCase()) {
@@ -51,22 +34,6 @@ function localRefundStatus(status: string): string {
   }
 }
 
-function normalizeItems(value: unknown): Array<{ order_item_id: string; quantity: number }> | null {
-  if (value === undefined || value === null) return null;
-  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
-    throw new HttpError('items must be a non-empty array with at most 100 lines');
-  }
-  return value.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) throw new HttpError('Invalid refund item');
-    const row = item as Record<string, unknown>;
-    const id = requireUuid(row.order_item_id, 'order_item_id');
-    if (!Number.isSafeInteger(row.quantity) || Number(row.quantity) <= 0) {
-      throw new HttpError('Refund quantity must be a positive integer');
-    }
-    return { order_item_id: id, quantity: Number(row.quantity) };
-  });
-}
-
 async function ingestRefund(
   refund: PayPalRefund,
   local: RefundRequestDto,
@@ -74,17 +41,9 @@ async function ingestRefund(
 ): Promise<ProviderEventResult> {
   const data = normalizedPayPalRefundData(refund, local);
   const occurredAt = paypalOccurredAt(refund.update_time ?? refund.create_time);
-  const payloadHash = await payPalSha256Hex(JSON.stringify({ occurred_at: occurredAt, data }));
-  return serviceRpc<ProviderEventResult>('ingest_payment_provider_event', {
-    provider: 'paypal',
-    provider_event_id: `api:refund:${refund.id}:${refund.status}:${payloadHash.slice(0, 16)}`,
-    source: 'api_response',
-    event_type: 'paypal.refund.api_result',
-    object_reference: refund.id,
-    livemode,
-    occurred_at: occurredAt,
-    payload_hash: payloadHash,
-    data,
+  return ingestApiPaymentEvent({
+    provider: 'paypal', resource: 'refund', reference: refund.id, status: refund.status,
+    eventType: 'paypal.refund.api_result', livemode, occurredAt, data,
   });
 }
 
@@ -97,34 +56,11 @@ Deno.serve(async (request) => {
 
     const user = await authenticatedUser(request);
     const body = await readJsonBody(request, 65536);
-    const orderId = requireUuid(body.order_id, 'order_id');
-    const idempotencyKey = requireIdempotencyKey(body.idempotency_key);
-    const items = normalizeItems(body.items);
-    const amount = body.amount === undefined || body.amount === null ? null : body.amount;
-    if (items && amount !== null) throw new HttpError('Pass either items or amount, not both');
-    if (amount !== null && typeof amount !== 'string' && typeof amount !== 'number') {
-      throw new HttpError('amount must be a decimal');
-    }
-    if (amount !== null) normalizeCnyAmount(amount, 'CNY');
-    if (body.reason !== undefined && body.reason !== null && typeof body.reason !== 'string') {
-      throw new HttpError('reason must be text');
-    }
-    const reason = typeof body.reason === 'string' ? body.reason : null;
-    if (reason && reason.length > 1000) throw new HttpError('reason must be at most 1000 characters');
-    if (body.restock !== undefined && typeof body.restock !== 'boolean') {
-      throw new HttpError('restock must be boolean');
-    }
-    const restock = body.restock === true;
-
+    const refundRequest = parseRefundRequest(body, normalizeCnyAmount);
     const local = await serviceRpc<RefundRequestDto>('create_refund_request', {
-      order_id: orderId,
+      ...refundRequest,
       actor_id: user.id,
       provider: 'paypal',
-      idempotency_key: idempotencyKey,
-      items,
-      amount,
-      reason,
-      restock,
       metadata: { edge_function: 'paypal-create-refund' },
     });
     requirePayPalId(local.parent_provider_reference, 'capture id');

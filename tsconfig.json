@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "allowImportingTsExtensions": true
   },
-  "include": ["tests/**/*.ts", "types/**/*.ts", "supabase/functions/**/*.ts"]
+  "include": ["scripts/**/*.ts", "tests/**/*.ts", "types/**/*.ts", "supabase/functions/**/*.ts"]
 }

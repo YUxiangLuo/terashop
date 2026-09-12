@@ -7,9 +7,7 @@ import {
   jsonResponse,
   optionalEnv,
   readJsonBody,
-  requireIdempotencyKey,
   requiredEnv,
-  requireUuid,
   serviceRpc,
 } from '../_shared/http.ts';
 import {
@@ -18,49 +16,16 @@ import {
   normalizedStripeRefundData,
   parseStripeHttpTimeout,
   parseStripeLivemode,
-  sha256Hex,
   stripeApiBase,
   stripeApiVersion,
   stripeRequest,
   type StripeRefundResponse,
 } from '../_shared/stripe.ts';
-
-interface RefundRequestDto {
-  id: string;
-  order_id: string;
-  provider: string;
-  status: string;
-  amount: number | string;
-  currency: string;
-  provider_reference: string | null;
-  parent_provider_reference: string;
-}
-
-interface ProviderEventResult {
-  status: string;
-  outcome: string | null;
-}
+import { ingestApiPaymentEvent, type ProviderEventResult } from '../_shared/provider-events.ts';
+import { parseRefundRequest, type RefundRequestDto } from '../_shared/refunds.ts';
 
 function stripeTimeoutMs(): number {
   return parseStripeHttpTimeout(optionalEnv('STRIPE_HTTP_TIMEOUT_MS', '10000'));
-}
-
-function normalizeItems(value: unknown): Array<{ order_item_id: string; quantity: number }> | null {
-  if (value === undefined || value === null) return null;
-  if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
-    throw new HttpError('items must be a non-empty array with at most 100 lines');
-  }
-  return value.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      throw new HttpError('Invalid refund item');
-    }
-    const row = item as Record<string, unknown>;
-    const id = requireUuid(row.order_item_id, 'order_item_id');
-    if (!Number.isSafeInteger(row.quantity) || Number(row.quantity) <= 0) {
-      throw new HttpError('Refund quantity must be a positive integer');
-    }
-    return { order_item_id: id, quantity: Number(row.quantity) };
-  });
 }
 
 function validateStripeRefund(
@@ -96,18 +61,11 @@ async function ingestStripeRefund(
 ): Promise<ProviderEventResult> {
   const data = normalizedStripeRefundData(stripe);
   const occurredAt = new Date(stripe.created * 1000).toISOString();
-  const payloadHash = await sha256Hex(JSON.stringify({ occurred_at: occurredAt, data }));
-  return serviceRpc<ProviderEventResult>('ingest_payment_provider_event', {
-    provider: 'stripe',
-    provider_event_id: `api:refund:${stripe.id}:${stripe.status}:${payloadHash.slice(0, 16)}`,
-    source: 'api_response',
-    event_type: 'refund.api_result',
-    object_reference: stripe.id,
+  return ingestApiPaymentEvent({
+    provider: 'stripe', resource: 'refund', reference: stripe.id, status: stripe.status,
+    eventType: 'refund.api_result',
     // Refund objects have no livemode; the authenticated API key determines it.
-    livemode,
-    occurred_at: occurredAt,
-    payload_hash: payloadHash,
-    data,
+    livemode, occurredAt, data,
   });
 }
 
@@ -120,36 +78,11 @@ export async function handleStripeCreateRefund(request: Request): Promise<Respon
 
     const user = await authenticatedUser(request);
     const body = await readJsonBody(request, 65536);
-    const orderId = requireUuid(body.order_id, 'order_id');
-    const idempotencyKey = requireIdempotencyKey(body.idempotency_key);
-    const items = normalizeItems(body.items);
-    const amount = body.amount === undefined || body.amount === null ? null : body.amount;
-    if (items && amount !== null) throw new HttpError('Pass either items or amount, not both');
-    if (amount !== null && typeof amount !== 'string' && typeof amount !== 'number') {
-      throw new HttpError('amount must be a decimal');
-    }
-    if (amount !== null) decimalToMinorUnits(amount, 'CNY');
-    if (body.reason !== undefined && body.reason !== null && typeof body.reason !== 'string') {
-      throw new HttpError('reason must be text');
-    }
-    const reason = typeof body.reason === 'string' ? body.reason : null;
-    if (reason && reason.length > 1000) {
-      throw new HttpError('reason must be at most 1000 characters');
-    }
-    if (body.restock !== undefined && typeof body.restock !== 'boolean') {
-      throw new HttpError('restock must be boolean');
-    }
-    const restock = body.restock === true;
-
+    const refundRequest = parseRefundRequest(body, decimalToMinorUnits);
     const local = await serviceRpc<RefundRequestDto>('create_refund_request', {
-      order_id: orderId,
+      ...refundRequest,
       actor_id: user.id,
       provider: 'stripe',
-      idempotency_key: idempotencyKey,
-      items,
-      amount,
-      reason,
-      restock,
       metadata: { edge_function: 'stripe-create-refund' },
     });
     if (typeof local.parent_provider_reference !== 'string'

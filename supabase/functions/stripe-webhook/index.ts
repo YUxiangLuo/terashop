@@ -11,9 +11,9 @@ import {
   normalizeStripeEvent,
   parseStripeLivemode,
   parseStripeWebhookSecrets,
-  sha256Hex,
   verifyStripeSignature,
 } from '../_shared/stripe.ts';
+import { sha256Hex } from '../_shared/provider-events.ts';
 
 interface ProviderEventResult {
   event_id: string;

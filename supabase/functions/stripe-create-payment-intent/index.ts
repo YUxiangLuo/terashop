@@ -20,12 +20,12 @@ import {
   parseStripeAllowRedirects,
   parseStripeHttpTimeout,
   parseStripeLivemode,
-  sha256Hex,
   stripeApiBase,
   stripeApiVersion,
   stripeRequest,
   type StripePaymentIntentResponse,
 } from '../_shared/stripe.ts';
+import { ingestApiPaymentEvent, type ProviderEventResult } from '../_shared/provider-events.ts';
 
 interface LocalPaymentIntent {
   id: string;
@@ -36,11 +36,6 @@ interface LocalPaymentIntent {
   currency: string;
   provider_reference: string | null;
   expires_at: string | null;
-}
-
-interface ProviderEventResult {
-  status: string;
-  outcome: string | null;
 }
 
 function stripeTimeoutMs(): number {
@@ -80,7 +75,6 @@ function validateStripeIntent(
 
 async function ingestStripeIntent(
   stripe: StripePaymentIntentResponse,
-  local: LocalPaymentIntent,
 ): Promise<ProviderEventResult> {
   const eventType = `payment_intent.${stripe.status}`;
   const data = normalizedStripePaymentIntentData(stripe, eventType);
@@ -90,17 +84,9 @@ async function ingestStripeIntent(
   const occurredAt = stripe.status === 'succeeded'
     ? new Date(stripe.created * 1000).toISOString()
     : new Date().toISOString();
-  const payloadHash = await sha256Hex(JSON.stringify({ occurred_at: occurredAt, data }));
-  return serviceRpc<ProviderEventResult>('ingest_payment_provider_event', {
-    provider: 'stripe',
-    provider_event_id: `api:payment_intent:${stripe.id}:${stripe.status}:${payloadHash.slice(0, 16)}`,
-    source: 'api_response',
-    event_type: eventType,
-    object_reference: stripe.id,
-    livemode: stripe.livemode,
-    occurred_at: occurredAt,
-    payload_hash: payloadHash,
-    data,
+  return ingestApiPaymentEvent({
+    provider: 'stripe', resource: 'payment_intent', reference: stripe.id, status: stripe.status,
+    eventType, livemode: stripe.livemode, occurredAt, data,
   });
 }
 
@@ -196,7 +182,7 @@ Deno.serve(async (request) => {
           currency: local.currency,
         });
       }
-      const event = await ingestStripeIntent(stripe, local);
+      const event = await ingestStripeIntent(stripe);
       if (event.status === 'failed') {
         throw new HttpError(
           'Stripe payment exists but local reconciliation is pending',
@@ -229,7 +215,7 @@ Deno.serve(async (request) => {
       currency: local.currency,
     });
     if (stripe.status === 'canceled') {
-      const event = await ingestStripeIntent(stripe, local);
+      const event = await ingestStripeIntent(stripe);
       if (event.status === 'failed') {
         throw new HttpError(
           'Stripe cancellation is pending local reconciliation',
