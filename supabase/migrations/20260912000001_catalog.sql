@@ -485,6 +485,9 @@ begin
   update commerce.order_adjustments set actor_id = null where actor_id = p_user_id;
   update commerce.refunds set actor_id = null where actor_id = p_user_id;
   update commerce.refund_requests set actor_id = null where actor_id = p_user_id;
+  update commerce.returns set actor_id = null where actor_id = p_user_id;
+  update commerce.return_receipts set actor_id = null where actor_id = p_user_id;
+  update commerce.return_dispositions set actor_id = null where actor_id = p_user_id;
   return v_profile;
 end;
 $$;

@@ -66,7 +66,7 @@ for (const sqlstate of ['40P01', '40001', '55P03']) test(`${mode} 遇到 ${sqlst
     await tx`select private.process_payment_provider_event(id) from commerce.payment_provider_events where provider_event_id=${eventId}`;
     await tx`select public.retry_payment_provider_events(200)`;
     const [final] = await tx`select (select count(*)::int from commerce.payment_transactions where order_id=${order.id}::uuid and kind=${mode}) as transactions,
-      (select count(*)::int from public.inventory_movements where order_id=${order.id}::uuid and reason=${request ? 'return' : 'order'}) as movements,
+      (select count(*)::int from public.inventory_movements where order_id=${order.id}::uuid and reason=${request ? 'cancel' : 'order'}) as movements,
       (select on_hand from public.inventory_levels where variant_id=${f.variantId}::uuid limit 1) as stock`;
     expect(final).toEqual({ transactions: 1, movements: 1, stock: request ? 100 : 99 });
   });

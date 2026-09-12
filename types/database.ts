@@ -1591,6 +1591,10 @@ export type Database = {
         Args: { lease_seconds?: number; max_events?: number; worker_id: string }
         Returns: Json
       }
+      close_return: {
+        Args: { cancel?: boolean; return_id: string }
+        Returns: Json
+      }
       complete_outbox_event: {
         Args: {
           error_message?: string
@@ -1734,7 +1738,26 @@ export type Database = {
         }
         Returns: Json
       }
+      create_return: {
+        Args: {
+          fulfillment_id: string
+          idempotency_key: string
+          items: Json
+          reason?: string
+        }
+        Returns: Json
+      }
       current_customer_id: { Args: never; Returns: string }
+      dispose_return_receipt: {
+        Args: {
+          disposition: string
+          idempotency_key: string
+          note?: string
+          quantity: number
+          receipt_line_id: string
+        }
+        Returns: Json
+      }
       expire_checkout_quotes: {
         Args: { as_of?: string; max_quotes?: number }
         Returns: Json
@@ -1759,6 +1782,7 @@ export type Database = {
       }
       get_order_ledger: { Args: { order_id: string }; Returns: Json }
       get_order_pricing: { Args: { order_id: string }; Returns: Json }
+      get_order_returns: { Args: { order_id: string }; Returns: Json }
       get_payment_intent_for_customer: {
         Args: { actor_id: string; payment_intent_id: string; provider: string }
         Returns: Json
@@ -1867,6 +1891,16 @@ export type Database = {
       purge_expired_carts: {
         Args: { as_of?: string; max_carts?: number }
         Returns: number
+      }
+      receive_return: {
+        Args: {
+          idempotency_key: string
+          items: Json
+          location_id: string
+          note?: string
+          return_id: string
+        }
+        Returns: Json
       }
       refund_order: {
         Args: {

@@ -144,7 +144,7 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 退款示例：
 
 ```json
-{"order_id":"<uuid>","idempotency_key":"refund-command-id","items":[{"order_item_id":"<uuid>","quantity":1}],"restock":true,"reason":"破损"}
+{"order_id":"<uuid>","idempotency_key":"refund-command-id","items":[{"order_item_id":"<uuid>","quantity":1}],"restock":true,"reason":"取消未发货商品"}
 ```
 
 手工 `refund_order` / `refund_order_v2` 与 PayPal 使用同一组成合同：
@@ -152,7 +152,8 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 - `items` 按独立 `order_item_id` / 数量退**商品净额及对应税**。净额仍在 `refund_lines.amount`，税另列组件，不能把两者重复相加。
 - `shipping_amount` 是明确选退的**折后运费、不含税**，可单独传或与 `items` 同传；系统另退对应配送税。省略不退运费，免邮没有正运费可退。
 - `amount` 与 `items` / `shipping_amount` 互斥，保存为 `unallocated`，不猜税、运费或商品数量；三者全省略表示退当前可退余额，同样是未分配金额。
-- 金额必须是有限正 USD、至多两位小数。各净额/税分别按比例舍入并钳制剩余额度，最后一份吸收余数；总额必须大于零且不超过实收可退余额。`restock=true` 必须有商品行。
+- 金额必须是有限正 USD、至多两位小数。各净额/税分别按比例舍入并钳制剩余额度，最后一份吸收余数；总额必须大于零且不超过实收可退余额。`restock=true` 必须有商品行，且**只释放本次取消的未发货数量**。已发货部分不会因退款成功自动回库，必须使用下方 Return / Receipt / Disposition。
+- `get_order_ledger.refunds[].lines` 的 `cancelled_quantity` 是未发货取消量，`restocked_quantity` 是其中实际释放的库存量；后者不大于前者。退款恢复库存记 `cancel` 流水，不冒充实物退回。
 - `get_order_ledger.refunds[].components` 与退款请求 DTO 的 `components` 返回 `tax` / `shipping` / `unallocated`、来源 ID、金额；商品行金额 + 组件金额 = 退款总额。异步成功使用请求时的原分摊，不按最新税率或剩余请求重算。
 
 例如只退 4 USD 净运费，传 `{"order_id":"<uuid>","idempotency_key":"shipping-refund-1","shipping_amount":"4.00"}`；若原配送税为 13%，渠道实际收到的本次退款额为 4.52 USD（未发生余数调整时）。
@@ -160,6 +161,36 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 退款请求被接受不等于渠道退款成功；确认前仅预留可退额度/数量，不回库。已发出的退款即使尚无渠道 ID，也不能无确认取消或释放额度。
 PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复用同一个键。支付/退款响应 `pending_reconciliation=true` 也可能表示可重试的本地数据库故障，不能当作已完成交易。
 渠道密钥、Webhook 和 Worker 接入见 [支付与部署](../supabase/functions/README.md)。
+
+## Return / Receipt / Disposition
+
+三种事实与资金退款分开：Return 是管理员的退货授权，Receipt 是实际收货，Disposition 是验收后处置。当前每个 Return 对应**一次已 shipped/delivered 的 fulfillment**，通过 `order_item_id` 定位该次发货中的商业行；跨发货退回需多个 Return。客户自助申请/审批、退货面单、换货补发、序列号/批次与退货政策自动判定尚未实现。
+
+| RPC | 权限 | 参数 / 行为 |
+| --- | --- | --- |
+| `create_return` | admin | `fulfillment_id`、`items:[{order_item_id,quantity}]`、`idempotency_key`、可选 `reason`；创建 open 授权，不改库存/资金 |
+| `receive_return` | admin | `return_id`、明确的活跃 `location_id`、`items:[{return_line_id,quantity}]`、`idempotency_key`、可选 `note`；可分批实收，不增加可售库存 |
+| `dispose_return_receipt` | admin | `receipt_line_id`、`quantity`、`disposition:"restock"` 或 `"discard"`、`idempotency_key`、可选 `note`；每次处理一条实收行的部分或全部数量 |
+| `close_return` | admin | `return_id`、可选 `cancel`（默认 false）；关闭剩余待收量，true 仅允许取消尚无实收的授权 |
+| `get_order_returns` | 本人 / admin / service | `order_id`；发货行的可退余额、授权/实收、嵌套收货与处置 DTO |
+
+创建/收货每次接受 1–100 条输入行，只允许相应 ID/正整数 quantity，相同 ID 合并，重排/UUID 大小写不影响指纹；未知字段拒绝。reason 至多 500 字符，note 至多 2000 字符，均为客户可见文本，不应存后台秘密。幂等键 1–200 字符，分别按 fulfillment、Return、receipt line 隔离；相同参数返回同一记录（DTO 可包含后续进展），不同参数拒绝。
+
+```http
+POST /rest/v1/rpc/receive_return
+
+{"return_id":"<退货 UUID>","location_id":"<实际收货地点 UUID>","idempotency_key":"receipt-1","items":[{"return_line_id":"<授权行 UUID>","quantity":2}]}
+```
+
+收到的商品可以先待验收；`undisposed_quantity` 是实收量减去已处置量。随后分别调用 `dispose_return_receipt`，例如一件 `restock`、一件 `discard`。这不是所有仓库不可售库存的总账；received_at 是本系统记录收货的时间，不接收任意回填时刻。
+
+- 尚无按 Return 自动生成退款的 RPC。既有按商品数量退款仍**优先取消未发货部分**；不能因为创建了 Return 就假定退款会改为“仅退已发货”。若要保留未发货履约量，可另行选择纯金额退款，但它是 unallocated，不推断商品/税的归属。
+- 发货可退量 = 有效发货数量 − 所有 Return 实收量 − open Return 尚未实收的授权量。退款数量不占用/释放这个独立余额；已退款、纯金额退款或零价商品仍可依法按店铺政策处理退货。
+- 每条授权的累计实收不能超量；每条实收的累计处置不能超量。`restock` 必须有该订单的原始库存扣减事实，增加**实收地点**的可售库存并关联唯一库存流水；不参考变体现在的 track_inventory，也不自动调拨到默认仓（商城结账仍只使用默认仓）。`discard` 不改库存，没有扣减事实的商品不能凭收货新造可售库存。
+- 原始扣减覆盖的恢复总量是额外上限。退款只释放未发货取消量，实收处置只处理已发货退回量；先退款/先收货、事件重放或并发不能重复回库。退货、收货、处置从不自动调用退款，也不重算原价/税。
+- close 释放未实收授权，保留实收占用；即使尚未验收，也可关闭收货后继续处置已有实收。cancel 只允许无实收时使用。终态不可重开/再收货；新退货仍受剩余可退量限制。
+- 存在 open 授权或任何实收的 fulfillment 不可撤销；退回商品不会把原发货改为 cancelled，也不重新赋予发货额度。
+- 数量/归属/指纹与流水引用由 FK、触发器和提交时校验共同保护；事实不可删除/改写，仅审计 actor 可单向匿名化。SQLSTATE `55P03` / `40001` / `40P01` 重试整笔事务，不关闭保护。新事件 `return.open/closed/cancelled/received/disposed` 经订单审计进入现有 Outbox，消费者仍须幂等。
 
 ## 地址合同
 
@@ -199,4 +230,4 @@ PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复
 - `refund_order` / `refund_order_v2`：同步手工/测试退款，不代表真实渠道已退款；不能穿透活跃异步退款请求。
 
 金额口径：`order_items.total` 为毛额，`line_total` 为扣行折扣后的净额；`orders.discount_total` 只含商品折扣。
-免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payments.amount` 恒正，方向由 `kind` 表达。退款不等于退货收货，当前 `restock` 仍是管理员在成功退款时选择回库，尚无 Return/Receipt 模块。
+免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payments.amount` 恒正，方向由 `kind` 表达。退款不等于退货收货：退款 `restock` 仅释放未发货取消量，已发货商品由实际收货后的 disposition 驱动回库。

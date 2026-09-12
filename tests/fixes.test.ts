@@ -392,7 +392,7 @@ describe('修复：退款闭环', () => {
     expect((again.data as { message: string }).message).toContain('not refundable');
   });
 
-  test('restock=true 按原仓回补库存并记 return 流水', async () => {
+  test('restock=true 释放未发货库存并记 cancel 流水', async () => {
     const before = await stockOf('MUG-350');
     const u = await signup();
     const { data: o } = await rpc('create_order', {
@@ -409,7 +409,7 @@ describe('修复：退款闭环', () => {
 
     expect(await stockOf('MUG-350')).toBe(before);   // 下单扣2 → 退回补2
     const { data: moves } = await api(
-      `/rest/v1/inventory_movements?order_id=eq.${oid}&reason=eq.return&select=delta`, { service: true });
+      `/rest/v1/inventory_movements?order_id=eq.${oid}&reason=eq.cancel&select=delta`, { service: true });
     expect((moves as { delta: number }[])[0].delta).toBe(2);
   });
 

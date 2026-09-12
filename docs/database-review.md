@@ -35,7 +35,7 @@ R1 使用真实生产 handler / 本地 Auth / PostgREST，只模拟渠道 HTTP�
 | 已支付/活动意图快照不变 | 订单及商品行 snapshot triggers；直接商品行写入 NOWAIT 订单锁 |
 | 付款窗口不可延长 | orders.payment_expires_at / created_at trigger；意图期限绑定订单并不可改 |
 | 客户配额 | Quote + 未付款订单统一计数；原客户 advisory lock 已由独立 Customer 行锁/版本写入取代，见 ADR-016 |
-| 库存顺序与回库 | lock_order_inventory；取消/退款以原负流水为准，批量处理预锁整个集合 |
+| 库存顺序与回库 | lock_order_inventory；以原负流水为准，批量预锁整个集合。当前退款仅释放未发货取消量，实收回库另见 ADR-018 |
 | 外部退款发出不可撤销猜测 | prepare_paypal_refund + 不可清除 marker + cancel 渠道确认门槛 |
 | 外部成功资金与本地入账分离 | Provider Inbox / money movements；瞬时错误退避，商业冲突 action_required |
 | Outbox 确认归属 | 持久化租约与 token；complete 原子比较并检查未过期 |

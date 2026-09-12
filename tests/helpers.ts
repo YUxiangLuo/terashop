@@ -84,9 +84,9 @@ export async function shippingByName(name: string): Promise<string> {
 }
 
 // 库存数只能通过 service role 读（RLS 不对外）
-export async function stockOf(sku: string): Promise<number> {
+export async function stockOf(sku: string, locationId?: string): Promise<number> {
   const { data } = await api(
-    `/rest/v1/inventory_levels?select=on_hand,product_variants!inner(sku)&product_variants.sku=eq.${sku}`,
+    `/rest/v1/inventory_levels?select=on_hand,product_variants!inner(sku)&product_variants.sku=eq.${sku}${locationId ? `&location_id=eq.${locationId}` : ''}`,
     { service: true }
   );
   return (data as { on_hand: number }[])[0].on_hand;

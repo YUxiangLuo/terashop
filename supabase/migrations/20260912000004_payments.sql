@@ -11,9 +11,6 @@ declare
   v_request commerce.refund_requests;
   v_order public.orders;
   v_line record;
-  v_variant_id uuid;
-  v_location_id uuid;
-  v_on_hand integer;
   v_payment public.payments;
   v_transaction commerce.payment_transactions;
   v_refund_id uuid;
@@ -73,39 +70,8 @@ begin
         refunded_amount = oi.refunded_amount + v_line.amount
     where oi.id = v_line.order_item_id;
 
-    v_variant_id := v_line.variant_id;
-    v_location_id := null;
-    if v_request.restock_requested and v_variant_id is not null then
-      select im.location_id into v_location_id
-      from public.inventory_movements im
-      where im.order_id = v_order.id and im.variant_id = v_variant_id
-        and im.reason = 'order' and im.delta < 0
-      order by im.id limit 1;
-      if v_location_id is not null then
-        insert into public.inventory_levels (variant_id, location_id, on_hand)
-        values (v_variant_id, v_location_id, 0)
-        on conflict on constraint inventory_levels_pkey do nothing;
-        update public.inventory_levels il
-        set on_hand = il.on_hand + v_line.quantity
-        where il.variant_id = v_variant_id and il.location_id = v_location_id
-        returning il.on_hand into v_on_hand;
-        insert into public.inventory_movements (
-          variant_id, location_id, delta, on_hand_after, reason,
-          order_id, actor_id, note
-        ) values (
-          v_variant_id, v_location_id, v_line.quantity, v_on_hand, 'return',
-          v_order.id, v_request.actor_id, v_request.reason
-        );
-      end if;
-    end if;
-
-    insert into commerce.refund_lines (
-      refund_id, order_id, order_item_id, quantity, amount, restocked_quantity
-    ) values (
-      v_refund_id, v_order.id, v_line.order_item_id, v_line.quantity, v_line.amount,
-      case when v_request.restock_requested and v_location_id is not null
-           then v_line.quantity else 0 end
-    );
+    insert into commerce.refund_lines (refund_id, order_id, order_item_id, quantity, amount)
+    values (v_refund_id, v_order.id, v_line.order_item_id, v_line.quantity, v_line.amount);
   end loop;
 
   -- Item tax components were copied by the refund-line trigger; retain shipping
