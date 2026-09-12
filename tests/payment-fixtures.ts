@@ -79,7 +79,7 @@ export async function fixtureIntent(
   order: FixtureOrder, buyer: TestUser, provider: 'paypal' = 'paypal',
 ): Promise<FixtureIntent> {
   const intent = await checked<FixtureIntent>(rpc('create_payment_intent_for_customer', {
-    order_id: order.id, customer_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
+    order_id: order.id, actor_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
   }, undefined, true));
   const reference = `ORDER${crypto.randomUUID().replaceAll('-', '')}`;
   return checked<FixtureIntent>(rpc('bind_payment_intent_provider', {

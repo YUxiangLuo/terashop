@@ -62,7 +62,7 @@ describe('PayPal provider bindings and Inbox', () => {
   test('service-only、归属、单一活动意图和绑定金额检查保留；拒绝其他线上渠道', async () => {
     const order = await fixtureOrder(fixture, buyer);
     const command = {
-      order_id: order.id, customer_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
+      order_id: order.id, actor_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
     };
     expect((await rpc('create_payment_intent_for_customer', command, buyer.token)).status).toBe(403);
     expect((await rpc('create_payment_intent_for_customer', { ...command, provider: 'unsupported' }, undefined, true)).status).toBe(400);
@@ -97,7 +97,7 @@ describe('PayPal provider bindings and Inbox', () => {
   test('只有 metadata 的早到成功不自动绑定；API 绑定后 Worker 匹配原资金事实', async () => {
     const order = await fixtureOrder(fixture, buyer);
     const intent = await checked<FixtureIntent>(rpc('create_payment_intent_for_customer', {
-      order_id: order.id, customer_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
+      order_id: order.id, actor_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
     }, undefined, true));
     const orderReference = `ORDER${crypto.randomUUID()}`;
     const reference = `CAPTURE${crypto.randomUUID()}`;

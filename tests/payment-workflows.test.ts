@@ -267,10 +267,10 @@ describe('PayPal capture dispatch and cancellation', () => {
   test('prepare RPC 限制 service role 和订单归属，并串行化与取消的竞争', async () => {
     const order = await fixtureOrder(fixture, buyer);
     const intent = await fixtureIntent(order, buyer, 'paypal');
-    const body = { payment_intent_id: intent.id, customer_id: buyer.userId };
+    const body = { payment_intent_id: intent.id, actor_id: buyer.userId };
     expect((await rpc('prepare_paypal_capture', body, buyer.token)).status).toBe(403);
-    expect((await rpc('prepare_paypal_capture', { ...body, customer_id: admin.userId }, undefined, true)).status).toBe(400);
-    expect((await rpc('prepare_paypal_capture', { ...body, customer_id: null }, undefined, true)).status).toBe(400);
+    expect((await rpc('prepare_paypal_capture', { ...body, actor_id: admin.userId }, undefined, true)).status).toBe(400);
+    expect((await rpc('prepare_paypal_capture', { ...body, actor_id: null }, undefined, true)).status).toBe(400);
     const [prepared, cancelled] = await Promise.all([
       rpc('prepare_paypal_capture', body, undefined, true),
       rpc('cancel_order', { order_id: order.id }, buyer.token),
@@ -283,7 +283,7 @@ describe('PayPal capture dispatch and cancellation', () => {
     const order = await fixtureOrder(fixture, buyer, 1, false);
     const intent = await fixtureIntent(order, buyer, 'paypal');
     const before = await stockOf(fixture.sku);
-    const command = { payment_intent_id: intent.id, customer_id: buyer.userId };
+    const command = { payment_intent_id: intent.id, actor_id: buyer.userId };
     const beforeCapture = await rpc('update_order_address', {
       order_id: order.id, address: { ...TEST_ADDRESS, country: 'CA' },
     }, buyer.token);
@@ -300,9 +300,9 @@ describe('PayPal capture dispatch and cancellation', () => {
   test('捕获请求不会无限延长 Quote；过期后拒绝新 POST，但已发生资金仍被记录', async () => {
     const order = await fixtureOrder(fixture, buyer);
     const intent = await fixtureIntent(order, buyer, 'paypal');
-    await checked(rpc('prepare_paypal_capture', { payment_intent_id: intent.id, customer_id: buyer.userId }, undefined, true));
+    await checked(rpc('prepare_paypal_capture', { payment_intent_id: intent.id, actor_id: buyer.userId }, undefined, true));
     await checked(rpc('expire_checkout_quotes', { max_quotes: 500, as_of: '2100-01-01T00:00:00Z' }, undefined, true));
-    const prepared = await rpc('prepare_paypal_capture', { payment_intent_id: intent.id, customer_id: buyer.userId }, undefined, true);
+    const prepared = await rpc('prepare_paypal_capture', { payment_intent_id: intent.id, actor_id: buyer.userId }, undefined, true);
     expect(prepared.status).toBe(400);
     await withPaymentProviderMock(request => oauthResponse(request) ?? Response.json(capturedPayPalOrder(intent)), async () => {
       const response = await handlePayPalCaptureOrder(paymentRequest({ payment_intent_id: intent.id }, buyer.token));
@@ -324,7 +324,7 @@ describe('Manual payment with PayPal intents', () => {
       const order = await fixtureOrder(fixture, buyer);
       const intent = bound ? await fixtureIntent(order, buyer, provider)
         : await checked<{ status: string }>(rpc('create_payment_intent_for_customer', {
-            order_id: order.id, customer_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
+            order_id: order.id, actor_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
           }, undefined, true));
       const before = await stockOf(fixture.sku);
       const paid = await rpc('mark_order_paid', { order_id: order.id }, admin.token);

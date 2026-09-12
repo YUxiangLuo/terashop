@@ -1471,7 +1471,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.create_payment_intent_for_customer(order_id uuid, customer_id uuid, provider text, idempotency_key text, metadata jsonb DEFAULT '{}'::jsonb) RETURNS jsonb
+CREATE FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb DEFAULT '{}'::jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1482,7 +1482,7 @@ begin
   if not exists (
     select 1 from public.orders o
     where o.id = create_payment_intent_for_customer.order_id
-      and o.customer_id = create_payment_intent_for_customer.customer_id
+      and o.customer_id = private.customer_for_user(create_payment_intent_for_customer.actor_id)
   ) then
     raise exception 'payable order not found for customer';
   end if;
@@ -1491,7 +1491,7 @@ begin
     create_payment_intent_for_customer.provider,
     create_payment_intent_for_customer.idempotency_key,
     coalesce(create_payment_intent_for_customer.metadata, '{}'::jsonb)
-      || jsonb_build_object('customer_id', create_payment_intent_for_customer.customer_id)
+      || jsonb_build_object('actor_id', create_payment_intent_for_customer.actor_id)
   );
   select * into v_intent from commerce.payment_intents i
   where i.order_id = create_payment_intent_for_customer.order_id
@@ -1619,7 +1619,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.get_payment_intent_for_customer(payment_intent_id uuid, customer_id uuid, provider text) RETURNS jsonb
+CREATE FUNCTION public.get_payment_intent_for_customer(payment_intent_id uuid, actor_id uuid, provider text) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1632,7 +1632,7 @@ begin
   join public.orders o on o.id = i.order_id
   where i.id = get_payment_intent_for_customer.payment_intent_id
     and i.provider = lower(btrim(get_payment_intent_for_customer.provider))
-    and o.customer_id = get_payment_intent_for_customer.customer_id;
+    and o.customer_id = private.customer_for_user(get_payment_intent_for_customer.actor_id);
   if not found then raise exception 'payment intent not found for customer'; end if;
   return private.provider_payment_intent_json(v_intent);
 end;
@@ -1647,9 +1647,9 @@ declare
   v_privileged boolean := public.is_admin() or auth.role() = 'service_role';
 begin
   select * into v_order from public.orders o where o.id = get_payment_operations.order_id;
-  if not found or not (
-    v_order.customer_id = auth.uid() or v_privileged
-  ) then
+  if not found or (
+    v_order.customer_id = public.current_customer_id() or v_privileged
+  ) is not true then
     raise exception 'order not found';
   end if;
   return jsonb_build_object(
@@ -1831,7 +1831,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.prepare_paypal_capture(payment_intent_id uuid, customer_id uuid) RETURNS jsonb
+CREATE FUNCTION public.prepare_paypal_capture(payment_intent_id uuid, actor_id uuid) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1849,8 +1849,7 @@ begin
   select * into v_quote from commerce.checkout_quotes q
   where q.order_id = v_intent.order_id for update;
   select * into v_order from public.orders o where o.id = v_intent.order_id for update;
-  if not found or prepare_paypal_capture.customer_id is null
-     or v_order.customer_id is distinct from prepare_paypal_capture.customer_id then
+  if not found or v_order.customer_id is distinct from private.customer_for_user(prepare_paypal_capture.actor_id) then
     raise exception 'payable order not found for customer';
   end if;
   if v_order.status <> 'open' or v_order.financial_status <> 'pending' then

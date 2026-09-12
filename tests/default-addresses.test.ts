@@ -73,9 +73,8 @@ test('受控旧死锁交错：等待客户锁的 RPC 不持目标地址行，持
   const owner = await signup();
   await add(owner, true);
   const target = await add(owner);
-  const key = `tera-headless:default-address:${owner.userId}`;
   const result = await heldTransactionRace(database, async transaction => {
-    await transaction`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+    await transaction`select id from public.customers where id=${owner.customerId}::uuid for no key update`;
   }, () => rpc('set_default_address', { address_id: target.id }, owner.token), async transaction => {
     // With the old direct-PATCH trigger, this update and the waiting customer
     // lock formed an ABBA cycle. The command must not own target's tuple yet.
@@ -89,7 +88,7 @@ test('受控旧死锁交错：等待客户锁的 RPC 不持目标地址行，持
 test('地址身份不可转移；显式清除默认不影响其他默认，清除/删除当前默认可留下零个', async () => {
   const owner = await signup(); const other = await signup();
   const first = await add(owner, true); const second = await add(owner);
-  for (const body of [{ customer_id: other.userId }, { id: crypto.randomUUID() }]) {
+  for (const body of [{ customer_id: other.customerId }, { id: crypto.randomUUID() }]) {
     expect((await api(`/rest/v1/addresses?id=eq.${first.id}`, {
       token: owner.token, method: 'PATCH', body,
     })).status).toBe(403);

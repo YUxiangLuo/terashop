@@ -52,17 +52,17 @@ test('评价 INSERT 仍限制归属和商品可见性；管理员保留受权写
     service: true, method: 'POST', body: { slug: `draft-${crypto.randomUUID()}`, name: 'draft', status: 'draft' },
   }));
   for (const body of [
-    { product_id: fixture.productId, customer_id: other.userId, rating: 5, status: 'pending' },
+    { product_id: fixture.productId, customer_id: other.customerId, rating: 5, status: 'pending' },
     { product_id: draft.id, rating: 5, status: 'pending' },
   ]) {
     expect((await api('/rest/v1/product_reviews', { token: owner.token, method: 'POST', body })).status).toBe(403);
   }
   expect((await api('/rest/v1/product_reviews', {
-    method: 'POST', body: { product_id: fixture.productId, customer_id: owner.userId, rating: 5 },
+    method: 'POST', body: { product_id: fixture.productId, customer_id: owner.customerId, rating: 5 },
   })).status).toBe(401);
   const [approved] = await checked<Array<{ id: string }>>(api('/rest/v1/product_reviews', {
     token: admin.token, method: 'POST',
-    body: { product_id: fixture.productId, customer_id: owner.userId, rating: 5, status: 'approved' },
+    body: { product_id: fixture.productId, customer_id: owner.customerId, rating: 5, status: 'approved' },
   }));
   expect((await api(`/rest/v1/product_reviews?id=eq.${approved.id}`)).data).toHaveLength(1);
 });

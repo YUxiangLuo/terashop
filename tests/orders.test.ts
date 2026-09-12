@@ -61,7 +61,7 @@ describe('用户与地址', () => {
       body: { ...TEST_ADDRESS, is_default: true },
     });
     const a = (data as Record<string, unknown>[])[0];
-    expect(a.customer_id).toBe(buyer.userId);
+    expect(a.customer_id).toBe(buyer.customerId);
     expect(a.is_default).toBe(true);
   });
 
@@ -435,7 +435,7 @@ describe('RLS 权限', () => {
     const ins = await api('/rest/v1/orders', {
       token: buyer.token,
       method: 'POST',
-      body: { customer_id: buyer.userId, email: 'x@x.com', subtotal: 1, total: 1, shipping_address: {} },
+      body: { customer_id: buyer.customerId, email: 'x@x.com', subtotal: 1, total: 1, shipping_address: {} },
     });
     expect((ins.data as { code: string }).code).toBe('42501');
   });

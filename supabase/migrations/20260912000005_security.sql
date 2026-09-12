@@ -56,6 +56,13 @@ CREATE VIEW public.product_listing AS
 
 -- Transaction and audit triggers
 
+CREATE TRIGGER carts_write BEFORE UPDATE ON commerce.carts FOR EACH ROW EXECUTE FUNCTION private.guard_cart_write();
+CREATE TRIGGER cart_lines_write BEFORE INSERT OR UPDATE OR DELETE ON commerce.cart_lines FOR EACH ROW EXECUTE FUNCTION private.guard_cart_write();
+CREATE CONSTRAINT TRIGGER carts_lines_check AFTER INSERT OR UPDATE ON commerce.carts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_cart_lines();
+CREATE CONSTRAINT TRIGGER cart_lines_check AFTER INSERT OR UPDATE OR DELETE ON commerce.cart_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_cart_lines();
+CREATE TRIGGER carts_no_truncate BEFORE TRUNCATE ON commerce.carts FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
+CREATE TRIGGER cart_lines_no_truncate BEFORE TRUNCATE ON commerce.cart_lines FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
+
 CREATE TRIGGER checkout_quote_lines_immutable BEFORE DELETE OR UPDATE ON commerce.checkout_quote_lines FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
 CREATE CONSTRAINT TRIGGER checkout_quote_lines_match_header AFTER INSERT OR DELETE OR UPDATE ON commerce.checkout_quote_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_checkout_quote_totals();
 CREATE TRIGGER checkout_quote_lines_no_truncate BEFORE TRUNCATE ON commerce.checkout_quote_lines FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
@@ -120,6 +127,9 @@ CREATE TRIGGER refunds_append_only BEFORE DELETE OR UPDATE ON commerce.refunds F
 CREATE TRIGGER refunds_enqueue_outbox AFTER INSERT ON commerce.refunds FOR EACH ROW EXECUTE FUNCTION private.refund_to_outbox();
 CREATE TRIGGER refunds_no_truncate BEFORE TRUNCATE ON commerce.refunds FOR EACH STATEMENT EXECUTE FUNCTION private.protect_audit_row();
 CREATE TRIGGER refunds_validate BEFORE INSERT ON commerce.refunds FOR EACH ROW EXECUTE FUNCTION private.validate_refund_header();
+CREATE TRIGGER addresses_customer_content BEFORE INSERT OR UPDATE ON public.addresses FOR EACH ROW EXECUTE FUNCTION private.guard_customer_content();
+CREATE TRIGGER metafields_customer_content BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.guard_customer_content();
+CREATE TRIGGER carts_customer_content BEFORE INSERT ON commerce.carts FOR EACH ROW EXECUTE FUNCTION private.guard_customer_content();
 CREATE TRIGGER addresses_default_command_guard BEFORE UPDATE ON public.addresses FOR EACH ROW EXECUTE FUNCTION private.protect_address_identity_and_default();
 CREATE TRIGGER addresses_normalize_country BEFORE INSERT OR UPDATE OF country ON public.addresses FOR EACH ROW EXECUTE FUNCTION private.normalize_address_country();
 CREATE TRIGGER addresses_single_default BEFORE INSERT ON public.addresses FOR EACH ROW WHEN (new.is_default) EXECUTE FUNCTION public.enforce_single_default_address();
@@ -200,6 +210,9 @@ CREATE TRIGGER product_reviews_updated_at BEFORE UPDATE ON public.product_review
 CREATE TRIGGER product_variants_updated_at BEFORE UPDATE ON public.product_variants FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER products_updated_at BEFORE UPDATE ON public.products FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER profiles_updated_at BEFORE UPDATE ON public.profiles FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER customers_identity BEFORE UPDATE ON public.customers FOR EACH ROW EXECUTE FUNCTION private.protect_customer();
+CREATE TRIGGER customers_updated_at BEFORE UPDATE ON public.customers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER customers_no_delete BEFORE DELETE OR TRUNCATE ON public.customers FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER promotions_normalize_code BEFORE INSERT OR UPDATE OF code ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.normalize_promotion_code();
 CREATE TRIGGER promotions_updated_at BEFORE UPDATE ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER promotions_validate BEFORE INSERT OR UPDATE ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.validate_promotion_params();
@@ -214,13 +227,15 @@ CREATE TRIGGER on_auth_user_email_updated AFTER UPDATE OF email ON auth.users FO
 
 -- Row-level policies
 
-CREATE POLICY "addresses: own all" ON public.addresses USING (((auth.uid() = customer_id) OR public.is_admin()));
+CREATE POLICY "customers: read own or admin" ON public.customers FOR SELECT USING (auth_user_id = auth.uid() OR public.is_admin());
+CREATE POLICY "customers: update own or admin" ON public.customers FOR UPDATE USING ((auth_user_id = auth.uid() AND anonymized_at IS NULL) OR public.is_admin());
+CREATE POLICY "addresses: own all" ON public.addresses USING (((public.current_customer_id() = customer_id) OR public.is_admin()));
 CREATE POLICY "categories: admin write" ON public.categories USING (public.is_admin());
 CREATE POLICY "categories: public read" ON public.categories FOR SELECT USING ((is_active OR public.is_admin()));
-CREATE POLICY "discount_redemptions: read own or admin" ON public.discount_redemptions FOR SELECT USING (((auth.uid() = customer_id) OR public.is_admin()));
+CREATE POLICY "discount_redemptions: read own or admin" ON public.discount_redemptions FOR SELECT USING (((public.current_customer_id() = customer_id) OR public.is_admin()));
 CREATE POLICY "fulfillments: read own or admin" ON public.fulfillments FOR SELECT USING ((EXISTS ( SELECT 1
    FROM public.orders o
-  WHERE ((o.id = fulfillments.order_id) AND ((o.customer_id = auth.uid()) OR public.is_admin())))));
+  WHERE ((o.id = fulfillments.order_id) AND ((o.customer_id = public.current_customer_id()) OR public.is_admin())))));
 CREATE POLICY "inventory_levels: admin all" ON public.inventory_levels USING (public.is_admin());
 CREATE POLICY "inventory_movements: admin read" ON public.inventory_movements FOR SELECT USING (public.is_admin());
 CREATE POLICY "locations: admin write" ON public.locations USING (public.is_admin());
@@ -230,8 +245,8 @@ CREATE POLICY "metafield_definitions: public read" ON public.metafield_definitio
 CREATE POLICY "metafields: admin write" ON public.metafields USING (public.is_admin());
 CREATE POLICY "metafields: order owner read" ON public.metafields FOR SELECT USING (((owner_type = 'order'::text) AND (EXISTS ( SELECT 1
    FROM public.orders o
-  WHERE ((o.id = metafields.owner_id) AND (o.customer_id = auth.uid()))))));
-CREATE POLICY "metafields: scoped read" ON public.metafields FOR SELECT USING ((public.is_admin() OR (owner_type = 'shop'::text) OR ((owner_type = 'customer'::text) AND (owner_id = auth.uid())) OR ((owner_type = 'product'::text) AND (EXISTS ( SELECT 1
+  WHERE ((o.id = metafields.owner_id) AND (o.customer_id = public.current_customer_id()))))));
+CREATE POLICY "metafields: scoped read" ON public.metafields FOR SELECT USING ((public.is_admin() OR (owner_type = 'shop'::text) OR ((owner_type = 'customer'::text) AND (owner_id = public.current_customer_id())) OR ((owner_type = 'product'::text) AND (EXISTS ( SELECT 1
    FROM public.products p
   WHERE ((p.id = metafields.owner_id) AND (p.status = 'active'::text))))) OR ((owner_type = 'variant'::text) AND (EXISTS ( SELECT 1
    FROM (public.product_variants v
@@ -245,18 +260,18 @@ CREATE POLICY "metaobjects: admin write" ON public.metaobjects USING (public.is_
 CREATE POLICY "metaobjects: public read active" ON public.metaobjects FOR SELECT USING (((status = 'active'::text) OR public.is_admin()));
 CREATE POLICY "order_events: read own or admin" ON public.order_events FOR SELECT USING ((EXISTS ( SELECT 1
    FROM public.orders o
-  WHERE ((o.id = order_events.order_id) AND ((o.customer_id = auth.uid()) OR public.is_admin())))));
+  WHERE ((o.id = order_events.order_id) AND ((o.customer_id = public.current_customer_id()) OR public.is_admin())))));
 CREATE POLICY "order_items: read own or admin" ON public.order_items FOR SELECT USING ((EXISTS ( SELECT 1
    FROM public.orders o
-  WHERE ((o.id = order_items.order_id) AND ((o.customer_id = auth.uid()) OR public.is_admin())))));
+  WHERE ((o.id = order_items.order_id) AND ((o.customer_id = public.current_customer_id()) OR public.is_admin())))));
 CREATE POLICY "order_promotions: read own or admin" ON public.order_promotions FOR SELECT USING ((EXISTS ( SELECT 1
    FROM public.orders o
-  WHERE ((o.id = order_promotions.order_id) AND ((o.customer_id = auth.uid()) OR public.is_admin())))));
+  WHERE ((o.id = order_promotions.order_id) AND ((o.customer_id = public.current_customer_id()) OR public.is_admin())))));
 CREATE POLICY "orders: admin update" ON public.orders FOR UPDATE USING (public.is_admin());
-CREATE POLICY "orders: read own or admin" ON public.orders FOR SELECT USING (((auth.uid() = customer_id) OR public.is_admin()));
+CREATE POLICY "orders: read own or admin" ON public.orders FOR SELECT USING (((public.current_customer_id() = customer_id) OR public.is_admin()));
 CREATE POLICY "payments: read own or admin" ON public.payments FOR SELECT USING ((EXISTS ( SELECT 1
    FROM public.orders o
-  WHERE ((o.id = payments.order_id) AND ((o.customer_id = auth.uid()) OR public.is_admin())))));
+  WHERE ((o.id = payments.order_id) AND ((o.customer_id = public.current_customer_id()) OR public.is_admin())))));
 CREATE POLICY "product_categories: admin write" ON public.product_categories USING (public.is_admin());
 CREATE POLICY "product_categories: public read published" ON public.product_categories FOR SELECT USING ((public.is_admin() OR ((EXISTS ( SELECT 1
    FROM public.products p
@@ -277,11 +292,11 @@ CREATE POLICY "product_options: public read published" ON public.product_options
    FROM public.products p
   WHERE ((p.id = product_options.product_id) AND (p.status = 'active'::text))))));
 CREATE POLICY "product_reviews: admin all" ON public.product_reviews USING (public.is_admin());
-CREATE POLICY "product_reviews: customer insert own" ON public.product_reviews FOR INSERT WITH CHECK (((auth.uid() = customer_id) AND (status = 'pending'::text) AND (EXISTS ( SELECT 1
+CREATE POLICY "product_reviews: customer insert own" ON public.product_reviews FOR INSERT WITH CHECK (((public.current_customer_id() = customer_id) AND (status = 'pending'::text) AND (EXISTS ( SELECT 1
    FROM public.products p
   WHERE ((p.id = product_reviews.product_id) AND (p.status = 'active'::text))))));
-CREATE POLICY "product_reviews: customer update own" ON public.product_reviews FOR UPDATE USING ((auth.uid() = customer_id));
-CREATE POLICY "product_reviews: public read approved" ON public.product_reviews FOR SELECT USING ((public.is_admin() OR (auth.uid() = customer_id) OR ((status = 'approved'::text) AND (EXISTS ( SELECT 1
+CREATE POLICY "product_reviews: customer update own" ON public.product_reviews FOR UPDATE USING ((public.current_customer_id() = customer_id));
+CREATE POLICY "product_reviews: public read approved" ON public.product_reviews FOR SELECT USING ((public.is_admin() OR (public.current_customer_id() = customer_id) OR ((status = 'approved'::text) AND (EXISTS ( SELECT 1
    FROM public.products p
   WHERE ((p.id = product_reviews.product_id) AND (p.status = 'active'::text)))))));
 CREATE POLICY "product_variants: admin write" ON public.product_variants USING (public.is_admin());
@@ -291,7 +306,6 @@ CREATE POLICY "product_variants: public read published" ON public.product_varian
 CREATE POLICY "products: admin write" ON public.products USING (public.is_admin());
 CREATE POLICY "products: public read active" ON public.products FOR SELECT USING (((status = 'active'::text) OR public.is_admin()));
 CREATE POLICY "profiles: read own or admin" ON public.profiles FOR SELECT USING (((auth.uid() = id) OR public.is_admin()));
-CREATE POLICY "profiles: update own" ON public.profiles FOR UPDATE USING ((auth.uid() = id));
 CREATE POLICY "promotion_targets: admin write" ON public.promotion_targets USING (public.is_admin());
 CREATE POLICY "promotion_targets: public read" ON public.promotion_targets FOR SELECT USING (true);
 CREATE POLICY "promotions: admin write" ON public.promotions USING (public.is_admin());
@@ -431,7 +445,7 @@ REVOKE ALL ON FUNCTION public.create_order(items jsonb, address jsonb, address_i
 REVOKE ALL ON FUNCTION public.create_order_from_quote(quote_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_order_v2(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, customer_id uuid, provider text, idempotency_key text, metadata jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_refund_request(order_id uuid, actor_id uuid, provider text, idempotency_key text, items jsonb, amount numeric, reason text, restock boolean, metadata jsonb, shipping_amount numeric) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.enforce_single_default_address() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.expire_unpaid_orders(max_orders integer, as_of timestamp with time zone) FROM PUBLIC;
@@ -441,7 +455,7 @@ REVOKE ALL ON FUNCTION public.get_inventory_availability(variant_id uuid, locati
 REVOKE ALL ON FUNCTION public.get_order_checkout_quote(order_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.get_order_fulfillment_balance(order_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.get_order_ledger(order_id uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.get_payment_intent_for_customer(payment_intent_id uuid, customer_id uuid, provider text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.get_payment_intent_for_customer(payment_intent_id uuid, actor_id uuid, provider text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.get_payment_operations(order_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.handle_new_user() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.handle_user_email_change() FROM PUBLIC;
@@ -451,7 +465,7 @@ REVOKE ALL ON FUNCTION public.mark_order_paid(order_id uuid, provider text, prov
 REVOKE ALL ON FUNCTION public.moderate_review(review_id uuid, status text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.normalize_promotion_code() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.prepare_paypal_refund(refund_request_id uuid, actor_id uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.prepare_paypal_capture(payment_intent_id uuid, customer_id uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.prepare_paypal_capture(payment_intent_id uuid, actor_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.price_checkout(items jsonb, address jsonb, shipping_method_id uuid, discount_code text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.refund_order(order_id uuid, items jsonb, amount numeric, reason text, restock boolean, provider text, shipping_amount numeric) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.refund_order_v2(order_id uuid, idempotency_key text, items jsonb, amount numeric, reason text, restock boolean, provider text, shipping_amount numeric) FROM PUBLIC;
@@ -494,7 +508,7 @@ GRANT ALL ON FUNCTION public.create_order(items jsonb, address jsonb, address_id
 GRANT ALL ON FUNCTION public.create_order_from_quote(quote_id uuid) TO authenticated;
 GRANT ALL ON FUNCTION public.create_order_v2(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) TO authenticated;
 GRANT ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb) TO service_role;
-GRANT ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, customer_id uuid, provider text, idempotency_key text, metadata jsonb) TO service_role;
+GRANT ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb) TO service_role;
 GRANT ALL ON FUNCTION public.create_refund_request(order_id uuid, actor_id uuid, provider text, idempotency_key text, items jsonb, amount numeric, reason text, restock boolean, metadata jsonb, shipping_amount numeric) TO service_role;
 GRANT EXECUTE ON FUNCTION public.expire_unpaid_orders(max_orders integer, as_of timestamp with time zone) TO service_role;
 GRANT ALL ON FUNCTION public.expire_checkout_quotes(max_quotes integer, as_of timestamp with time zone) TO service_role;
@@ -503,7 +517,7 @@ GRANT ALL ON FUNCTION public.get_inventory_availability(variant_id uuid, locatio
 GRANT ALL ON FUNCTION public.get_order_checkout_quote(order_id uuid) TO authenticated;
 GRANT ALL ON FUNCTION public.get_order_fulfillment_balance(order_id uuid) TO authenticated, service_role;
 GRANT ALL ON FUNCTION public.get_order_ledger(order_id uuid) TO service_role, authenticated;
-GRANT ALL ON FUNCTION public.get_payment_intent_for_customer(payment_intent_id uuid, customer_id uuid, provider text) TO service_role;
+GRANT ALL ON FUNCTION public.get_payment_intent_for_customer(payment_intent_id uuid, actor_id uuid, provider text) TO service_role;
 GRANT ALL ON FUNCTION public.get_payment_operations(order_id uuid) TO authenticated, service_role;
 GRANT ALL ON FUNCTION public.handle_new_user() TO service_role;
 GRANT ALL ON FUNCTION public.handle_user_email_change() TO service_role;
@@ -514,7 +528,7 @@ GRANT ALL ON FUNCTION public.mark_order_paid(order_id uuid, provider text, provi
 GRANT ALL ON FUNCTION public.moderate_review(review_id uuid, status text) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.normalize_promotion_code() TO service_role;
 GRANT EXECUTE ON FUNCTION public.prepare_paypal_refund(refund_request_id uuid, actor_id uuid) TO service_role;
-GRANT ALL ON FUNCTION public.prepare_paypal_capture(payment_intent_id uuid, customer_id uuid) TO service_role;
+GRANT ALL ON FUNCTION public.prepare_paypal_capture(payment_intent_id uuid, actor_id uuid) TO service_role;
 GRANT ALL ON FUNCTION public.price_checkout(items jsonb, address jsonb, shipping_method_id uuid, discount_code text) TO service_role, anon, authenticated;
 GRANT ALL ON FUNCTION public.refund_order(order_id uuid, items jsonb, amount numeric, reason text, restock boolean, provider text, shipping_amount numeric) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.refund_order_v2(order_id uuid, idempotency_key text, items jsonb, amount numeric, reason text, restock boolean, provider text, shipping_amount numeric) TO authenticated;
@@ -534,7 +548,23 @@ GRANT INSERT, UPDATE, DELETE ON TABLE public.categories, public.locations, publi
 GRANT INSERT, DELETE ON TABLE public.addresses, public.product_reviews TO authenticated;
 GRANT SELECT (id, order_number, customer_id, email, status, financial_status, fulfillment_status, currency, subtotal, discount_total, shipping_total, tax_total, total, tax_context, shipping_address, billing_address, shipping_method_id, shipping_method_name, discount_code, customer_note, cancel_reason, cancelled_at, paid_at, payment_expires_at, completed_at, created_at, updated_at) ON TABLE public.orders TO anon, authenticated;
 GRANT UPDATE (admin_note) ON TABLE public.orders TO authenticated;
-GRANT UPDATE (full_name, phone) ON TABLE public.profiles TO authenticated;
+REVOKE ALL ON FUNCTION private.customer_for_user(uuid), private.require_customer(), private.protect_customer(), private.anonymize_customer(uuid),
+  private.lock_customer_content(uuid,boolean), private.guard_customer_content() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.current_customer_id(), public.create_customer(text,text,text), public.anonymize_customer(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.current_customer_id() TO anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION private.cart_json(commerce.carts), private.access_cart(uuid,text), private.assert_cart_capacity(uuid),
+  private.guard_cart_write(), private.assert_cart_lines() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.create_cart(text,integer), public.get_cart(uuid,text), public.list_carts(),
+  public.update_cart(uuid,integer,jsonb,jsonb,uuid,text,text,text), public.claim_cart(uuid,integer,text),
+  public.abandon_cart(uuid,integer,text), public.preview_cart(uuid,text), public.checkout_cart(uuid,integer),
+  public.purge_expired_carts(integer,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_cart(text,integer), public.get_cart(uuid,text),
+  public.update_cart(uuid,integer,jsonb,jsonb,uuid,text,text,text), public.abandon_cart(uuid,integer,text), public.preview_cart(uuid,text) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.list_carts(), public.claim_cart(uuid,integer,text), public.checkout_cart(uuid,integer) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.purge_expired_carts(integer,timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.create_customer(text,text,text), public.anonymize_customer(uuid) TO authenticated, service_role;
+GRANT SELECT ON public.customers TO authenticated, service_role;
+GRANT UPDATE (email, full_name, phone) ON public.customers TO authenticated, service_role;
 GRANT UPDATE (rating, title, body) ON TABLE public.product_reviews TO authenticated;
 GRANT UPDATE (label, recipient_name, phone, country, region, city, line1, line2, postal_code) ON TABLE public.addresses TO authenticated;
 GRANT SELECT (id, order_id, provider, kind, status, amount, currency, provider_ref, created_at, updated_at) ON TABLE public.payments TO anon, authenticated;

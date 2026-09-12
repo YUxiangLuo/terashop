@@ -47,7 +47,7 @@ export async function handlePayPalCreateOrder(request: Request): Promise<Respons
     const idempotencyKey = requireIdempotencyKey(body.idempotency_key);
     const local = await serviceRpc<LocalPayPalIntent>('create_payment_intent_for_customer', {
       order_id: orderId,
-      customer_id: user.id,
+      actor_id: user.id,
       provider: 'paypal',
       idempotency_key: idempotencyKey,
       metadata: { edge_function: 'paypal-create-order' },

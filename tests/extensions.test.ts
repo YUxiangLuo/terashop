@@ -68,23 +68,23 @@ describe('Metafields', () => {
     await api('/rest/v1/metafields', {
       token: admin.token,
       method: 'POST',
-      body: { owner_type: 'customer', owner_id: userA.userId, namespace: 'custom', key: 'vip_level', type: 'number', value: 3 },
+      body: { owner_type: 'customer', owner_id: userA.customerId, namespace: 'custom', key: 'vip_level', type: 'number', value: 3 },
     });
 
     const asA = await api(
-      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${userA.userId}&select=value`,
+      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${userA.customerId}&select=value`,
       { token: userA.token }
     );
     expect((asA.data as { value: number }[])[0].value).toBe(3);
 
     const asB = await api(
-      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${userA.userId}&select=value`,
+      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${userA.customerId}&select=value`,
       { token: userB.token }
     );
     expect(asB.data).toEqual([]);
 
     const anon = await api(
-      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${userA.userId}&select=value`
+      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${userA.customerId}&select=value`
     );
     expect(anon.data).toEqual([]);
   });
@@ -114,7 +114,7 @@ describe('Metafields', () => {
     const { data } = await api('/rest/v1/metafields', {
       token: userA.token,
       method: 'POST',
-      body: { owner_type: 'customer', owner_id: userA.userId, namespace: 'x', key: 'y', type: 'text', value: 'z' },
+      body: { owner_type: 'customer', owner_id: userA.customerId, namespace: 'x', key: 'y', type: 'text', value: 'z' },
     });
     expect((data as { code: string }).code).toBe('42501');
   });

@@ -3,6 +3,93 @@
 begin;
 set local check_function_bodies = false;
 
+CREATE FUNCTION private.require_customer() RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_id uuid;
+begin
+  if auth.uid() is null then raise exception 'authentication required'; end if;
+  select id into v_id from public.customers where auth_user_id = auth.uid() and anonymized_at is null for no key update;
+  if v_id is null then raise exception 'active customer required'; end if;
+  return v_id;
+end;
+$$;
+
+CREATE FUNCTION private.lock_customer_content(p_id uuid, p_child_locked boolean DEFAULT false) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  -- INSERT/commands lock parent first. UPDATE may already own a child tuple:
+  -- fail fast rather than invert erasure's customer -> content lock order.
+  if p_child_locked then
+    perform 1 from public.customers where id = p_id and anonymized_at is null for no key update nowait;
+  else
+    perform 1 from public.customers where id = p_id and anonymized_at is null for no key update;
+  end if;
+  if not found then raise exception 'active customer required'; end if;
+  update public.customers set updated_at = now() where id = p_id;
+end;
+$$;
+
+CREATE FUNCTION private.guard_customer_content() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_row jsonb := to_jsonb(new); v_customer uuid;
+begin
+  if tg_table_name = 'metafields' then
+    if v_row ->> 'owner_type' <> 'customer' then return new; end if;
+    v_customer := (v_row ->> 'owner_id')::uuid;
+  else v_customer := (v_row ->> 'customer_id')::uuid; end if;
+  if v_customer is not null then perform private.lock_customer_content(v_customer, tg_op = 'UPDATE'); end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.protect_customer() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if (new.id, new.created_at) is distinct from (old.id, old.created_at)
+    or (new.auth_user_id is distinct from old.auth_user_id and not (
+      old.auth_user_id is not null and new.auth_user_id is null
+      and not exists (select 1 from auth.users where id = old.auth_user_id)
+    )) then raise exception 'customer identity and account link are immutable'; end if;
+  if old.anonymized_at is not null and (to_jsonb(new) - array['updated_at','auth_user_id'])
+    is distinct from (to_jsonb(old) - array['updated_at','auth_user_id']) then
+    raise exception 'anonymized customer cannot be restored';
+  end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION public.create_customer(email text DEFAULT NULL, full_name text DEFAULT '', phone text DEFAULT NULL) RETURNS public.customers
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_customer public.customers;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then raise exception 'admin only'; end if;
+  insert into public.customers(email, full_name, phone) values (nullif(btrim(email), ''), full_name, phone) returning * into v_customer;
+  return v_customer;
+end;
+$$;
+
+CREATE FUNCTION private.anonymize_customer(p_id uuid) RETURNS public.customers
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_customer public.customers;
+begin
+  update public.customers set email = null, full_name = '', phone = null, anonymized_at = coalesce(anonymized_at, now())
+  where id = p_id returning * into v_customer;
+  if not found then raise exception 'customer not found'; end if;
+  delete from commerce.carts where customer_id = p_id;
+  delete from public.addresses where customer_id = p_id;
+  delete from public.metafields where owner_type = 'customer' and owner_id = p_id;
+  return v_customer;
+end;
+$$;
+
+CREATE FUNCTION public.anonymize_customer(customer_id uuid) RETURNS public.customers
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then raise exception 'admin only'; end if;
+  return private.anonymize_customer(customer_id);
+end;
+$$;
+
 -- Child ownership is immutable. This also keeps the deferred validator's routing stable.
 CREATE FUNCTION private.catalog_product_id(p_table text, p_row jsonb) RETURNS uuid
     LANGUAGE sql STABLE SECURITY DEFINER
@@ -186,7 +273,7 @@ begin
         raise exception 'metafield owner category not found: %', new.owner_id;
       end if;
     when 'customer' then
-      if not exists (select 1 from public.profiles p where p.id = new.owner_id) then
+      if not exists (select 1 from public.customers c where c.id = new.owner_id) then
         raise exception 'metafield owner customer not found: %', new.owner_id;
       end if;
     when 'order' then
@@ -382,17 +469,17 @@ CREATE FUNCTION public.anonymize_user(p_user_id uuid) RETURNS public.profiles
     AS $$
 declare
   v_profile public.profiles;
+  v_customer_id uuid;
 begin
   if not public.is_admin() then raise exception 'admin only'; end if;
+  select id into v_customer_id from public.customers where auth_user_id = p_user_id;
+  if v_customer_id is not null then perform private.anonymize_customer(v_customer_id); end if;
   update public.profiles p
-  set email = '', full_name = '', phone = null
+  set email = ''
   where p.id = p_user_id
   returning * into v_profile;
   if not found then raise exception 'user not found'; end if;
 
-  delete from public.addresses a where a.customer_id = p_user_id;
-  delete from public.metafields m
-  where m.owner_type = 'customer' and m.owner_id = p_user_id;
   update public.inventory_movements set actor_id = null where actor_id = p_user_id;
   update public.order_events set actor_id = null where actor_id = p_user_id;
   update commerce.order_adjustments set actor_id = null where actor_id = p_user_id;
@@ -423,9 +510,7 @@ CREATE FUNCTION public.enforce_single_default_address() RETURNS trigger
 declare
   v_previous text := current_setting('commerce.default_address_customer', true);
 begin
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended('tera-headless:default-address:' || new.customer_id::text, 0)
-  );
+  -- addresses_customer_content acquired the customer row before this INSERT.
   perform set_config('commerce.default_address_customer', new.customer_id::text, true);
   update public.addresses set is_default = false
   where customer_id = new.customer_id and id <> new.id and is_default;
@@ -439,12 +524,9 @@ CREATE FUNCTION public.handle_new_user() RETURNS trigger
     SET search_path TO ''
     AS $$
 begin
-  insert into public.profiles (id, email, full_name)
-  values (
-    new.id,
-    coalesce(new.email, ''),
-    coalesce(new.raw_user_meta_data ->> 'full_name', '')
-  );
+  insert into public.profiles (id, email) values (new.id, coalesce(new.email, ''));
+  insert into public.customers (auth_user_id, email, full_name)
+  values (new.id, nullif(new.email, ''), left(coalesce(new.raw_user_meta_data ->> 'full_name', ''), 200));
   return new;
 end;
 $$;
@@ -454,7 +536,10 @@ CREATE FUNCTION public.handle_user_email_change() RETURNS trigger
     SET search_path TO ''
     AS $$
 begin
-  update public.profiles set email = coalesce(new.email, '') where id = new.id;
+  -- Account email follows Auth; customer contact email is independent. Never
+  -- attach an existing customer by email or restore erased contact information.
+  update public.profiles set email = coalesce(new.email, '') where id = new.id
+    and not exists (select 1 from public.customers where auth_user_id = new.id and anonymized_at is not null);
   return new;
 end;
 $$;
@@ -521,14 +606,12 @@ begin
   -- after the customer lock, since a concurrent DELETE can still remove it.
   select a.customer_id into v_customer_id from public.addresses a
   where a.id = set_default_address.address_id;
-  if not found or not (
-    v_customer_id = auth.uid() or public.is_admin() or auth.role() = 'service_role'
-  ) or (auth.uid() is null and auth.role() is distinct from 'service_role') then
+  if not found or (
+    v_customer_id = public.current_customer_id() or public.is_admin() or auth.role() = 'service_role'
+  ) is not true or (auth.uid() is null and auth.role() is distinct from 'service_role') then
     raise exception 'address not found';
   end if;
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended('tera-headless:default-address:' || v_customer_id::text, 0)
-  );
+  perform private.lock_customer_content(v_customer_id);
   select * into v_address from public.addresses a
   where a.id = set_default_address.address_id and a.customer_id = v_customer_id for update;
   if not found then raise exception 'address not found'; end if;

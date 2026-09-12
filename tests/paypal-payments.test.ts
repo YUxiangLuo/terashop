@@ -145,7 +145,7 @@ async function createPayPalOrder(quantity: number): Promise<CreatedOrder> {
   });
   const intent = await rpc('create_payment_intent_for_customer', {
     order_id: orderId,
-    customer_id: buyer.userId,
+    actor_id: buyer.userId,
     provider: 'paypal',
     idempotency_key: `paypal-intent-${crypto.randomUUID()}`,
     metadata: { edge: true },
@@ -219,7 +219,7 @@ describe('PayPal Orders v2 与 Provider Inbox', () => {
 
     const denied = await rpc('get_payment_intent_for_customer', {
       payment_intent_id: created.intent.id,
-      customer_id: buyer.userId,
+      actor_id: buyer.userId,
       provider: 'paypal',
     }, buyer.token);
     expect(denied.status).toBe(403);
@@ -334,7 +334,7 @@ describe('PayPal Orders v2 与 Provider Inbox', () => {
     expect(declined.data).toMatchObject({ status: 'processed', outcome: 'failed' });
     const replacement = await rpc('create_payment_intent_for_customer', {
       order_id: created.id,
-      customer_id: buyer.userId,
+      actor_id: buyer.userId,
       provider: 'paypal',
       idempotency_key: `paypal-retry-${crypto.randomUUID()}`,
     }, undefined, true);

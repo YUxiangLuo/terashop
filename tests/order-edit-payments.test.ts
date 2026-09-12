@@ -29,7 +29,7 @@ for (const [provider, bound] of [['paypal', false], ['paypal', true]] as const) 
     const order = await fixtureOrder(fixture, buyer, 1, false);
     if (bound) await fixtureIntent(order, buyer, provider);
     else await checked(rpc('create_payment_intent_for_customer', {
-      order_id: order.id, customer_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
+      order_id: order.id, actor_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
     }, undefined, true));
     for (const token of [buyer.token, admin.token]) {
       const result = await rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, token);
@@ -53,7 +53,7 @@ test('无意图时仍可改价；V2 兼容订单创建意图后也受同样约�
   }, buyer.token));
   expect(changed.total).toBe(10);
   const intent = await checked<{ amount: number }>(rpc('create_payment_intent_for_customer', {
-    order_id: order.id, customer_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
+    order_id: order.id, actor_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
   }, undefined, true));
   expect(intent.amount).toBe(10);
   expect((await rpc('update_order_address', { order_id: order.id, address: TEST_ADDRESS }, buyer.token)).status).toBe(400);
@@ -102,7 +102,7 @@ for (const first of ['intent', 'edit']) {
       await transaction`select set_config('request.jwt.claims', ${claims}, true)`;
       if (first === 'intent') {
         await transaction`select public.create_payment_intent_for_customer(
-          order_id => ${order.id}::uuid, customer_id => ${buyer.userId}::uuid,
+          order_id => ${order.id}::uuid, actor_id => ${buyer.userId}::uuid,
           provider => 'paypal', idempotency_key => ${key})`;
       } else {
         await transaction`select public.update_order_address(
@@ -111,7 +111,7 @@ for (const first of ['intent', 'edit']) {
     }, () => first === 'intent'
       ? rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, buyer.token)
       : rpc('create_payment_intent_for_customer', {
-          order_id: order.id, customer_id: buyer.userId, provider: 'paypal', idempotency_key: key,
+          order_id: order.id, actor_id: buyer.userId, provider: 'paypal', idempotency_key: key,
         }, undefined, true));
     expect(result.status).toBe(first === 'intent' ? 400 : 200);
     const [row] = await database`

@@ -99,7 +99,7 @@ test('通用地址行可经地址簿创建和编辑快照，电话/行政区/城
 test('数据库拒绝非 USD 订单和支付，不能只靠 Edge 校验', async () => {
   const invalid = await api('/rest/v1/orders', {
     service: true, method: 'POST', body: {
-      customer_id: buyer.userId, email: buyer.email, currency: 'EUR',
+      customer_id: buyer.customerId, email: buyer.email, currency: 'EUR',
       subtotal: 1, total: 1, shipping_address: TEST_ADDRESS,
     },
   });

@@ -31,7 +31,7 @@ export async function handlePayPalCaptureOrder(request: Request): Promise<Respon
     const paymentIntentId = requireUuid(body.payment_intent_id, 'payment_intent_id');
     const local = await serviceRpc<LocalPayPalIntent>('get_payment_intent_for_customer', {
       payment_intent_id: paymentIntentId,
-      customer_id: user.id,
+      actor_id: user.id,
       provider: 'paypal',
     });
     if (!local.provider_reference) {
@@ -66,7 +66,7 @@ export async function handlePayPalCaptureOrder(request: Request): Promise<Respon
       // and retries use the same provider idempotency key instead of guessing failure.
       await serviceRpc('prepare_paypal_capture', {
         payment_intent_id: local.id,
-        customer_id: user.id,
+        actor_id: user.id,
       });
       order = await payPalRequest<PayPalOrder>(
         `/v2/checkout/orders/${encodeURIComponent(local.provider_reference)}/capture`,

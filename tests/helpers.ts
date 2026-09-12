@@ -44,11 +44,11 @@ export const rpc = (name: string, body: unknown, token?: string, service = false
 export interface TestUser {
   token: string;
   userId: string;
+  customerId: string;
   email: string;
 }
 
-export async function signup(): Promise<TestUser> {
-  const email = `t_${crypto.randomUUID()}@test.com`;
+export async function signup(email = `t_${crypto.randomUUID()}@test.com`): Promise<TestUser> {
   const res = await fetch(`${API}/auth/v1/signup`, {
     method: 'POST',
     headers: { apikey: ANON_KEY, 'Content-Type': 'application/json' },
@@ -56,7 +56,9 @@ export async function signup(): Promise<TestUser> {
   });
   const data = await res.json();
   if (!data.access_token) throw new Error(`signup failed: ${JSON.stringify(data)}`);
-  return { token: data.access_token, userId: data.user.id, email };
+  const customer = await rpc('current_customer_id', {}, data.access_token);
+  if (customer.status !== 200 || typeof customer.data !== 'string' || customer.data === data.user.id) throw new Error('signup did not create an independent customer');
+  return { token: data.access_token, userId: data.user.id, customerId: customer.data, email };
 }
 
 export async function makeAdmin(userId: string) {

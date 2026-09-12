@@ -74,7 +74,7 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 ## ADR-009：支付信任边界与 Outbox
 
 支付创建/捕获和 Worker RPC 仅授予 service role，浏览器不得持有该凭据。
-客户/管理员 Edge 入口通过 Auth `/user` 验证身份；数据库最终检查归属/管理员。
+客户/管理员 Edge 入口通过 Auth `/user` 验证身份；数据库最终检查归属/管理员。创建/读取意图与 Capture 准备 RPC 接收 `actor_id`（已验证的 Auth UUID），由数据库映射活跃 Customer，不能把客户 UUID 或请求体中的身份当作认证。
 PayPal 通过 OAuth2 调官方 postback API 验证 transmission headers；验签后才能入箱。
 库存消费、订单状态、交易、审计和 Outbox 在同一事务提交；同一订单最多一个活跃 PaymentIntent。
 PayPal Capture declined 后终结当前意图并允许新建 Order。客户端 PaymentIntent 幂等键按 `(order_id, provider, idempotency_key)` 隔离；渠道仍使用本地意图 UUID，不直接复用客户提供的键。
@@ -89,7 +89,7 @@ Quote 或即时订单到期仍可释放库存并取消订单，不无限延长 h
 ## ADR-010：Quote 的价格与预占边界
 
 Quote 不提前占用促销 usage；转单时按固定锁顺序锁库存与有限促销，再次计价，只有完整 pricing hash 一致才创建订单，否则重新报价。
-Quote 默认 15 分钟、最长 30 分钟。三个客户建单/报价入口共享每次最多 50 行/100 件、每客户最多 5 个活跃 checkout（未转单 Quote + 未过期未付款订单）的限制；客户级 advisory lock 串行化配额检查，转单/幂等重试不重复占名额。账号/IP 级滥用防护仍需 Edge 限流。
+Quote 默认 15 分钟、最长 30 分钟。三个客户建单/报价入口共享每次最多 50 行/100 件、每客户最多 5 个活跃 checkout（未转单 Quote + 未过期未付款订单）的限制；客户行 `NO KEY UPDATE` 锁和真实版本写入串行化配额检查，转单/幂等重试不重复占名额。账号/IP 级滥用防护仍需 Edge 限流。
 支付成功消费预占，Worker 处理超时订单；Quote 进入 completed/cancelled/expired 时清除临时地址和备注，长期地址/备注快照仅保留在订单。商业行属性仍随不可变的报价/订单明细保留，不属于该临时 PII 清理范围。
 
 ## ADR-011：渠道事件、外部资金与异步退款
@@ -120,7 +120,7 @@ PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard
 
 收货地址使用 `recipient_name`、`line1`、`line2`、`city`、`region`、`postal_code`、`country`、`phone`；仅姓名、第一地址行和国家在订单中必填，其余字段按地区/渠道需要填写。地址簿与直接地址快照使用同一解析入口，不默认为 CN 或 US。
 普通客户只能创建 pending 评价，管理员审核后公开；作者修改内容自动回落待审，管理员受权写入不受客户 policy 限制。
-默认地址命令先取客户 advisory lock，再锁目标地址并清理旧默认；创建地址时传 `is_default=true` 也遵守该锁顺序。
+默认地址命令先锁活跃 Customer 行，再锁目标地址并清理旧默认；所有新建地址都先取客户锁，`is_default=true` 沿用该顺序。地址/客户 metafield 内容修改与匿名化串行化；已持子行的 UPDATE 用 NOWAIT，竞争时整笔事务重试，不能在擦除后补入旧客户 PII。
 客户端仅可 PATCH 地址内容，身份/归属不可变，既有默认值切换必须走 `set_default_address`，service-role 表写入也不能绕过。
 唯一索引保证每客户最多一个默认地址；`make_default=false` 或删除允许留下零个，不自动另选。
 owner 权限的 `product_listing` 必须显式过滤停用分类；Metaobject definition 停用是否隐藏子对象仍待产品确认。
@@ -138,7 +138,7 @@ owner 权限的 `product_listing` 必须显式过滤停用分类；Metaobject de
 `attributes` 是受大小限制的文本对象，与目录规格 `options` 分开；它不是价格、税率或业务授权。`line_key = SHA-256(variant UUID + ':' + canonical JSON attributes)`，仅相同变体/属性合并数量；所有价格/报价/建单入口共用规范化，未知输入字段与伪造 key 拒绝。
 Quote 行有独立 UUID，转单沿用为订单行 UUID；数据库生成 `line_key` 并以 `(quote_id/order_id, line_key)` 保证唯一。无变体的受信订单行以自身 UUID 为 key 的身份源，客户结账仍必须指定变体。支付保护涵盖属性及 key 的来源字段；不得在 BEFORE trigger 中比较尚未重算的生成列。
 库存需求、预占和扣减始终按 `(variant_id, location_id)` 汇总；履约/退款仍按订单行 UUID 独立处理。报价消费逐行核对 ID、属性与完整商业快照，不能仅验证相同 SKU 的数量总和。
-稳定 key 不等于稳定金额：数量、价格、促销等变化仍参加请求/报价 hash。商业行属性会长期保留，不替代数据保留策略；持久 Cart、收费配置、购买计划、套装及退货物流尚未实现。
+稳定 key 不等于稳定金额：数量、价格、促销等变化仍参加请求/报价 hash。商业行属性会长期保留，不替代数据保留策略；Cart 使用相同商业 key，但不是交易快照；收费配置、购买计划、套装及退货物流尚未实现。
 
 ## ADR-015：定价事实与退款组成
 
@@ -149,3 +149,21 @@ Quote 保存受校验且参与 pricing hash 的报价 JSON；转单用商业行 
 按数量退款的商品净额保留在现有退款行中，对应税自动生成组件；配送净额需显式选择，并退对应配送税。税/运费组件引用原订单事实，不参考当前目录或税配置。纯金额/剩余金额退款标记 `unallocated`，不猜商品数量或税/配送归属。
 手工和异步请求共用退款计划：各组件按比例舍入、钳制余额，最后一份吸收余数；预留计入数量、净额、税和配送容量。请求 INSERT 持父订单锁并真实写行版本，数据库检查 Capture 已退款和活跃预留总额，包括受信写入与旧快照。失败/取消释放整套预留，渠道成功将原请求分摊固化，逆序完成不重新计价。
 退款行净额 + 税/配送/未分配组件 = 退款头 = 资金退款；完整组成在提交时校验，组件 append-only。零总额不是资金退款，不通过虚构零金额支付实现收货/回库。Refund 仍不等于 Return/Receipt，税明细也不是法定税务发票或合规认证。
+
+## ADR-016：商业客户不等于登录账户
+
+Customer 使用独立 UUID；可选唯一 Auth 关联只代表登录归属，联系邮箱非唯一且不参与合并/授权。注册总是新建客户，后台可创建无账号客户；当前不提供客户合并、Auth 重关联或游客下单。订单/Quote/地址/评价/促销用量/客户扩展引用 Customer；角色与审计 actor 仍引用 Auth profile。
+
+Auth 删除解除关联而不级联删除商业记录。同邮箱新账号不能自动恢复旧历史，所有可空客户比较必须失败关闭。匿名化清客户联系信息、地址/客户扩展及 Cart，禁止恢复这些自有内容；不删除交易快照/资金、评价正文，也不替代 Auth 删除、会话撤销或法定数据保留流程。
+
+客户行锁统一 Cart、配额、地址和匿名化的串行顺序；内容写入产生真实行版本以拒绝旧快照。子行 UPDATE 使用 NOWAIT，默认地址命令先锁客户再锁地址，不并存另一套地址 advisory mutex。
+
+## ADR-017：Cart 意向与 Quote 承诺分离
+
+Cart 可以为空，只保存商业行与收货/配送/优惠选择，不存金额、不预占库存、不延长订单付款期限。完整替换命令有版本检查，最近一次相同规范化请求可重放；冲突返回 409，不隐式合并/覆盖。50 行/100 件和每客户 5 个活跃 Cart 限额独立于既有 checkout 配额。
+
+游客持 256 位随机、固定期限的单 Cart capability；库内仅存哈希，创建仅返回一次明文。它不是匿名 Auth 账号或支付凭据。登录后必须显式认领，不合并其他 Cart；客户归属与 token 二选一，认领清 token 后旧访客不再有权访问。默认七天、最长三十天，不因访问续期；到期立即拒绝，限量 SKIP LOCKED Worker 物理删除。
+
+转 Quote 必须登录并拥有 Cart，原子沿用商业 key 创建当前报价/预占，再将 Cart 标记 converted；失败不改变 Cart。Quote 仍独立管理价格哈希、库存、期限与资金，转单沿用 Quote 行 UUID，而非 Cart 行 UUID。终态 Cart 不可重开，清理 Cart 不取消 Quote、订单或资金事实。
+
+Cart/行表与凭据不直接授权任何 API 角色，RPC 使用显式 DTO。匿名批量创建/预览仍需覆盖直连 RPC 的网关限流；期限与单对象上限不是防滥用方案。凭据传递/日志、XSS/CSRF、敏感文本和历史快照的保留政策必须单独落地，不声称已完成隐私合规或生产性能验证。

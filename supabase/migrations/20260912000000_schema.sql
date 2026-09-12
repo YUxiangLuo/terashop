@@ -79,7 +79,32 @@ CREATE FUNCTION private.valid_tax_context(p_context jsonb) RETURNS boolean
     else false end, false);
 $$;
 
--- Tables: catalog, customers and transaction facts
+-- Customers are commerce identities, not Auth accounts. Email is contact data,
+-- deliberately non-unique and never a credential for claiming historical records.
+CREATE TABLE public.customers (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    auth_user_id uuid UNIQUE REFERENCES auth.users(id) ON DELETE SET NULL,
+    email text CHECK (email IS NULL OR (length(btrim(email)) BETWEEN 1 AND 320)),
+    full_name text NOT NULL DEFAULT '' CHECK (length(full_name) <= 200),
+    phone text CHECK (phone IS NULL OR length(phone) <= 50),
+    anonymized_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (id IS DISTINCT FROM auth_user_id),
+    CHECK (anonymized_at IS NULL OR (email IS NULL AND full_name = '' AND phone IS NULL))
+);
+
+CREATE FUNCTION private.customer_for_user(p_user_id uuid) RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select id from public.customers where auth_user_id = p_user_id and anonymized_at is null;
+$$;
+
+CREATE FUNCTION public.current_customer_id() RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select private.customer_for_user(auth.uid());
+$$;
+
+-- Tables: catalog, accounts and transaction facts
 
 CREATE TABLE public.orders (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
@@ -171,6 +196,42 @@ CREATE TABLE commerce.checkout_quotes (
     CONSTRAINT checkout_quotes_subtotal_check CHECK ((subtotal >= (0)::numeric)),
     CONSTRAINT checkout_quotes_tax_total_check CHECK ((tax_total >= (0)::numeric)),
     CONSTRAINT checkout_quotes_total_check CHECK ((total >= (0)::numeric))
+);
+
+-- Editable intentions only: no price snapshot, stock reservation or customer
+-- created for a guest. A guest capability is returned once and stored as a hash.
+CREATE TABLE commerce.carts (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid REFERENCES public.customers(id) ON DELETE RESTRICT,
+    guest_token_hash text CHECK (guest_token_hash ~ '^[0-9a-f]{64}$'),
+    idempotency_key text CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+    status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','converted','abandoned')),
+    version integer NOT NULL DEFAULT 1 CHECK (version > 0),
+    last_mutation_hash text CHECK (last_mutation_hash ~ '^[0-9a-f]{64}$'),
+    address jsonb CHECK (jsonb_typeof(address) = 'object' AND pg_column_size(address) <= 16384),
+    shipping_method_id uuid,
+    discount_code text CHECK (length(discount_code) <= 100),
+    note text CHECK (length(note) <= 2000),
+    quote_id uuid UNIQUE,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz NOT NULL DEFAULT (now() + interval '7 days'),
+    UNIQUE (customer_id, idempotency_key),
+    CHECK ((customer_id IS NULL) = (guest_token_hash IS NOT NULL)),
+    CHECK (customer_id IS NOT NULL OR idempotency_key IS NULL),
+    CHECK ((status = 'converted') = (quote_id IS NOT NULL)),
+    CHECK (quote_id IS NULL OR customer_id IS NOT NULL),
+    CHECK (status = 'active' OR (address IS NULL AND note IS NULL)),
+    CHECK (expires_at >= created_at + interval '1 minute' AND expires_at <= created_at + interval '30 days')
+);
+CREATE TABLE commerce.cart_lines (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    cart_id uuid NOT NULL REFERENCES commerce.carts(id) ON DELETE CASCADE,
+    variant_id uuid NOT NULL,
+    quantity integer NOT NULL CHECK (quantity BETWEEN 1 AND 100),
+    attributes jsonb NOT NULL DEFAULT '{}' CHECK (private.valid_line_attributes(attributes)),
+    line_key text GENERATED ALWAYS AS (private.checkout_line_key(variant_id, attributes)) STORED NOT NULL,
+    UNIQUE (cart_id, line_key)
 );
 
 CREATE TABLE public.fulfillments (
@@ -320,8 +381,6 @@ CREATE TABLE commerce.refund_requests (
 CREATE TABLE public.profiles (
     id uuid NOT NULL,
     email text DEFAULT ''::text NOT NULL,
-    full_name text DEFAULT ''::text NOT NULL,
-    phone text,
     role text DEFAULT 'customer'::text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -338,7 +397,7 @@ CREATE TABLE public.inventory_levels (
 CREATE TABLE public.product_reviews (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     product_id uuid NOT NULL,
-    customer_id uuid DEFAULT auth.uid() NOT NULL,
+    customer_id uuid DEFAULT public.current_customer_id() NOT NULL,
     rating integer NOT NULL,
     title text DEFAULT ''::text NOT NULL,
     body text DEFAULT ''::text NOT NULL,
@@ -351,7 +410,7 @@ CREATE TABLE public.product_reviews (
 
 CREATE TABLE public.addresses (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    customer_id uuid DEFAULT auth.uid() NOT NULL,
+    customer_id uuid DEFAULT public.current_customer_id() NOT NULL,
     label text DEFAULT ''::text NOT NULL,
     recipient_name text NOT NULL CHECK (length(btrim(recipient_name)) > 0),
     phone text,
@@ -916,6 +975,11 @@ CREATE TABLE commerce.refund_request_components (
 
 -- Identity sequences, keys and foreign keys
 
+ALTER TABLE commerce.checkout_quotes ADD UNIQUE (id, customer_id);
+ALTER TABLE commerce.carts ADD FOREIGN KEY (quote_id, customer_id) REFERENCES commerce.checkout_quotes(id, customer_id);
+CREATE INDEX carts_customer_active_idx ON commerce.carts(customer_id) WHERE status = 'active';
+CREATE INDEX carts_expiry_idx ON commerce.carts(expires_at, id);
+
 ALTER TABLE commerce.order_adjustments ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (
     SEQUENCE NAME commerce.order_adjustments_id_seq
     START WITH 1
@@ -1205,7 +1269,7 @@ ALTER TABLE ONLY commerce.checkout_quote_lines
     ADD CONSTRAINT checkout_quote_lines_variant_id_fkey FOREIGN KEY (variant_id) REFERENCES public.product_variants(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY commerce.checkout_quotes
-    ADD CONSTRAINT checkout_quotes_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.profiles(id) ON DELETE RESTRICT;
+    ADD CONSTRAINT checkout_quotes_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY commerce.checkout_quotes
     ADD CONSTRAINT checkout_quotes_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
@@ -1295,13 +1359,13 @@ ALTER TABLE ONLY commerce.refunds
     ADD CONSTRAINT refunds_payment_transaction_id_fkey FOREIGN KEY (payment_transaction_id) REFERENCES commerce.payment_transactions(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.addresses
-    ADD CONSTRAINT addresses_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.profiles(id) ON DELETE CASCADE;
+    ADD CONSTRAINT addresses_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.categories
     ADD CONSTRAINT categories_parent_id_fkey FOREIGN KEY (parent_id) REFERENCES public.categories(id) ON DELETE SET NULL;
 
 ALTER TABLE ONLY public.discount_redemptions
-    ADD CONSTRAINT discount_redemptions_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.profiles(id);
+    ADD CONSTRAINT discount_redemptions_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id);
 
 ALTER TABLE ONLY public.discount_redemptions
     ADD CONSTRAINT discount_redemptions_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id);
@@ -1355,7 +1419,7 @@ ALTER TABLE ONLY public.order_promotions
     ADD CONSTRAINT order_promotions_promotion_id_fkey FOREIGN KEY (promotion_id) REFERENCES public.promotions(id);
 
 ALTER TABLE ONLY public.orders
-    ADD CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.profiles(id);
+    ADD CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id);
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_shipping_method_id_fkey FOREIGN KEY (shipping_method_id) REFERENCES public.shipping_methods(id);
@@ -1385,7 +1449,7 @@ ALTER TABLE ONLY public.product_options
     ADD CONSTRAINT product_options_product_id_fkey FOREIGN KEY (product_id) REFERENCES public.products(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.product_reviews
-    ADD CONSTRAINT product_reviews_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.profiles(id) ON DELETE CASCADE;
+    ADD CONSTRAINT product_reviews_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES public.customers(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.product_reviews
     ADD CONSTRAINT product_reviews_product_id_fkey FOREIGN KEY (product_id) REFERENCES public.products(id) ON DELETE CASCADE;
@@ -1447,6 +1511,8 @@ CREATE UNIQUE INDEX refund_requests_provider_reference_uk ON commerce.refund_req
 CREATE INDEX refunds_order_idx ON commerce.refunds USING btree (order_id, created_at DESC);
 CREATE INDEX addresses_customer_idx ON public.addresses USING btree (customer_id);
 CREATE UNIQUE INDEX addresses_one_default_per_customer_idx ON public.addresses USING btree (customer_id) WHERE is_default;
+ALTER TABLE commerce.carts ADD FOREIGN KEY (shipping_method_id) REFERENCES public.shipping_methods(id) ON DELETE RESTRICT;
+ALTER TABLE commerce.cart_lines ADD FOREIGN KEY (variant_id) REFERENCES public.product_variants(id) ON DELETE RESTRICT;
 ALTER TABLE commerce.order_shipping_lines
   ADD FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT,
   ADD FOREIGN KEY (shipping_method_id) REFERENCES public.shipping_methods(id) ON DELETE RESTRICT;
@@ -1518,6 +1584,8 @@ ALTER TABLE commerce.refund_request_components ENABLE ROW LEVEL SECURITY;
 
 -- All application tables require explicit RLS policies
 
+ALTER TABLE commerce.carts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE commerce.cart_lines ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.checkout_quote_lines ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.checkout_quotes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.command_idempotency ENABLE ROW LEVEL SECURITY;
@@ -1556,6 +1624,7 @@ ALTER TABLE public.product_reviews ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.product_variants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.products ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.customers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.promotion_targets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.promotions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.shipping_methods ENABLE ROW LEVEL SECURITY;

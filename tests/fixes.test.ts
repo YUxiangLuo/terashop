@@ -607,7 +607,7 @@ describe('修复：扩展体系与账号安全', () => {
     await api('/rest/v1/addresses', { token: u.token, method: 'POST', body: TEST_ADDRESS });
     await api('/rest/v1/metafields', {
       token: admin.token, method: 'POST',
-      body: { owner_type: 'customer', owner_id: u.userId, namespace: 'custom', key: 'vip', type: 'number', value: 1 },
+      body: { owner_type: 'customer', owner_id: u.customerId, namespace: 'custom', key: 'vip', type: 'number', value: 1 },
     });
 
     // 非 admin 拒绝
@@ -615,16 +615,15 @@ describe('修复：扩展体系与账号安全', () => {
     expect((deny.data as { message: string }).message).toBe('admin only');
 
     const { data } = await rpc('anonymize_user', { p_user_id: u.userId }, admin.token);
-    const p = data as { email: string; full_name: string; phone: string | null };
-    expect(p.email).toBe('');
-    expect(p.full_name).toBe('');
-    expect(p.phone).toBeNull();
+    expect(data).toMatchObject({ email: '' });
+    const customer = await api(`/rest/v1/customers?id=eq.${u.customerId}&select=email,full_name,phone,anonymized_at`, { service: true });
+    expect(customer.data).toEqual([{ email: null, full_name: '', phone: null, anonymized_at: expect.any(String) }]);
 
     const { data: addrs } = await api(
-      `/rest/v1/addresses?customer_id=eq.${u.userId}&select=id`, { service: true });
+      `/rest/v1/addresses?customer_id=eq.${u.customerId}&select=id`, { service: true });
     expect(addrs).toEqual([]);
     const { data: mfs } = await api(
-      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${u.userId}&select=id`, { service: true });
+      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${u.customerId}&select=id`, { service: true });
     expect(mfs).toEqual([]);
   });
 

@@ -1618,7 +1618,7 @@ declare
 begin
   select * into v_order from public.orders o
   where o.id = get_order_fulfillment_balance.order_id and (
-    o.customer_id = auth.uid() or public.is_admin() or auth.role() = 'service_role'
+    o.customer_id = public.current_customer_id() or public.is_admin() or auth.role() = 'service_role'
   );
   if not found then raise exception 'order not found'; end if;
   v_fulfillable := v_order.status = 'open' and v_order.financial_status <> 'refunded'
@@ -1655,7 +1655,7 @@ begin
   from public.orders o
   where o.id = get_order_ledger.order_id
     and (
-      o.customer_id = auth.uid()
+      o.customer_id = public.current_customer_id()
       or public.is_admin()
       or coalesce(auth.role(), '') = 'service_role'
     );

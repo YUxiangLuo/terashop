@@ -21,10 +21,50 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 子资源 ID 和所属商品/选项/变体不可迁移，关联需删除重建。分类禁止任意长度的环。
 并发目录修改遇到 SQLSTATE `55P03` / `40001` 时重试整笔事务，不绕过约束。
 
+## Customer 与登录身份
+
+`customers.id` 是独立商业 UUID，**不等于 Auth user ID**。`auth_user_id` 是唯一、可空的登录关联；联系邮箱非唯一，不用邮箱或客户端 metadata 自动认领/合并客户。注册创建新 Customer，后台 `create_customer` 可创建无账号客户；目前没有客户合并、账号重关联或为无账号客户代下单的 RPC。
+
+- `current_customer_id()` 返回当前活跃客户 UUID；无关联或已匿名化返回 null，授权失败关闭。
+- `orders` / Quote / 地址 / 评价 / 优惠用量 / 客户 metafield 使用 Customer ID；角色、`set_user_role.user_id` 和审计 `actor_id` 仍使用 Auth ID。
+- `/rest/v1/customers` 仅本人/admin/service 可读；可 PATCH `email`、`full_name`、`phone`，不可写身份、Auth 关联、匿名化状态。`profiles` 仅保存账户邮箱/角色等，不再保存姓名/电话，也不提供自助 PATCH。
+- Auth 邮箱变化不覆盖客户联系邮箱。删除 Auth 只解除关联，不删除 Customer 或订单；新同邮箱账号不会接管旧记录。
+- `anonymize_customer` 清客户联系信息、地址、客户 metafield 与全部 Cart，禁止恢复这些客户自有内容；`anonymize_user` 另清 profile 和审计 actor。两者都不等于删除 Auth、撤销登录凭据或擦除订单地址/属性、评价正文等历史数据。
+
+## 持久 Cart（可选）
+
+Cart 保存购买意向，不保存价格、锁价或占库存。可以为空，每个活跃 Cart 最多 50 条规范化商业行/100 件；同变体/属性合并，已有行 ID 在改数量时保留。停售/价格、库存、优惠资格在预览/转 Quote 时重新核验，不把 Cart 当可支付对象。
+
+| RPC | 参数 / 行为 |
+| --- | --- |
+| `create_cart` | 登录客户必须传 `idempotency_key`；游客不传键，返回一次 `guest_token`。可选 `ttl_seconds`，默认 604800，范围 60–2592000 |
+| `get_cart` | `cart_id`；游客另传 `guest_token`，客户 Cart 只认登录归属 |
+| `list_carts` | 登录客户的未过期 active Cart，不含游客或其他客户对象 |
+| `update_cart` | `cart_id`、`expected_version`、完整 `items`；可选 `address`、`shipping_method_id`、`discount_code`、`note`、`guest_token` |
+| `preview_cart` | `cart_id`、可选 `guest_token`；返回 `{cart_id,version,pricing}`，空 Cart 的 pricing 为 null |
+| `claim_cart` | 登录后传 `cart_id`、`expected_version`、原 `guest_token`；显式认领，不合并其他 Cart；旧游客凭据立即失效 |
+| `abandon_cart` | `cart_id`、`expected_version`、可选 `guest_token`；清行/地址/备注并终结编辑，不释放 Quote 库存 |
+| `checkout_cart` | 仅登录客户，传 `cart_id`、`expected_version`；原子创建 Quote、预占库存并将 Cart 设为 converted，返回 Quote DTO |
+
+`update_cart` 是**完整替换**，不是 PATCH：未传的地址/配送/优惠码/备注会清空，`items:[]` 清行。地址可只填国家以预估，正式结账仍须姓名/line1/国家；地址 JSON 至多 16 KiB，备注至多 2000 字符，优惠码至多 100 字符。行输入使用下文商业行合同，不可把包含行 `id`/价格的响应直接回传。
+
+```http
+POST /rest/v1/rpc/update_cart
+
+{"cart_id":"<uuid>","guest_token":"<仅游客需要的凭据>","expected_version":1,"items":[{"variant_id":"<uuid>","quantity":1,"attributes":{"engraving":"Alice"}}],"address":{"recipient_name":"Alex","line1":"123 Example Street","country":"US"}}
+```
+
+- 每次编辑/认领/终结版本 +1；版本冲突为 HTTP 409，不静默覆盖。最近一次完全相同的规范化命令重试返回当前结果；更早的重试需 `get_cart` 恢复，不无限保留全部 mutation 历史。创建幂等也只在 Cart 保留期内有效。
+- 每客户最多 5 个未过期 active Cart，创建与认领共用配额；这与 5 个活跃 checkout 是两套不同资源上限。转 Quote 仍需满足原 checkout 配额/库存/价格规则，任何失败都不改变 Cart。
+- Cart 的期限固定，读取、编辑、认领均不续期。converted / abandoned 不可重新编辑；再次购买创建新 Cart。转 Quote 会清 Cart 地址/备注，但保留商业行；Quote 行重新分配 UUID、沿用 `line_key`，再将 Quote UUID 沿用到订单行。
+- 游客凭据是 256 位随机 bearer capability，只授权一个 Cart，不授权 Customer、订单、Quote 或支付。数据库只保存 SHA-256；只有创建响应带明文，丢失后不能取回。放弃后的空 Cart 仍可凭原凭据读取直到到期，认领/到期后旧凭据不可用。
+- 始终用 HTTPS/POST；不要把 token 放 URL、日志、埋点或公开存储。BFF 推荐 Secure/HttpOnly/SameSite cookie 并防 CSRF；直接浏览器接入须管理 XSS/凭据存储风险。共享游客凭据就等于共享编辑和认领权。
+- 到期立即拒绝访问，`purge_expired_carts` 负责物理删除。访客没有稳定账号可用于总量配额；上线必须在覆盖直接 RPC 的网关部署创建/读取/预览/写入限流，当前数据库限制不等于匿名防滥用或隐私合规验证。
+
 ## 推荐结账流程
 
 1. `price_checkout` 预览价格（匿名可用），不占库存，也不保证之后价格不变。
-2. 登录后 `create_checkout_quote` 生成报价并预占库存。
+2. 登录后 `create_checkout_quote` 生成报价并预占库存；使用 Cart 时先认领，再调用 `checkout_cart`。
 3. `create_order_from_quote` 再次校验价格，建立待支付订单，继续持有预占。
 4. 调用渠道支付入口；渠道确认成功后，数据库原子扣库存并推进订单。
 
@@ -78,7 +118,7 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 
 订单明细可查询 `/rest/v1/order_items?order_id=eq.<uuid>&select=id,line_key,variant_id,attributes,quantity,line_total`。
 属性是不可变交易快照中的客户文本，不是服务端授权指令；前端显示时必须转义，不应包含密钥或不必要的个人信息。终态 Quote 的地址/备注清理不包含行属性。
-当前只是保存商业配置，不包含收费定制、订阅、套装或持久购物车。
+这些属性只是商业文本配置，不包含收费定制、订阅或套装；Cart 与交易快照的生命周期不同。
 
 ## 价格明细与税务依据
 
@@ -135,12 +175,15 @@ PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复
 
 | RPC | 权限 | 主要参数 / 限制 |
 | --- | --- | --- |
+| `current_customer_id` | 所有角色 | 当前活跃 Customer UUID 或 null |
+| `create_customer` | admin / service | 可选 `email`、`full_name`、`phone`；不附带登录权限 |
+| `anonymize_customer` | admin / service | `customer_id`；不删除交易历史 |
 | `set_default_address` | 地址归属人 / admin / service | `address_id`、`make_default`（默认 true） |
 | `create_fulfillment_v2` | admin | `order_id`、`items`、`idempotency_key`、可选物流信息 |
 | `adjust_inventory` | admin | `variant_id`、`delta`、`reason`、可选 `note` |
 | `moderate_review` | admin | `review_id`、`status` |
 | `set_user_role` | admin | `user_id`、`role`；最后一名 admin 不可降级 |
-| `anonymize_user` | admin | `p_user_id`；清 profile PII、地址簿、客户 metafield 和审计 actor；不是完整账号删除 |
+| `anonymize_user` | admin | `p_user_id` 为 Auth ID；匿名化关联客户，另清 profile PII 与审计 actor；不是完整账号删除 |
 
 地址内容可直接 PATCH，身份/归属/时间戳不可改；既有地址的默认值必须走 RPC。新建地址仍可传 `is_default=true`。
 普通客户创建评价只能为 pending，作者修改内容后重新待审。首次管理员由可信 SQL 引导，后续走角色 RPC。

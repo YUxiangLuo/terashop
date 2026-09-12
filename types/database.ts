@@ -88,7 +88,7 @@ export type Database = {
             foreignKeyName: "addresses_customer_id_fkey"
             columns: ["customer_id"]
             isOneToOne: false
-            referencedRelation: "profiles"
+            referencedRelation: "customers"
             referencedColumns: ["id"]
           },
         ]
@@ -140,6 +140,39 @@ export type Database = {
           },
         ]
       }
+      customers: {
+        Row: {
+          anonymized_at: string | null
+          auth_user_id: string | null
+          created_at: string
+          email: string | null
+          full_name: string
+          id: string
+          phone: string | null
+          updated_at: string
+        }
+        Insert: {
+          anonymized_at?: string | null
+          auth_user_id?: string | null
+          created_at?: string
+          email?: string | null
+          full_name?: string
+          id?: string
+          phone?: string | null
+          updated_at?: string
+        }
+        Update: {
+          anonymized_at?: string | null
+          auth_user_id?: string | null
+          created_at?: string
+          email?: string | null
+          full_name?: string
+          id?: string
+          phone?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       discount_redemptions: {
         Row: {
           created_at: string
@@ -167,7 +200,7 @@ export type Database = {
             foreignKeyName: "discount_redemptions_customer_id_fkey"
             columns: ["customer_id"]
             isOneToOne: false
-            referencedRelation: "profiles"
+            referencedRelation: "customers"
             referencedColumns: ["id"]
           },
           {
@@ -788,7 +821,7 @@ export type Database = {
             foreignKeyName: "orders_customer_id_fkey"
             columns: ["customer_id"]
             isOneToOne: false
-            referencedRelation: "profiles"
+            referencedRelation: "customers"
             referencedColumns: ["id"]
           },
           {
@@ -1046,7 +1079,7 @@ export type Database = {
             foreignKeyName: "product_reviews_customer_id_fkey"
             columns: ["customer_id"]
             isOneToOne: false
-            referencedRelation: "profiles"
+            referencedRelation: "customers"
             referencedColumns: ["id"]
           },
           {
@@ -1174,27 +1207,21 @@ export type Database = {
         Row: {
           created_at: string
           email: string
-          full_name: string
           id: string
-          phone: string | null
           role: string
           updated_at: string
         }
         Insert: {
           created_at?: string
           email?: string
-          full_name?: string
           id: string
-          phone?: string | null
           role?: string
           updated_at?: string
         }
         Update: {
           created_at?: string
           email?: string
-          full_name?: string
           id?: string
-          phone?: string | null
           role?: string
           updated_at?: string
         }
@@ -1442,6 +1469,14 @@ export type Database = {
       }
     }
     Functions: {
+      abandon_cart: {
+        Args: {
+          cart_id: string
+          expected_version: number
+          guest_token?: string
+        }
+        Returns: Json
+      }
       adjust_inventory: {
         Args: {
           delta: number
@@ -1462,14 +1497,31 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      anonymize_customer: {
+        Args: { customer_id: string }
+        Returns: {
+          anonymized_at: string | null
+          auth_user_id: string | null
+          created_at: string
+          email: string | null
+          full_name: string
+          id: string
+          phone: string | null
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "customers"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       anonymize_user: {
         Args: { p_user_id: string }
         Returns: {
           created_at: string
           email: string
-          full_name: string
           id: string
-          phone: string | null
           role: string
           updated_at: string
         }
@@ -1527,6 +1579,14 @@ export type Database = {
         }
         Returns: Json
       }
+      checkout_cart: {
+        Args: { cart_id: string; expected_version: number }
+        Returns: Json
+      }
+      claim_cart: {
+        Args: { cart_id: string; expected_version: number; guest_token: string }
+        Returns: Json
+      }
       claim_outbox_events: {
         Args: { lease_seconds?: number; max_events?: number; worker_id: string }
         Returns: Json
@@ -1541,6 +1601,10 @@ export type Database = {
         }
         Returns: boolean
       }
+      create_cart: {
+        Args: { idempotency_key?: string; ttl_seconds?: number }
+        Returns: Json
+      }
       create_checkout_quote: {
         Args: {
           address?: Json
@@ -1553,6 +1617,25 @@ export type Database = {
           ttl_seconds?: number
         }
         Returns: Json
+      }
+      create_customer: {
+        Args: { email?: string; full_name?: string; phone?: string }
+        Returns: {
+          anonymized_at: string | null
+          auth_user_id: string | null
+          created_at: string
+          email: string | null
+          full_name: string
+          id: string
+          phone: string | null
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "customers"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
       create_fulfillment: {
         Args: {
@@ -1628,7 +1711,7 @@ export type Database = {
       }
       create_payment_intent_for_customer: {
         Args: {
-          customer_id: string
+          actor_id: string
           idempotency_key: string
           metadata?: Json
           order_id: string
@@ -1651,12 +1734,17 @@ export type Database = {
         }
         Returns: Json
       }
+      current_customer_id: { Args: never; Returns: string }
       expire_checkout_quotes: {
         Args: { as_of?: string; max_quotes?: number }
         Returns: Json
       }
       expire_unpaid_orders: {
         Args: { as_of?: string; max_orders?: number }
+        Returns: Json
+      }
+      get_cart: {
+        Args: { cart_id: string; guest_token?: string }
         Returns: Json
       }
       get_checkout_quote: { Args: { quote_id: string }; Returns: Json }
@@ -1672,11 +1760,7 @@ export type Database = {
       get_order_ledger: { Args: { order_id: string }; Returns: Json }
       get_order_pricing: { Args: { order_id: string }; Returns: Json }
       get_payment_intent_for_customer: {
-        Args: {
-          customer_id: string
-          payment_intent_id: string
-          provider: string
-        }
+        Args: { actor_id: string; payment_intent_id: string; provider: string }
         Returns: Json
       }
       get_payment_operations: { Args: { order_id: string }; Returns: Json }
@@ -1695,6 +1779,7 @@ export type Database = {
         Returns: Json
       }
       is_admin: { Args: never; Returns: boolean }
+      list_carts: { Args: never; Returns: Json }
       list_pending_provider_refunds: {
         Args: { max_requests?: number; provider: string }
         Returns: Json
@@ -1759,11 +1844,15 @@ export type Database = {
         }
       }
       prepare_paypal_capture: {
-        Args: { customer_id: string; payment_intent_id: string }
+        Args: { actor_id: string; payment_intent_id: string }
         Returns: Json
       }
       prepare_paypal_refund: {
         Args: { actor_id: string; refund_request_id: string }
+        Returns: Json
+      }
+      preview_cart: {
+        Args: { cart_id: string; guest_token?: string }
         Returns: Json
       }
       price_checkout: {
@@ -1774,6 +1863,10 @@ export type Database = {
           shipping_method_id?: string
         }
         Returns: Json
+      }
+      purge_expired_carts: {
+        Args: { as_of?: string; max_carts?: number }
+        Returns: number
       }
       refund_order: {
         Args: {
@@ -1834,9 +1927,7 @@ export type Database = {
         Returns: {
           created_at: string
           email: string
-          full_name: string
           id: string
-          phone: string | null
           role: string
           updated_at: string
         }
@@ -1846,6 +1937,19 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      update_cart: {
+        Args: {
+          address?: Json
+          cart_id: string
+          discount_code?: string
+          expected_version: number
+          guest_token?: string
+          items: Json
+          note?: string
+          shipping_method_id?: string
+        }
+        Returns: Json
       }
       update_order_address: {
         Args: { address?: Json; address_id?: string; order_id: string }

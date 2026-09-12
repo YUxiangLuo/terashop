@@ -3,10 +3,285 @@
 begin;
 set local check_function_bodies = false;
 
+CREATE FUNCTION private.cart_json(p_cart commerce.carts) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select jsonb_build_object('id', p_cart.id, 'customer_id', p_cart.customer_id, 'status', p_cart.status,
+    'version', p_cart.version, 'address', p_cart.address, 'shipping_method_id', p_cart.shipping_method_id,
+    'discount_code', p_cart.discount_code, 'note', p_cart.note, 'quote_id', p_cart.quote_id,
+    'created_at', p_cart.created_at, 'updated_at', p_cart.updated_at, 'expires_at', p_cart.expires_at,
+    'lines', (select coalesce(jsonb_agg(jsonb_build_object('id', l.id, 'variant_id', l.variant_id,
+      'quantity', l.quantity, 'attributes', l.attributes, 'line_key', l.line_key) order by l.variant_id, l.line_key), '[]')
+      from commerce.cart_lines l where l.cart_id = p_cart.id));
+$$;
+
+CREATE FUNCTION private.access_cart(p_id uuid, p_token text) RETURNS commerce.carts
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_cart commerce.carts; v_customer uuid;
+begin
+  -- All authenticated cart commands serialize customer -> cart, including claim,
+  -- quotas and erasure. Guest capabilities never confer customer/order access.
+  if auth.uid() is not null then v_customer := private.require_customer(); end if;
+  select * into v_cart from commerce.carts where id = p_id for update;
+  if not found or v_cart.expires_at <= clock_timestamp() then raise exception 'cart not found'; end if;
+  if v_cart.customer_id is not null then
+    if v_cart.customer_id is distinct from v_customer then raise exception 'cart not found'; end if;
+  else
+    if p_token is null or p_token !~ '^[0-9a-f]{64}$' then raise exception 'cart not found'; end if;
+    if encode(extensions.digest(p_token, 'sha256'), 'hex') is distinct from v_cart.guest_token_hash then
+      raise exception 'cart not found';
+    end if;
+  end if;
+  return v_cart;
+end;
+$$;
+
+CREATE FUNCTION private.assert_cart_capacity(p_customer uuid) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  perform private.lock_customer_content(p_customer);
+  if (select count(*) from commerce.carts where customer_id = p_customer and status = 'active' and expires_at > clock_timestamp()) >= 5 then
+    raise exception 'too many active carts';
+  end if;
+end;
+$$;
+
+CREATE FUNCTION private.guard_cart_write() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_row jsonb := case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end;
+  v_cart_id uuid := (v_row ->> case when tg_table_name = 'carts' then 'id' else 'cart_id' end)::uuid;
+  v_cart commerce.carts;
+begin
+  select * into v_cart from commerce.carts where id = v_cart_id for update nowait;
+  if not found and tg_op = 'DELETE' then return old; end if; -- parent erasure/expiry cascade
+  if current_setting('commerce.cart_write', true) is distinct from v_cart_id::text then
+    raise exception 'use cart commands to change cart contents';
+  end if;
+  if v_cart.status <> 'active' or v_cart.expires_at <= clock_timestamp() then raise exception 'cart is not editable'; end if;
+  if tg_op = 'UPDATE' then
+    if tg_table_name = 'carts' then
+      if (v_row -> 'id', v_row -> 'created_at', v_row -> 'expires_at', v_row -> 'idempotency_key') is distinct from
+         (to_jsonb(old) -> 'id', to_jsonb(old) -> 'created_at', to_jsonb(old) -> 'expires_at', to_jsonb(old) -> 'idempotency_key')
+        or (v_row ->> 'version')::integer <> (to_jsonb(old) ->> 'version')::integer + 1 then
+        raise exception 'cart identity, expiry and version are protected';
+      end if;
+      if (v_row -> 'customer_id', v_row -> 'guest_token_hash') is distinct from
+         (to_jsonb(old) -> 'customer_id', to_jsonb(old) -> 'guest_token_hash') and (
+        v_cart.customer_id is null and (v_row ->> 'customer_id')::uuid = public.current_customer_id()
+        and v_row -> 'guest_token_hash' = 'null'::jsonb
+      ) is not true then raise exception 'cart ownership is immutable except explicit guest claim'; end if;
+    elsif (v_row - 'quantity' - 'line_key') is distinct from (to_jsonb(old) - 'quantity' - 'line_key') then
+      raise exception 'cart line identity is immutable';
+    end if;
+  end if;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.assert_cart_lines() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_row jsonb := case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end;
+  v_id uuid := (v_row ->> case when tg_table_name = 'carts' then 'id' else 'cart_id' end)::uuid;
+  v_cart commerce.carts;
+  v_count integer;
+  v_quantity integer;
+begin
+  select * into v_cart from commerce.carts where id = v_id;
+  if not found then return null; end if;
+  select count(*), coalesce(sum(quantity), 0) into v_count, v_quantity from commerce.cart_lines where cart_id = v_id;
+  if v_count > 50 or v_quantity > 100 or (v_cart.status = 'abandoned' and v_count <> 0) then
+    raise exception 'cart lines exceed limits or do not match cart state';
+  end if;
+  if v_cart.status = 'converted' and exists (
+    select 1 from (select * from commerce.cart_lines where cart_id = v_id) c
+    full join (select * from commerce.checkout_quote_lines where quote_id = v_cart.quote_id) q using (line_key)
+    where (c.variant_id, c.quantity, c.attributes) is distinct from (q.variant_id, q.quantity, q.attributes)
+  ) then raise exception 'cart does not match its checkout quote'; end if;
+  return null;
+end;
+$$;
+
+CREATE FUNCTION public.create_cart(idempotency_key text DEFAULT NULL, ttl_seconds integer DEFAULT 604800) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_customer uuid; v_cart commerce.carts; v_token text; v_key text := btrim(idempotency_key);
+begin
+  if ttl_seconds is null or ttl_seconds not between 60 and 2592000 then raise exception 'cart ttl_seconds must be between 60 and 2592000'; end if;
+  if auth.uid() is not null then
+    v_customer := private.require_customer();
+    if coalesce(v_key, '') = '' or length(v_key) > 200 then raise exception 'idempotency_key is required for a customer cart'; end if;
+    select * into v_cart from commerce.carts c where c.customer_id = v_customer and c.idempotency_key = v_key;
+    if found then
+      if v_cart.expires_at <= clock_timestamp() or v_cart.expires_at - v_cart.created_at <> make_interval(secs => ttl_seconds) then
+        raise exception 'cart creation key is expired or was used with different parameters';
+      end if;
+      return private.cart_json(v_cart);
+    end if;
+    perform private.assert_cart_capacity(v_customer);
+  else
+    if idempotency_key is not null then raise exception 'guest cart creation does not accept an idempotency key'; end if;
+    v_token := encode(extensions.gen_random_bytes(32), 'hex');
+  end if;
+  insert into commerce.carts(customer_id, guest_token_hash, idempotency_key, expires_at)
+  values (v_customer, case when v_token is not null then encode(extensions.digest(v_token, 'sha256'), 'hex') end,
+    v_key, now() + make_interval(secs => ttl_seconds)) returning * into v_cart;
+  -- Never persist the plaintext capability or return it from subsequent reads.
+  return private.cart_json(v_cart) || case when v_token is not null then jsonb_build_object('guest_token', v_token) else '{}'::jsonb end;
+end;
+$$;
+
+CREATE FUNCTION public.get_cart(cart_id uuid, guest_token text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin return private.cart_json(private.access_cart(cart_id, guest_token)); end;
+$$;
+
+CREATE FUNCTION public.list_carts() RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_customer uuid := private.require_customer(); v_result jsonb;
+begin
+  select coalesce(jsonb_agg(private.cart_json(c) order by c.updated_at desc, c.id), '[]') into v_result
+  from commerce.carts c where c.customer_id = v_customer and c.status = 'active' and c.expires_at > clock_timestamp();
+  return v_result;
+end;
+$$;
+
+CREATE FUNCTION public.update_cart(cart_id uuid, expected_version integer, items jsonb, address jsonb DEFAULT NULL,
+    shipping_method_id uuid DEFAULT NULL, discount_code text DEFAULT NULL, note text DEFAULT NULL, guest_token text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_cart commerce.carts := private.access_cart(cart_id, guest_token);
+  v_items jsonb;
+  v_address jsonb;
+  v_hash text;
+  v_previous text := current_setting('commerce.cart_write', true);
+  v_code text := upper(nullif(btrim(discount_code), ''));
+begin
+  if items is null or jsonb_typeof(items) <> 'array' then raise exception 'items must be an array'; end if;
+  v_items := case when jsonb_array_length(items) = 0 then '[]'::jsonb else private.canonical_checkout_lines(items) end;
+  if jsonb_array_length(v_items) > 50 or (select coalesce(sum((e ->> 'quantity')::integer), 0) from jsonb_array_elements(v_items) e) > 100 then
+    raise exception 'cart is limited to 50 commercial lines and 100 units';
+  end if;
+  v_address := private.normalize_checkout_address(address);
+  v_hash := private.command_request_hash(jsonb_build_object('operation','update','version',expected_version,
+    'items',v_items,'address',v_address,'shipping_method_id',shipping_method_id,'discount_code',v_code,'note',note));
+  if v_cart.last_mutation_hash = v_hash then return private.cart_json(v_cart); end if;
+  if expected_version is distinct from v_cart.version then raise exception using errcode = 'PT409', message = 'cart version conflict'; end if;
+  if v_cart.status <> 'active' then raise exception 'cart is not editable'; end if;
+  if exists (select 1 from jsonb_array_elements(v_items) e where not exists (
+    select 1 from public.product_variants v join public.products p on p.id = v.product_id
+    where v.id = (e ->> 'variant_id')::uuid and v.is_active and p.status = 'active'
+  )) then raise exception 'cart variant is not available'; end if;
+  if shipping_method_id is not null and not exists (select 1 from public.shipping_methods s where s.id = update_cart.shipping_method_id and s.is_active) then
+    raise exception 'shipping method is not available';
+  end if;
+  perform set_config('commerce.cart_write', v_cart.id::text, true);
+  delete from commerce.cart_lines l where l.cart_id = v_cart.id and not exists (
+    select 1 from jsonb_array_elements(v_items) e where e ->> 'line_key' = l.line_key);
+  insert into commerce.cart_lines(cart_id, variant_id, quantity, attributes)
+    select v_cart.id, (e ->> 'variant_id')::uuid, (e ->> 'quantity')::integer, e -> 'attributes' from jsonb_array_elements(v_items) e
+    on conflict on constraint cart_lines_cart_id_line_key_key do update set quantity = excluded.quantity;
+  update commerce.carts c set address = v_address, shipping_method_id = update_cart.shipping_method_id,
+    discount_code = v_code, note = update_cart.note, version = c.version + 1, last_mutation_hash = v_hash, updated_at = now()
+    where c.id = v_cart.id returning * into v_cart;
+  perform set_config('commerce.cart_write', coalesce(v_previous, ''), true);
+  return private.cart_json(v_cart);
+end;
+$$;
+
+CREATE FUNCTION public.claim_cart(cart_id uuid, expected_version integer, guest_token text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_customer uuid := private.require_customer();
+  v_cart commerce.carts := private.access_cart(cart_id, guest_token);
+  v_hash text := private.command_request_hash(jsonb_build_object('operation','claim','version',expected_version,
+    'proof', encode(extensions.digest(guest_token, 'sha256'), 'hex')));
+  v_previous text := current_setting('commerce.cart_write', true);
+begin
+  if v_cart.customer_id = v_customer and v_cart.last_mutation_hash = v_hash then return private.cart_json(v_cart); end if;
+  if v_cart.customer_id is not null or v_cart.status <> 'active' then raise exception 'cart cannot be claimed'; end if;
+  if expected_version is distinct from v_cart.version then raise exception using errcode = 'PT409', message = 'cart version conflict'; end if;
+  perform private.assert_cart_capacity(v_customer);
+  perform set_config('commerce.cart_write', v_cart.id::text, true);
+  update commerce.carts c set customer_id = v_customer, guest_token_hash = null, version = c.version + 1,
+    last_mutation_hash = v_hash, updated_at = now() where c.id = v_cart.id returning * into v_cart;
+  perform set_config('commerce.cart_write', coalesce(v_previous, ''), true);
+  return private.cart_json(v_cart);
+end;
+$$;
+
+CREATE FUNCTION public.abandon_cart(cart_id uuid, expected_version integer, guest_token text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_cart commerce.carts := private.access_cart(cart_id, guest_token);
+  v_hash text := private.command_request_hash(jsonb_build_object('operation','abandon','version',expected_version));
+  v_previous text := current_setting('commerce.cart_write', true);
+begin
+  if v_cart.last_mutation_hash = v_hash then return private.cart_json(v_cart); end if;
+  if expected_version is distinct from v_cart.version then raise exception using errcode = 'PT409', message = 'cart version conflict'; end if;
+  if v_cart.status <> 'active' then raise exception 'cart is not editable'; end if;
+  perform set_config('commerce.cart_write', v_cart.id::text, true);
+  delete from commerce.cart_lines l where l.cart_id = v_cart.id;
+  update commerce.carts c set status = 'abandoned', address = null, note = null, version = c.version + 1,
+    last_mutation_hash = v_hash, updated_at = now() where c.id = v_cart.id returning * into v_cart;
+  perform set_config('commerce.cart_write', coalesce(v_previous, ''), true);
+  return private.cart_json(v_cart);
+end;
+$$;
+
+CREATE FUNCTION public.preview_cart(cart_id uuid, guest_token text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_cart commerce.carts := private.access_cart(cart_id, guest_token); v_items jsonb; v_price jsonb;
+begin
+  if v_cart.status <> 'active' then raise exception 'cart is not editable'; end if;
+  select jsonb_agg(jsonb_build_object('variant_id',variant_id,'quantity',quantity,'attributes',attributes)) into v_items
+    from commerce.cart_lines l where l.cart_id = v_cart.id;
+  if v_items is not null then v_price := public.price_checkout(v_items, v_cart.address, v_cart.shipping_method_id, v_cart.discount_code); end if;
+  return jsonb_build_object('cart_id', v_cart.id, 'version', v_cart.version, 'pricing', v_price);
+end;
+$$;
+
+CREATE FUNCTION public.checkout_cart(cart_id uuid, expected_version integer) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_customer uuid := private.require_customer();
+  v_cart commerce.carts := private.access_cart(cart_id, null);
+  v_items jsonb;
+  v_quote jsonb;
+  v_hash text := private.command_request_hash(jsonb_build_object('operation','checkout','version',expected_version));
+  v_previous text := current_setting('commerce.cart_write', true);
+begin
+  if v_cart.last_mutation_hash = v_hash and v_cart.status = 'converted' then return public.get_checkout_quote(v_cart.quote_id); end if;
+  if expected_version is distinct from v_cart.version then raise exception using errcode = 'PT409', message = 'cart version conflict'; end if;
+  if v_cart.customer_id is distinct from v_customer or v_cart.status <> 'active' then raise exception 'cart is not editable'; end if;
+  select jsonb_agg(jsonb_build_object('variant_id',variant_id,'quantity',quantity,'attributes',attributes)) into v_items
+    from commerce.cart_lines l where l.cart_id = v_cart.id;
+  v_quote := public.create_checkout_quote(v_items, 'cart:' || v_cart.id || ':' || v_cart.version,
+    address => v_cart.address, shipping_method_id => v_cart.shipping_method_id, discount_code => v_cart.discount_code, note => v_cart.note);
+  perform set_config('commerce.cart_write', v_cart.id::text, true);
+  update commerce.carts c set status = 'converted', quote_id = (v_quote ->> 'id')::uuid, address = null, note = null,
+    version = c.version + 1, last_mutation_hash = v_hash, updated_at = now() where c.id = v_cart.id;
+  perform set_config('commerce.cart_write', coalesce(v_previous, ''), true);
+  return v_quote;
+end;
+$$;
+
+CREATE FUNCTION public.purge_expired_carts(max_carts integer DEFAULT 100, as_of timestamptz DEFAULT now()) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_count integer;
+begin
+  if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
+  if max_carts is null or max_carts not between 1 and 500 or as_of is null then raise exception 'invalid cart cleanup bounds'; end if;
+  delete from commerce.carts c where c.id in (select id from commerce.carts where expires_at <= as_of order by expires_at, id for update skip locked limit max_carts);
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
 CREATE FUNCTION private.assert_checkout_capacity(p_customer_id uuid) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 begin
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('checkout.customer:' || p_customer_id, 0));
+  perform private.lock_customer_content(p_customer_id);
   if (select count(*) from commerce.checkout_quotes q where q.customer_id = p_customer_id
       and q.status = 'open' and q.expires_at > clock_timestamp())
      + (select count(*) from public.orders o where o.customer_id = p_customer_id
@@ -87,7 +362,7 @@ begin
   if not found then
     raise exception 'order not found';
   end if;
-  if v_order.customer_id is distinct from auth.uid() and not public.is_admin()
+  if v_order.customer_id is distinct from public.current_customer_id() and not public.is_admin()
      and auth.role() is distinct from 'service_role' then
     raise exception 'not allowed';
   end if;
@@ -487,7 +762,7 @@ CREATE FUNCTION public.get_order_pricing(order_id uuid) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 begin
   if not exists (select 1 from public.orders o where o.id = get_order_pricing.order_id
-    and (o.customer_id = auth.uid() or public.is_admin() or auth.role() = 'service_role')) then
+    and (o.customer_id = public.current_customer_id() or public.is_admin() or auth.role() = 'service_role')) then
     raise exception 'order not found';
   end if;
   return private.order_pricing_json(order_id);
@@ -681,7 +956,7 @@ CREATE FUNCTION private.create_order(items jsonb, address jsonb DEFAULT NULL::js
     SET search_path TO ''
     AS $$
 declare
-  v_uid uuid := auth.uid();
+  v_uid uuid := private.require_customer(); -- customer identity; audit actors remain auth.uid()
   v_item jsonb;
   v_variant record;
   v_qty integer;
@@ -786,7 +1061,7 @@ begin
     discount_code, customer_note
   ) values (
     v_uid,
-    (select email from public.profiles where id = v_uid),
+    (select coalesce(email, '') from public.customers where id = v_uid),
     v_price -> 'tax_context',
     (v_price ->> 'subtotal')::numeric,
     (v_price ->> 'discount_total')::numeric,
@@ -830,7 +1105,7 @@ begin
       insert into public.inventory_movements
         (variant_id, location_id, delta, on_hand_after, reason, order_id, actor_id)
       values ((v_item ->> 'variant_id')::uuid, v_location_id,
-        -(v_item ->> 'quantity')::integer, v_on_hand, 'order', v_order.id, v_uid);
+        -(v_item ->> 'quantity')::integer, v_on_hand, 'order', v_order.id, auth.uid());
     end if;
   end loop;
 
@@ -851,7 +1126,7 @@ begin
 
   perform private.store_order_pricing(v_order.id, v_price);
   insert into public.order_events (order_id, actor_id, type, data)
-  values (v_order.id, v_uid, 'order_created',
+  values (v_order.id, auth.uid(), 'order_created',
           jsonb_build_object('total', v_order.total, 'promotions', v_price -> 'promotions'));
 
   return v_order;
@@ -1025,7 +1300,7 @@ begin
       if auth.uid() is not null and (
         select count(*) from public.discount_redemptions dr
         join public.orders o on o.id = dr.order_id
-        where dr.promotion_id = v_promo.id and dr.customer_id = auth.uid() and o.status <> 'cancelled'
+        where dr.promotion_id = v_promo.id and dr.customer_id = public.current_customer_id() and o.status <> 'cancelled'
       ) >= v_promo.per_customer_limit then
         raise exception 'discount code already used';
       end if;
@@ -1375,7 +1650,7 @@ begin
   if not found then
     raise exception 'order not found';
   end if;
-  if v_order.customer_id <> auth.uid() and not public.is_admin() then
+  if v_order.customer_id is distinct from public.current_customer_id() and not public.is_admin() then
     raise exception 'not allowed';
   end if;
   if v_order.status <> 'open' then
@@ -1540,7 +1815,7 @@ declare
 begin
   select * into v_quote from commerce.checkout_quotes q
   where q.id = cancel_checkout_quote.quote_id for update;
-  if not found or (v_quote.customer_id <> auth.uid() and not public.is_admin()) then
+  if not found or (v_quote.customer_id is distinct from public.current_customer_id() and not public.is_admin()) then
     raise exception 'checkout quote not found';
   end if;
   if v_quote.status in ('cancelled', 'expired') then
@@ -1580,7 +1855,7 @@ CREATE FUNCTION public.create_checkout_quote(items jsonb, idempotency_key text, 
     SET search_path TO ''
     AS $$
 declare
-  v_uid uuid := auth.uid();
+  v_uid uuid := private.require_customer();
   v_key text := btrim(idempotency_key);
   v_items jsonb;
   v_address_input jsonb;
@@ -1736,7 +2011,7 @@ CREATE FUNCTION public.create_order_from_quote(quote_id uuid) RETURNS jsonb
     SET search_path TO ''
     AS $$
 declare
-  v_uid uuid := auth.uid();
+  v_uid uuid := private.require_customer();
   v_quote commerce.checkout_quotes;
   v_order public.orders;
   v_item jsonb;
@@ -1836,7 +2111,7 @@ begin
     shipping_address, shipping_method_id, shipping_method_name,
     discount_code, customer_note, payment_expires_at
   ) values (
-    v_uid, (select pr.email from public.profiles pr where pr.id = v_uid),
+    v_uid, (select coalesce(c.email, '') from public.customers c where c.id = v_uid),
     v_price ->> 'currency', (v_price ->> 'subtotal')::numeric,
     (v_price ->> 'discount_total')::numeric,
     (v_price ->> 'shipping_total')::numeric,
@@ -1883,7 +2158,7 @@ begin
   returning * into v_quote;
 
   insert into public.order_events (order_id, actor_id, type, data)
-  values (v_order.id, v_uid, 'order_created',
+  values (v_order.id, auth.uid(), 'order_created',
           jsonb_build_object('total', v_order.total,
                              'promotions', v_price -> 'promotions',
                              'checkout_quote_id', v_quote.id,
@@ -1897,7 +2172,7 @@ CREATE FUNCTION public.create_order_v2(items jsonb, idempotency_key text, addres
     SET search_path TO ''
     AS $$
 declare
-  v_subject_id uuid := auth.uid();
+  v_subject_id uuid := private.require_customer();
   v_key text := btrim(idempotency_key);
   v_items jsonb;
   v_address jsonb;
@@ -2054,7 +2329,7 @@ declare
 begin
   select * into v_quote from commerce.checkout_quotes q
   where q.id = get_checkout_quote.quote_id
-    and (q.customer_id = auth.uid() or public.is_admin());
+    and (q.customer_id = public.current_customer_id() or public.is_admin());
   if not found then raise exception 'checkout quote not found'; end if;
   return private.checkout_quote_json(v_quote);
 end;
@@ -2104,7 +2379,7 @@ begin
   from commerce.checkout_quotes q
   join public.orders o on o.id = q.order_id
   where q.order_id = get_order_checkout_quote.order_id
-    and (o.customer_id = auth.uid() or public.is_admin());
+    and (o.customer_id = public.current_customer_id() or public.is_admin());
   if not found then raise exception 'checkout quote not found'; end if;
   return private.checkout_quote_json(v_quote);
 end;
@@ -2150,7 +2425,7 @@ begin
   select * into v_order from public.orders o
   where o.id = update_order_address.order_id for update;
   if not found then raise exception 'order not found'; end if;
-  if v_order.customer_id is distinct from auth.uid() and not public.is_admin() then
+  if v_order.customer_id is distinct from public.current_customer_id() and not public.is_admin() then
     raise exception 'not allowed';
   end if;
   if v_order.financial_status <> 'pending' then

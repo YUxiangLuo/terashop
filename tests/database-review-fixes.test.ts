@@ -151,7 +151,7 @@ test('即时订单及意图有不可延长的期限，过期释放库存一次�
   expect(before.same_deadline).toBe(true);
   await expect(withRollback(database, tx => tx`update commerce.payment_intents set expires_at=expires_at+interval '1 day' where id=${intent.id}::uuid`)).rejects.toThrow('immutable');
   expect((await api(`/rest/v1/orders?id=eq.${order.id}`, { service: true, method: 'PATCH', body: { payment_expires_at: '2100-01-01' } })).status).toBe(400);
-  await checked(rpc('prepare_paypal_capture', { payment_intent_id: intent.id, customer_id: buyer.userId }, undefined, true));
+  await checked(rpc('prepare_paypal_capture', { payment_intent_id: intent.id, actor_id: buyer.userId }, undefined, true));
   await withRollback(database, async tx => {
     await tx`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
     for (let i = 0; i < 2; i++) await tx`select public.expire_unpaid_orders(500,'2100-01-01'::timestamptz)`;
@@ -262,7 +262,7 @@ test('支付意图幂等键按订单隔离，不同客户/同客户的不同订�
   const owners = [buyer, other, buyer];
   const orders = await Promise.all(owners.map(owner => fixtureOrder(f, owner, 1, false)));
   const key = crypto.randomUUID();
-  const commands = orders.map((order, i) => ({ order_id: order.id, customer_id: owners[i].userId, provider: 'paypal', idempotency_key: key }));
+  const commands = orders.map((order, i) => ({ order_id: order.id, actor_id: owners[i].userId, provider: 'paypal', idempotency_key: key }));
   const intents = await Promise.all(commands.map(command => checked<{ id: string; order_id: string }>(rpc('create_payment_intent_for_customer', command, undefined, true))));
   expect(new Set(intents.map(i => i.id)).size).toBe(3);
   for (let i = 0; i < commands.length; i++) {

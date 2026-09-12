@@ -63,7 +63,7 @@ for (const first of ['capture', 'cancellation']) {
       const backendPid = await ready.promise;
       competing = first === 'capture'
         ? rpc('cancel_order', { order_id: order.id }, buyer.token)
-        : rpc('prepare_paypal_capture', { payment_intent_id: intent.id, customer_id: buyer.userId }, undefined, true);
+        : rpc('prepare_paypal_capture', { payment_intent_id: intent.id, actor_id: buyer.userId }, undefined, true);
       await waitForBlockedCommand(backendPid);
     } finally {
       release.resolve();
