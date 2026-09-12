@@ -3,6 +3,29 @@
 begin;
 set local check_function_bodies = false;
 
+CREATE FUNCTION private.assert_checkout_capacity(p_customer_id uuid) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('checkout.customer:' || p_customer_id, 0));
+  if (select count(*) from commerce.checkout_quotes q where q.customer_id = p_customer_id
+      and q.status = 'open' and q.expires_at > clock_timestamp())
+     + (select count(*) from public.orders o where o.customer_id = p_customer_id
+        and o.status = 'open' and o.financial_status = 'pending' and o.payment_expires_at > clock_timestamp()) >= 5 then
+    raise exception 'too many active checkouts (quotes and unpaid orders)';
+  end if;
+end;
+$$;
+
+CREATE FUNCTION private.protect_order_payment_window() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if (new.payment_expires_at, new.created_at) is distinct from (old.payment_expires_at, old.created_at) then
+    raise exception 'order payment window is immutable';
+  end if;
+  return new;
+end;
+$$;
+
 CREATE FUNCTION private.active_reserved_quantity(p_variant_id uuid, p_location_id uuid, p_exclude_quote_id uuid DEFAULT NULL::uuid) RETURNS integer
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
@@ -63,7 +86,8 @@ begin
   if not found then
     raise exception 'order not found';
   end if;
-  if v_order.customer_id <> auth.uid() and not public.is_admin() then
+  if v_order.customer_id is distinct from auth.uid() and not public.is_admin()
+     and auth.role() is distinct from 'service_role' then
     raise exception 'not allowed';
   end if;
   if v_order.status <> 'open' then
@@ -76,13 +100,14 @@ begin
     raise exception 'order already has fulfillments';
   end if;
 
+  perform private.lock_order_inventory(array[v_order.id]);
   for v_stock in
     select im.variant_id, im.location_id, (-sum(im.delta))::integer as quantity
     from public.inventory_movements im
     where im.order_id = v_order.id
       and im.reason = 'order'
       and im.delta < 0
-    group by im.variant_id, im.location_id
+    group by im.variant_id, im.location_id order by im.variant_id, im.location_id
   loop
     insert into public.inventory_levels (variant_id, location_id, on_hand)
     values (v_stock.variant_id, v_stock.location_id, 0)
@@ -361,6 +386,11 @@ begin
     raise exception 'items must be a non-empty array';
   end if;
 
+  items := private.canonical_variant_quantities(items);
+  if jsonb_array_length(items) > 50 or (select sum((e->>'quantity')::integer) from jsonb_array_elements(items) e) > 100 then
+    raise exception 'checkout is limited to 50 lines and 100 units';
+  end if;
+  perform private.assert_checkout_capacity(v_uid);
   v_address := private.resolve_checkout_address(v_uid, address, address_id);
 
   select id into v_location_id from public.locations where is_default and is_active limit 1;
@@ -384,7 +414,8 @@ begin
     from public.product_variants v
     join public.products p on p.id = v.product_id
     where v.id = (v_item ->> 'variant_id')::uuid
-    for update of v;
+    -- Stabilize pricing without conflicting with inventory-movement FK KEY SHARE locks.
+    for no key update of v;
 
     if not found or not v_variant.is_active or v_variant.product_status <> 'active' then
       raise exception 'variant not available: %', v_item ->> 'variant_id';
@@ -510,18 +541,15 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.prevent_unpaid_quoted_fulfillment() RETURNS trigger
+CREATE FUNCTION private.prevent_unpaid_fulfillment() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
 begin
   if exists (
-    select 1 from commerce.checkout_quotes q
-    join public.orders o on o.id = q.order_id
-    where q.order_id = new.order_id
-      and q.status = 'converted' and o.financial_status = 'pending'
+    select 1 from public.orders o where o.id = new.order_id and o.financial_status = 'pending'
   ) then
-    raise exception 'quoted order must be paid before fulfillment';
+    raise exception 'order must be paid before fulfillment';
   end if;
   return new;
 end;
@@ -991,6 +1019,7 @@ CREATE FUNCTION private.storefront_order_json(p_order public.orders) RETURNS jso
     'customer_note', p_order.customer_note,
     'cancel_reason', p_order.cancel_reason,
     'paid_at', p_order.paid_at,
+    'payment_expires_at', p_order.payment_expires_at,
     'cancelled_at', p_order.cancelled_at,
     'completed_at', p_order.completed_at,
     'created_at', p_order.created_at,
@@ -1296,11 +1325,7 @@ begin
     return private.checkout_quote_json(v_quote);
   end if;
 
-  if (select count(*) from commerce.checkout_quotes q
-      where q.customer_id = v_uid
-        and q.status in ('open', 'converted') and q.expires_at > now()) >= 5 then
-    raise exception 'too many active checkout quotes';
-  end if;
+  perform private.assert_checkout_capacity(v_uid);
 
   v_address := private.resolve_checkout_address(v_uid, v_address_input, address_id);
   select l.id into v_location_id from public.locations l
@@ -1314,7 +1339,8 @@ begin
     from public.product_variants v
     join public.products p on p.id = v.product_id
     where v.id = (v_item ->> 'variant_id')::uuid
-    for update of v;
+    -- Stabilize pricing without conflicting with inventory-movement FK KEY SHARE locks.
+    for no key update of v;
     if not found or not v_variant.is_active or v_variant.product_status <> 'active' then
       raise exception 'variant not available: %', v_item ->> 'variant_id';
     end if;
@@ -1438,7 +1464,7 @@ begin
     where ql.quote_id = v_quote.id
   )
   order by v.id
-  for update of v;
+  for no key update of v;
 
   -- 验证本 quote 的预占仍被 on_hand 完整覆盖。
   for v_item in
@@ -1498,7 +1524,7 @@ begin
   insert into public.orders (
     customer_id, email, currency, subtotal, discount_total, shipping_total, tax_total, total,
     shipping_address, shipping_method_id, shipping_method_name,
-    discount_code, customer_note
+    discount_code, customer_note, payment_expires_at
   ) values (
     v_uid, (select pr.email from public.profiles pr where pr.id = v_uid),
     v_price ->> 'currency', (v_price ->> 'subtotal')::numeric,
@@ -1507,7 +1533,7 @@ begin
     (v_price ->> 'tax_total')::numeric,
     (v_price ->> 'total')::numeric,
     v_quote.shipping_address, (v_price ->> 'shipping_method_id')::uuid,
-    v_price ->> 'shipping_method_name', v_code_used, v_quote.customer_note
+    v_price ->> 'shipping_method_name', v_code_used, v_quote.customer_note, v_quote.expires_at
   ) returning * into v_order;
 
   for v_line in select value from jsonb_array_elements(v_price -> 'lines')
@@ -1621,7 +1647,6 @@ begin
     raise exception 'max_quotes must be between 1 and 500';
   end if;
   if as_of is null then raise exception 'as_of is required'; end if;
-  if as_of is null then raise exception 'as_of is required'; end if;
 
   for v_quote in
     select q.* from commerce.checkout_quotes q
@@ -1678,6 +1703,33 @@ begin
     v_count := v_count + 1;
   end loop;
   return jsonb_build_object('expired_count', v_count, 'quote_ids', to_jsonb(v_ids));
+end;
+$$;
+
+-- Separate transaction from Quote expiry: never acquire Quote locks after inventory.
+CREATE FUNCTION public.expire_unpaid_orders(max_orders integer DEFAULT 100, as_of timestamptz DEFAULT now()) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_id uuid;
+  v_ids uuid[];
+begin
+  if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
+  if max_orders is null or max_orders not between 1 and 500 then raise exception 'max_orders must be between 1 and 500'; end if;
+  if as_of is null then raise exception 'as_of is required'; end if;
+  select coalesce(array_agg(locked.id order by locked.payment_expires_at, locked.id), '{}'::uuid[]) into v_ids
+  from (select o.id, o.payment_expires_at from public.orders o
+    where o.status = 'open' and o.financial_status = 'pending' and o.payment_expires_at <= as_of
+      and not exists (select 1 from commerce.checkout_quotes q where q.order_id = o.id)
+    order by o.payment_expires_at, o.id for update skip locked limit max_orders) locked;
+  -- Prelock the ENTIRE batch, not each order separately (which can reverse variant order).
+  perform private.lock_order_inventory(v_ids);
+  foreach v_id in array v_ids loop
+    -- Late provider success is retained for reconciliation, never settled on a cancelled order.
+    perform set_config('commerce.expiring_order', v_id::text, true);
+    perform private.cancel_order(v_id, 'order payment window expired');
+    perform set_config('commerce.expiring_order', '', true);
+  end loop;
+  return jsonb_build_object('expired_count', cardinality(v_ids), 'order_ids', to_jsonb(v_ids));
 end;
 $$;
 
@@ -1807,7 +1859,13 @@ $$;
 CREATE FUNCTION public.validate_promotion_params() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
+declare v_key text;
 begin
+  foreach v_key in array array['percent', 'amount', 'get_percent', 'threshold'] loop
+    if (new.params->>v_key)::numeric in ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) then
+      raise exception 'promotion amount and percentage must be finite';
+    end if;
+  end loop;
   case new.type
     when 'order_percentage', 'item_percentage' then
       if coalesce((new.params ->> 'percent')::numeric, 0) <= 0

@@ -59,6 +59,9 @@ begin
     raise exception 'provider refund reference mismatch';
   end if;
   select * into v_order from public.orders o where o.id = v_request.order_id for update;
+  if v_request.restock_requested then
+    perform private.lock_order_inventory(array[v_order.id]);
+  end if;
 
   perform set_config('commerce.async_refund_finalize', 'on', true);
   perform set_config('commerce.refund_write', 'on', true);
@@ -178,6 +181,9 @@ begin
   if not found then
     raise exception 'order not found';
   end if;
+  if v_order.financial_status = 'pending' and v_order.payment_expires_at <= clock_timestamp() then
+    raise exception 'order payment window has expired';
+  end if;
   if v_order.financial_status <> 'pending' then
     raise exception 'order is not pending payment (current: %)', v_order.financial_status;
   end if;
@@ -289,6 +295,9 @@ begin
       'resource_type', v_event.resource_type, 'resource_id', v_event.resource_id
     );
   end if;
+  if v_event.outcome = 'transient_database_error' and v_event.next_attempt_at > clock_timestamp() then
+    return jsonb_build_object('status', 'received', 'outcome', v_event.outcome, 'provider_event_id', v_event.provider_event_id);
+  end if;
   update commerce.payment_provider_events set attempts = attempts + 1
   where id = v_event.id;
 
@@ -310,12 +319,20 @@ begin
     update commerce.payment_provider_events e
     set status = v_status,
         outcome = v_result ->> 'outcome',
+        next_attempt_at = case when v_result ->> 'outcome' = 'transient_database_error'
+          then clock_timestamp() + make_interval(secs => least(300, power(2, least(e.attempts, 8))::integer))
+          else e.next_attempt_at end,
         resource_type = v_resource_type,
         resource_id = v_resource_id,
         last_error = case when v_status = 'received' then v_result ->> 'outcome' else null end,
         processed_at = case when v_status in ('processed', 'ignored') then now() else null end
     where e.id = v_event.id returning * into v_event;
-  exception when others then
+  exception when deadlock_detected or serialization_failure or lock_not_available then
+    update commerce.payment_provider_events e
+    set status = 'received', outcome = 'transient_database_error', last_error = left(sqlerrm,4000), processed_at = null,
+        next_attempt_at = clock_timestamp() + make_interval(secs => least(300,power(2,least(e.attempts,8))::integer))
+    where e.id = v_event.id returning * into v_event;
+  when others then
     update commerce.payment_provider_events e
     set status = 'failed', last_error = left(sqlerrm, 4000), processed_at = null
     where e.id = v_event.id returning * into v_event;
@@ -499,7 +516,11 @@ begin
       return jsonb_build_object('status', 'processed', 'outcome', 'captured',
                                 'resource_type', 'payment_transaction',
                                 'resource_id', v_transaction_id);
-    exception when others then
+    exception when deadlock_detected or serialization_failure or lock_not_available then
+      update commerce.provider_money_movements set last_error = sqlerrm where id = v_movement.id;
+      return jsonb_build_object('status', 'received', 'outcome', 'transient_database_error',
+                                'resource_type', 'provider_money_movement', 'resource_id', v_movement.id);
+    when others then
       v_error := sqlerrm;
       perform private.require_reconciliation(
         v_movement.id, v_error, v_intent.order_id, v_intent.id, null
@@ -625,7 +646,11 @@ begin
       return jsonb_build_object('status', 'processed', 'outcome', 'refunded',
                                 'resource_type', 'refund_request',
                                 'resource_id', v_request.id);
-    exception when others then
+    exception when deadlock_detected or serialization_failure or lock_not_available then
+      update commerce.provider_money_movements set last_error = sqlerrm where id = v_movement.id;
+      return jsonb_build_object('status', 'received', 'outcome', 'transient_database_error',
+                                'resource_type', 'provider_money_movement', 'resource_id', v_movement.id);
+    when others then
       v_error := sqlerrm;
       perform private.require_reconciliation(
         v_movement.id, v_error, v_request.order_id, null, v_request.id
@@ -693,6 +718,7 @@ begin
       and i.status in ('requires_action', 'processing')
   ) then
     if new.status = 'cancelled' and old.status <> 'cancelled'
+       and current_setting('commerce.expiring_order', true) is distinct from old.id::text
        and not exists (
          -- Expiry must remain bounded even when the provider outcome is unknown.
          -- expire_checkout_quotes transitions the quote before cancelling its order.
@@ -833,6 +859,7 @@ CREATE FUNCTION private.refund_request_json(p_request commerce.refund_requests) 
     'source', p_request.source, 'amount', p_request.amount,
     'currency', p_request.currency,
     'provider_reference', p_request.provider_reference,
+    'provider_refund_requested_at', p_request.provider_refund_requested_at,
     'parent_transaction_id', p_request.parent_transaction_id,
     'parent_provider_reference', (
       select t.provider_reference from commerce.payment_transactions t
@@ -896,9 +923,12 @@ begin
   if tg_op = 'INSERT' then
     select * into v_order from public.orders o where o.id = new.order_id for update;
     if not found or v_order.status <> 'open' or v_order.financial_status <> 'pending'
+       or v_order.payment_expires_at <= clock_timestamp()
        or (v_order.total, v_order.currency) is distinct from (new.amount, new.currency) then
       raise exception 'payment intent does not match a payable order';
     end if;
+    new.expires_at := coalesce(new.expires_at, v_order.payment_expires_at);
+    if new.expires_at <> v_order.payment_expires_at then raise exception 'payment intent expiry must match order'; end if;
     if exists (
       select 1 from commerce.payment_intents i
       where i.order_id = new.order_id
@@ -907,9 +937,9 @@ begin
       raise exception 'order already has an active payment intent';
     end if;
   else
-    if (new.order_id, new.provider, new.amount, new.currency, new.idempotency_key)
+    if (new.order_id, new.provider, new.amount, new.currency, new.idempotency_key, new.expires_at)
        is distinct from
-       (old.order_id, old.provider, old.amount, old.currency, old.idempotency_key) then
+       (old.order_id, old.provider, old.amount, old.currency, old.idempotency_key, old.expires_at) then
       raise exception 'payment intent commercial fields are immutable';
     end if;
     if old.provider_reference is not null
@@ -1051,6 +1081,10 @@ begin
     end if;
   end if;
   if tg_op = 'UPDATE' then
+    if old.provider_refund_requested_at is not null
+       and new.provider_refund_requested_at is distinct from old.provider_refund_requested_at then
+      raise exception 'provider refund request marker is immutable';
+    end if;
     if (new.order_id, new.parent_transaction_id, new.provider, new.source,
         new.amount, new.currency, new.idempotency_key, new.request_hash,
         new.reason, new.restock_requested, new.metadata, new.created_at)
@@ -1210,6 +1244,41 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.prepare_paypal_refund(refund_request_id uuid, actor_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_request commerce.refund_requests;
+begin
+  if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
+  if not exists (select 1 from public.profiles p where p.id = actor_id and p.role = 'admin') then
+    raise exception 'admin actor required';
+  end if;
+  select * into v_request from commerce.refund_requests r
+  where r.id = refund_request_id and r.provider = 'paypal' for update;
+  if not found then raise exception 'refund request not found'; end if;
+  -- Bound retries only GET the known resource, including terminal observations.
+  if v_request.provider_reference is not null then return private.refund_request_json(v_request); end if;
+  if v_request.status not in ('requested', 'submitted', 'processing') then
+    raise exception 'terminal refund request cannot be dispatched';
+  end if;
+  -- A local conservative retry window, not a claim of unlimited provider deduplication.
+  -- Older unknown outcomes require a trusted provider lookup/binding, never a fresh POST.
+  if v_request.provider_refund_requested_at < clock_timestamp() - interval '1 hour' then
+    raise exception 'unbound refund dispatch exceeded retry window; reconcile at provider';
+  end if;
+  perform 1 from public.orders o where o.id = v_request.order_id for update;
+  if exists (select 1 from commerce.provider_money_movements m
+    join commerce.payment_transactions t on t.provider_reference = m.provider_reference and t.provider = m.provider
+    where t.id = v_request.parent_transaction_id and m.kind = 'refund'
+      and m.refund_request_id is null and m.reconciliation_status = 'action_required') then
+    raise exception 'capture has a provider reversal; reconcile before refund';
+  end if;
+  update commerce.refund_requests r set provider_refund_requested_at = coalesce(r.provider_refund_requested_at, clock_timestamp())
+  where r.id = v_request.id returning * into v_request;
+  return private.refund_request_json(v_request);
+end;
+$$;
+
 CREATE FUNCTION public.cancel_refund_request(refund_request_id uuid, actor_id uuid, provider_confirmed boolean DEFAULT false, reason text DEFAULT NULL::text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -1231,7 +1300,8 @@ begin
   if v_request.status in ('succeeded', 'failed') then
     raise exception 'completed refund request cannot be cancelled';
   end if;
-  if v_request.provider_reference is not null and not coalesce(provider_confirmed, false) then
+  if (v_request.provider_reference is not null or v_request.provider_refund_requested_at is not null)
+     and not coalesce(provider_confirmed, false) then
     raise exception 'bound refund must be cancelled at the provider first';
   end if;
   update commerce.refund_requests r
@@ -1364,7 +1434,7 @@ begin
   if not found then raise exception 'order not found'; end if;
 
   select * into v_intent from commerce.payment_intents i
-  where i.provider = v_provider and i.idempotency_key = v_key;
+  where i.order_id = v_order.id and i.provider = v_provider and i.idempotency_key = v_key;
   if found then
     if (v_intent.order_id, v_intent.amount, v_intent.currency)
        is distinct from (v_order.id, v_order.total, v_order.currency) then
@@ -1374,6 +1444,7 @@ begin
     if v_order.status <> 'open' or v_order.financial_status <> 'pending' then
       raise exception 'order is not payable';
     end if;
+    if v_order.payment_expires_at <= clock_timestamp() then raise exception 'order payment window has expired'; end if;
     if v_order.total <= 0 then
       raise exception 'zero-amount orders do not require a payment intent';
     end if;
@@ -1384,7 +1455,7 @@ begin
     insert into commerce.payment_intents
       (order_id, provider, amount, currency, idempotency_key, metadata, expires_at)
     values (v_order.id, v_provider, v_order.total, v_order.currency, v_key, metadata,
-            case when v_quote.id is not null then v_quote.expires_at end)
+            case when v_quote.id is not null then v_quote.expires_at else v_order.payment_expires_at end)
     returning * into v_intent;
   end if;
 
@@ -1422,7 +1493,8 @@ begin
       || jsonb_build_object('customer_id', create_payment_intent_for_customer.customer_id)
   );
   select * into v_intent from commerce.payment_intents i
-  where i.provider = lower(btrim(create_payment_intent_for_customer.provider))
+  where i.order_id = create_payment_intent_for_customer.order_id
+    and i.provider = lower(btrim(create_payment_intent_for_customer.provider))
     and i.idempotency_key = btrim(create_payment_intent_for_customer.idempotency_key);
   return private.provider_payment_intent_json(v_intent);
 end;
@@ -1773,6 +1845,9 @@ begin
   select * into v_order from public.orders o
   where o.id = mark_order_paid.order_id for update;
   if not found then raise exception 'order not found'; end if;
+  if v_order.financial_status = 'pending' and v_order.payment_expires_at <= clock_timestamp() then
+    raise exception 'order payment window has expired';
+  end if;
   if v_order.financial_status <> 'pending' then
     raise exception 'order is not pending payment (current: %)', v_order.financial_status;
   end if;
@@ -1868,6 +1943,7 @@ begin
   for v_id in
     select e.id from commerce.payment_provider_events e
     where e.status in ('received', 'failed') and e.attempts < 25
+      and e.next_attempt_at <= clock_timestamp()
     order by e.created_at, e.id
     for update skip locked limit max_events
   loop

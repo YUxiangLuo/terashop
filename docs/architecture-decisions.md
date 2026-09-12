@@ -11,6 +11,7 @@
 ## ADR-002：货币与舍入
 
 - 商品、运费、固定金额促销及交易统一使用 USD；数据库约束内部订单与资金账本的币种，Edge 不能单独承担该校验。金额使用 `numeric(12,2)`，不以浮点数存储或比较。
+- 所有业务 numeric 列显式排除 NaN / ±Infinity；促销 JSON 的金额、百分比和门槛同样要求有限值，不能把精度或非负 CHECK 当作有限值校验。
 - 每个调整先用 PostgreSQL `round(numeric, 2)` 舍入再汇总。
 - 整单优惠按行剩余净额，以整数分最大余数法分摊；余数降序、变体 UUID 升序打破平局，合计严格等于目标优惠。
 - 分子使用精确 `numeric` 整数乘法与 `div/mod`，避免 bigint 溢出和除法舍入；行优惠不得超过行毛额。
@@ -20,6 +21,7 @@
 
 已支付订单的商品、价格、税、运费和地址快照不可原地重算，trigger 同样约束 service role；退款字段仅由受控流程单向推进。
 后续商业变更必须由 Order Edit、Adjustment、补扣或退款事实表达，而不是覆盖原始记录。
+所有订单（包括非 Quote 订单）必须有商品行；行毛额等于单价 × 数量，订单 subtotal / discount_total 等于行汇总。延迟约束在提交时校验，允许同一事务先头后行构建，但不允许分两个 HTTP 请求留下不完整订单；账本 `is_balanced` 也检查头行一致性。
 
 活动 PaymentIntent 同样锁定未支付订单的商业快照。
 金额/币种错配的资金进入对账，不改写意图金额来掩盖错配。
@@ -29,8 +31,10 @@
 ## ADR-004：库存与履约数量
 
 Quote 流程采用 `on_hand - active reserved = available`：报价预占、转单继续持有，支付成功时在同一事务中转为实际扣减；取消/超时仅释放预占。
-`create_order` / `create_order_v2` 当前仍提供下单即扣库存的路径，但 inventory trigger 不允许其消耗 Quote 预占。
-`inventory_movements` 只记录真实 on_hand 变化；取消/退款以原始负流水为回补依据，不依赖变体当前的库存配置。
+`create_order` / `create_order_v2` 保留下单即扣库存的路径，但不能消耗 Quote 预占；付款窗口固定 15 分钟，到期由 `expire_unpaid_orders` 按原仓释放库存。订单及意图的付款期限不可延长，Quote 转单沿用报价期限。
+`inventory_movements` 只记录真实 on_hand 变化；取消/退款以原始负流水为回补依据，不依赖变体当前的库存配置。所有订单必须先付款再履约，避免未付款却已出库的订单无法安全过期。
+
+库存统一按 `(variant_id, location_id)` 取锁；退款/取消在分摊前锁全部原库存，过期 Worker 锁整个批次，不能仅对每个订单单独排序。结账的变体锁使用 `NO KEY UPDATE`，避免与库存流水 FK 的 `KEY SHARE` 形成反向等待。Quote 与即时订单过期 Worker 分别调用，不能在同一事务中先锁库存再取得 Quote 锁。
 
 按行退款优先取消未履约数量，分别在 `refund_request_lines.cancelled_quantity` 预留、`refund_lines.cancelled_quantity` 固化。
 可新履约数量 = 订购数量 − 活跃履约数量 − 已成功取消数量 − 活跃退款请求预留的取消数量。
@@ -48,7 +52,7 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 ## ADR-006：API 与权限
 
 `public` 暴露部分业务表与 RPC，`private` 存放内部函数，`commerce` 保存交易事实且不对 PostgREST 暴露。
-表启用 RLS，新对象默认不授予客户端权限；显式 DTO 选择字段，内部表不是长期 Storefront 合同。`api` / `admin_api` 分层仍是演进目标。
+表启用 RLS，新对象默认不授予客户端权限；已有对象也按表/列列举 SELECT / INSERT / UPDATE / DELETE 授权，anon/authenticated 不得拥有 TRUNCATE / TRIGGER / REFERENCES / MAINTAIN 或序列权限。显式 DTO 选择字段，内部表不是长期 Storefront 合同。`api` / `admin_api` 分层仍是演进目标。
 管理员与客户同属 `authenticated` 角色；订单状态、支付、履约和库存写入必须走受控命令，不能依靠客户端区分管理员。
 
 ## ADR-007：税务范围
@@ -71,17 +75,19 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 客户/管理员 Edge 入口通过 Auth `/user` 验证身份；数据库最终检查归属/管理员。
 PayPal 通过 OAuth2 调官方 postback API 验证 transmission headers；验签后才能入箱。
 库存消费、订单状态、交易、审计和 Outbox 在同一事务提交；同一订单最多一个活跃 PaymentIntent。
-PayPal Capture declined 后终结当前意图并允许新建 Order。
+PayPal Capture declined 后终结当前意图并允许新建 Order。客户端 PaymentIntent 幂等键按 `(order_id, provider, idempotency_key)` 隔离；渠道仍使用本地意图 UUID，不直接复用客户提供的键。
+
+Outbox 存储每次领取确定的 `lease_expires_at` 与随机 `lease_token`。重领不能用新调用者的 lease_seconds 缩短旧期限；complete 必须同时匹配 event、worker、token 且未过期。消费者仍须幂等，租约 fencing 不提供外部副作用的 exactly-once。
 
 PayPal Capture POST 前必须调用 `prepare_paypal_capture`，按 intent → quote → order 顺序复核归属、金额、订单及预占，并持久化捕获标记。
 普通取消不能穿透该标记，网络错误不清除它；重试先查询渠道，再复用原意图 UUID 作为幂等键。
-Quote 到期仍可释放库存并取消订单，不无限延长 hold；无 Quote 的不明捕获需显式重试/对账，不猜测失败。
+Quote 或即时订单到期仍可释放库存并取消订单，不无限延长 hold；这不意味着未知 Capture 已失败，迟到成功资金只入对账，不复活订单或再次扣库存。
 `mark_order_paid` 不得先取消仍能扣款的线上意图再手工收款；不明 Capture 保留保护，已终结失败的 Capture 才允许新支付尝试。
 
 ## ADR-010：Quote 的价格与预占边界
 
 Quote 不提前占用促销 usage；转单时按固定锁顺序锁库存与有限促销，再次计价，只有完整 pricing hash 一致才创建订单，否则重新报价。
-默认 15 分钟、最长 30 分钟，每客户最多 5 个活跃 Quote，每次最多 50 行/100 件；账号/IP 级滥用防护仍需 Edge 限流。
+Quote 默认 15 分钟、最长 30 分钟。三个客户建单/报价入口共享每次最多 50 行/100 件、每客户最多 5 个活跃 checkout（未转单 Quote + 未过期未付款订单）的限制；客户级 advisory lock 串行化配额检查，转单/幂等重试不重复占名额。账号/IP 级滥用防护仍需 Edge 限流。
 支付成功消费预占，Worker 处理超时订单；Quote 进入 completed/cancelled/expired 时清除临时地址和备注，长期快照仅保留在订单。
 
 ## ADR-011：渠道事件、外部资金与异步退款
@@ -89,6 +95,7 @@ Quote 不提前占用促销 usage；转单时按固定锁顺序锁库存与有�
 Inbox 只保存原始事件的 SHA-256 与 allowlist 归一化字段，不保存 customer/payer/payee email 或 OAuth token。
 真实成功 capture/refund 先写不可删除的 `provider_money_movements`，再匹配内部交易；金额冲突、订单取消或预占失效时标记 `action_required` 并写 Outbox，不能丢弃资金、伪造库存或静默复活订单。
 超出 USD 结账能力的成功资金仍按 PayPal 返回的十进制金额保存并对账，不能推进 USD 订单。
+`40P01` / `40001` / `55P03` 等瞬时数据库错误不等同商业冲突：保留资金事实，将 Inbox 留在 received / transient_database_error，按 `next_attempt_at` 指数退避重试本地入账（2–256 秒，Worker 自动重试最多处理 25 次），不重复发出渠道收退款；重试耗尽必须告警。
 
 ### PayPal
 
@@ -103,6 +110,7 @@ pending Refund 由 Worker 查询具体资源，`PAYMENT.CAPTURE.REFUNDED` 仅作
 ### 退款与未自动化范围
 
 退款请求先预留金额/数量，渠道成功后才在单事务写成功账本、更新订单并按原扣减仓回库；failed/cancelled 释放预留。
+Refund POST 前必须调用 service-only `prepare_paypal_refund`，重新检查管理员及请求状态并持久化不可清除的发出标记。已发出但未绑定不等于未退款：不明网络结果保留额度，同键重试使用原请求 UUID；取消必须先取得可信渠道终态确认。未绑定的终态请求禁止 POST，已绑定重试仅 GET 已知 Refund。未绑定且发出超过一小时的请求停止 POST 重试并保留预留，必须通过可信渠道查询/绑定后恢复；这是本店保守重试窗口，不假定 PayPal 幂等键无限期有效。
 同步 `refund_order` 仅用于手工/测试流程，不能穿透活跃渠道退款请求。
 PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard 人工监控；没有专用账本前不接入自动退款/库存状态机。
 

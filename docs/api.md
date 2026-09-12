@@ -38,6 +38,7 @@ POST /rest/v1/rpc/create_order_from_quote
 不传地址时仅预估商品价格，不计目的地税；选择配送方式必须显式传国家。传入地址时 `country` 不可省略。
 Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会静默重定价。
 同一业务重试复用幂等键，不同参数必须使用新键。
+建单与报价均限制 50 行/100 件，每客户最多 5 个活跃 checkout（未转单 Quote + 未过期未付款订单）；转单及幂等重试不重复占名额。订单 DTO 的 `payment_expires_at` 是固定付款期限，不可延长。
 
 | RPC | 参数 / 用途 |
 | --- | --- |
@@ -65,7 +66,8 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 {"order_id":"<uuid>","idempotency_key":"refund-command-id","items":[{"order_item_id":"<uuid>","quantity":1}],"restock":true,"reason":"破损"}
 ```
 
-退款请求被接受不等于渠道退款成功；确认前仅预留可退额度/数量，不回库。
+退款请求被接受不等于渠道退款成功；确认前仅预留可退额度/数量，不回库。已发出的退款即使尚无渠道 ID，也不能无确认取消或释放额度。
+PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复用同一个键。支付/退款响应 `pending_reconciliation=true` 也可能表示可重试的本地数据库故障，不能当作已完成交易。
 渠道密钥、Webhook 和 Worker 接入见 [支付与部署](../supabase/functions/README.md)。
 
 ## 地址合同
@@ -97,8 +99,8 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 
 以下是当前调用链的一部分，不代表历史兼容承诺；新商城优先采用上面的 Quote 流程。
 
-- `create_order` / `create_order_v2`：下单即扣库存，但不能穿透 Quote 预占；V2 增加请求指纹与幂等键。
-- `create_fulfillment`：无幂等键的基础履约命令，安全重试使用 `create_fulfillment_v2`。
+- `create_order` / `create_order_v2`：下单即扣库存，但不能穿透 Quote 预占；V2 增加请求指纹与幂等键。同样受建单限额约束，15 分钟未付款由专用 Worker 取消并按原仓回库。
+- `create_fulfillment`：无幂等键的基础履约命令，所有订单均须先付款；安全重试使用 `create_fulfillment_v2`。
 - `mark_order_paid`：`order_id`、`provider:"manual"`；仅手工收款，线上意图仍可扣款时禁止使用。
 - `refund_order` / `refund_order_v2`：同步手工/测试退款，不代表真实渠道已退款；不能穿透活跃异步退款请求。
 

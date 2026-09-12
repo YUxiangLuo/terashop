@@ -410,8 +410,8 @@ describe('履约行、退款行与 Outbox', () => {
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
 
-    const eventsA = a.data as Array<{ event_id: string; event_type: string; attempt: number }>;
-    const eventsB = b.data as Array<{ event_id: string; event_type: string; attempt: number }>;
+    const eventsA = a.data as Array<{ event_id: string; event_type: string; attempt: number; lease_token: string }>;
+    const eventsB = b.data as Array<{ event_id: string; event_type: string; attempt: number; lease_token: string }>;
     expect(eventsA.length + eventsB.length).toBeGreaterThan(0);
     const idsA = new Set(eventsA.map((event) => event.event_id));
     expect(eventsB.some((event) => idsA.has(event.event_id))).toBe(false);
@@ -419,10 +419,10 @@ describe('履约行、退款行与 Outbox', () => {
     const event = eventsA[0] ?? eventsB[0];
     const owner = eventsA.length > 0 ? workerA : workerB;
     const completed = await rpc('complete_outbox_event', {
-      event_id: event.event_id, worker_id: owner, succeeded: true,
+      event_id: event.event_id, worker_id: owner, lease_token: event.lease_token, succeeded: true,
     }, undefined, true);
     const replay = await rpc('complete_outbox_event', {
-      event_id: event.event_id, worker_id: owner, succeeded: true,
+      event_id: event.event_id, worker_id: owner, lease_token: event.lease_token, succeeded: true,
     }, undefined, true);
     expect(completed.data).toBe(true);
     expect(replay.data).toBe(false);

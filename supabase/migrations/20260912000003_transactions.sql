@@ -3,6 +3,48 @@
 begin;
 set local check_function_bodies = false;
 
+-- Every restock/cancel command uses the same inventory lock order as checkout.
+CREATE FUNCTION private.lock_order_inventory(p_order_ids uuid[]) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_stock record;
+begin
+  for v_stock in
+    select im.variant_id, im.location_id from public.inventory_movements im
+    where im.order_id = any(p_order_ids) and im.reason = 'order' and im.delta < 0
+    group by im.variant_id, im.location_id order by im.variant_id, im.location_id
+  loop
+    insert into public.inventory_levels (variant_id, location_id, on_hand)
+    values (v_stock.variant_id, v_stock.location_id, 0)
+    on conflict on constraint inventory_levels_pkey do nothing;
+    perform 1 from public.inventory_levels il
+    where il.variant_id = v_stock.variant_id and il.location_id = v_stock.location_id for update;
+  end loop;
+end;
+$$;
+
+CREATE FUNCTION private.assert_order_totals() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_id uuid;
+  v_order public.orders;
+  v_subtotal numeric;
+  v_discount numeric;
+  v_count bigint;
+begin
+  -- JSON field lookup avoids invalid NEW fields on the other trigger relation.
+  v_id := case when tg_table_name = 'orders' then (to_jsonb(new)->>'id')::uuid
+    else coalesce(to_jsonb(new)->>'order_id', to_jsonb(old)->>'order_id')::uuid end;
+  select * into v_order from public.orders where id = v_id for update;
+  if not found then return null; end if;
+  select count(*), coalesce(sum(total),0), coalesce(sum(discount_total),0)
+  into v_count, v_subtotal, v_discount from public.order_items where order_id = v_id;
+  if v_count = 0 or (v_subtotal, v_discount) is distinct from (v_order.subtotal, v_order.discount_total) then
+    raise exception 'order line totals do not match header %', v_id;
+  end if;
+  return null;
+end;
+$$;
+
 CREATE FUNCTION private.allocate_refund_cancellation() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -483,10 +525,13 @@ begin
   end if;
   if new.status = 'processing' then
     if new.locked_at is null or coalesce(new.locked_by, '') = ''
+       or new.lease_token is null or new.lease_token is not distinct from old.lease_token
+       or new.lease_expires_at is null or new.lease_expires_at <= new.locked_at
        or new.attempts <> old.attempts + 1 then
       raise exception 'processing outbox event requires a new lease attempt';
     end if;
-  elsif new.locked_at is not null or new.locked_by is not null then
+  elsif new.locked_at is not null or new.locked_by is not null
+        or new.lease_token is not null or new.lease_expires_at is not null then
     raise exception 'non-processing outbox event cannot retain a lease';
   end if;
   if new.status = 'published' and new.published_at is null then
@@ -616,6 +661,8 @@ begin
   if v_order.financial_status not in ('paid', 'partially_refunded') then
     raise exception 'order is not refundable (current: %)', v_order.financial_status;
   end if;
+
+  if restock then perform private.lock_order_inventory(array[v_order.id]); end if;
 
   -- 已退合计（以成功的 refund 支付记录为准）
   select coalesce(sum(p.amount), 0) into v_refunded
@@ -1109,10 +1156,10 @@ begin
   if worker_id is null or length(btrim(worker_id)) = 0 or length(worker_id) > 200 then
     raise exception 'worker_id is required and must be at most 200 characters';
   end if;
-  if max_events not between 1 and 100 then
+  if max_events is null or max_events not between 1 and 100 then
     raise exception 'max_events must be between 1 and 100';
   end if;
-  if lease_seconds not between 30 and 3600 then
+  if lease_seconds is null or lease_seconds not between 30 and 3600 then
     raise exception 'lease_seconds must be between 30 and 3600';
   end if;
 
@@ -1120,9 +1167,8 @@ begin
     select e.id
     from commerce.outbox_events e
     where e.attempts < 25 and (
-      (e.status in ('pending', 'failed') and e.available_at <= now())
-      or (e.status = 'processing'
-          and e.locked_at < now() - make_interval(secs => lease_seconds))
+      (e.status in ('pending', 'failed') and e.available_at <= clock_timestamp())
+      or (e.status = 'processing' and e.lease_expires_at <= clock_timestamp())
     )
     order by e.id
     for update skip locked
@@ -1130,7 +1176,8 @@ begin
   ), claimed as (
     update commerce.outbox_events e
     set status = 'processing', attempts = e.attempts + 1,
-        locked_at = now(), locked_by = btrim(worker_id), last_error = null
+        locked_at = clock_timestamp(), locked_by = btrim(worker_id), last_error = null,
+        lease_token = gen_random_uuid(), lease_expires_at = clock_timestamp() + make_interval(secs => lease_seconds)
     from candidates c
     where e.id = c.id
     returning e.*
@@ -1142,6 +1189,7 @@ begin
            'event_type', c.event_type,
            'payload', c.payload,
            'attempt', c.attempts,
+           'lease_token', c.lease_token, 'lease_expires_at', c.lease_expires_at,
            'created_at', c.created_at
          ) order by c.id), '[]'::jsonb)
   into v_result
@@ -1150,7 +1198,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.complete_outbox_event(event_id uuid, worker_id text, succeeded boolean, error_message text DEFAULT NULL::text) RETURNS boolean
+CREATE FUNCTION public.complete_outbox_event(event_id uuid, worker_id text, lease_token uuid, succeeded boolean, error_message text DEFAULT NULL::text) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1166,11 +1214,12 @@ begin
                             secs => least(3600, power(2, least(e.attempts, 10))::integer)
                           ) end,
       last_error = case when succeeded then null else left(error_message, 4000) end,
-      locked_at = null,
-      locked_by = null
+      locked_at = null, locked_by = null, lease_token = null, lease_expires_at = null
   where e.event_id = complete_outbox_event.event_id
     and e.status = 'processing'
-    and e.locked_by = btrim(complete_outbox_event.worker_id);
+    and e.locked_by = btrim(complete_outbox_event.worker_id)
+    and e.lease_token = complete_outbox_event.lease_token
+    and e.lease_expires_at > clock_timestamp();
   return found;
 end;
 $$;
@@ -1358,6 +1407,9 @@ begin
       'captured', v_captured, 'refunded', v_refunded,
       'net_paid', v_captured - v_refunded,
       'is_balanced', round(v_order.subtotal + v_adjustment_total, 2) = v_order.total
+        and exists (select 1 from public.order_items oi where oi.order_id = v_order.id)
+        and (v_order.subtotal, v_order.discount_total) = (
+          select sum(oi.total), sum(oi.discount_total) from public.order_items oi where oi.order_id = v_order.id)
     ),
     'adjustments', (
       select coalesce(jsonb_agg(jsonb_build_object(

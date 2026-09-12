@@ -39,7 +39,7 @@ export async function handlePayPalCreateRefund(request: Request): Promise<Respon
     const user = await authenticatedUser(request);
     const body = await readJsonBody(request, 65536);
     const refundRequest = parseRefundRequest(body);
-    const local = await serviceRpc<RefundRequestDto>('create_refund_request', {
+    let local = await serviceRpc<RefundRequestDto>('create_refund_request', {
       ...refundRequest,
       actor_id: user.id,
       provider: 'paypal',
@@ -49,6 +49,10 @@ export async function handlePayPalCreateRefund(request: Request): Promise<Respon
 
     const config = payPalClientConfig();
     const { livemode } = config;
+    // A durable marker closes the dispatch/cancel race and survives ambiguous HTTP failures.
+    local = await serviceRpc<RefundRequestDto>('prepare_paypal_refund', {
+      refund_request_id: local.id, actor_id: user.id,
+    });
     const refund = local.provider_reference
       ? await payPalRequest<PayPalRefund>(
           `/v2/payments/refunds/${encodeURIComponent(local.provider_reference)}`,
@@ -95,7 +99,7 @@ export async function handlePayPalCreateRefund(request: Request): Promise<Respon
       amount: local.amount,
       currency: local.currency,
       processing_status: event.outcome,
-      pending_reconciliation: event.outcome === 'action_required',
+      pending_reconciliation: event.status === 'received' || event.outcome === 'action_required',
     }, 200, cors);
   } catch (error) {
     console.error('paypal-create-refund failed', error instanceof Error ? error.name : 'unknown');

@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import {
   api, rpc, signup, variantBySku, shippingByName, stockOf,
   TEST_ADDRESS, installTestTax, type TestUser,
@@ -23,6 +23,14 @@ beforeAll(async () => {
   cableId = await variantBySku('CABLE-1M');
   kbRedId = await variantBySku('KB87-RED');
   mugId = await variantBySku('MUG-350');
+});
+
+// Keep per-test unpaid fixtures from exhausting the shared customer's checkout quota.
+afterEach(async () => {
+  const { data } = await api('/rest/v1/orders?status=eq.open&financial_status=eq.pending&select=id', { token: buyer.token });
+  for (const order of data as Array<{ id: string }>) {
+    expect((await rpc('cancel_order', { order_id: order.id }, buyer.token)).status).toBe(200);
+  }
 });
 
 describe('用户与地址', () => {
@@ -271,7 +279,10 @@ describe('下单：折扣码', () => {
   });
 
   test('同一买家重复使用被拒绝（大小写不敏感）', async () => {
-    // buyer 在"完整链路"里已用过 WELCOME10
+    // 独立建立兑换事实；其他测试的未付款订单会在 afterEach 取消。
+    expect((await rpc('create_order', {
+      items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10',
+    }, buyer.token)).status).toBe(200);
     const { data } = await rpc(
       'create_order',
       { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'welcome10' },

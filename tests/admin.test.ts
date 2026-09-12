@@ -75,6 +75,31 @@ describe('权限边界', () => {
 });
 
 describe('发货（履约）', () => {
+  test('即时订单也必须先支付再履约', async () => {
+    const result = await rpc('create_fulfillment', { order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }] }, admin.token);
+    expect(result.status).toBe(400);
+    expect(result.data).toMatchObject({ message: 'order must be paid before fulfillment' });
+  });
+
+  test('mark_order_paid → paid + payments 记录 + 事件', async () => {
+    const { data } = await rpc(
+      'mark_order_paid',
+      { order_id: orderId, provider: 'manual', provider_ref: 'CASH-001' },
+      admin.token
+    );
+    expect((data as Record<string, unknown>).financial_status).toBe('paid');
+
+    const { data: pays } = await api(
+      `/rest/v1/payments?order_id=eq.${orderId}&select=provider,kind,status,amount`,
+      { token: customer.token }
+    );
+    const p = (pays as Record<string, unknown>[])[0];
+    expect(p.provider).toBe('manual');
+    expect(p.kind).toBe('charge');
+    expect(p.status).toBe('succeeded');
+    expect(Number(p.amount)).toBeCloseTo(orderTotal);
+  });
+
   test('超发被拒绝', async () => {
     const { data } = await rpc(
       'create_fulfillment',
@@ -121,7 +146,7 @@ describe('发货（履约）', () => {
       token: customer.token,
     });
     expect((o as Record<string, unknown>[])[0].fulfillment_status).toBe('partially_fulfilled');
-    expect((o as Record<string, unknown>[])[0].status).toBe('open'); // 未支付，不算完成
+    expect((o as Record<string, unknown>[])[0].status).toBe('open'); // 尚未全部履约，不算完成
   });
 
   test('累计超发同样被拒绝（2 已发，再发 2 > 3）', async () => {
@@ -135,14 +160,14 @@ describe('发货（履约）', () => {
 
   test('已发货的订单不能取消、不能改地址', async () => {
     const c = await rpc('cancel_order', { order_id: orderId }, customer.token);
-    expect((c.data as { message: string }).message).toContain('fulfillments');
+    expect((c.data as { message: string }).message).toContain('refund flow');
 
     const u = await rpc(
       'update_order_address',
       { order_id: orderId, address: TEST_ADDRESS },
       customer.token
     );
-    expect((u.data as { message: string }).message).toContain('address is locked');
+    expect((u.data as { message: string }).message).toContain('paid orders');
   });
 
   test('买家可读自己订单的物流信息', async () => {
@@ -157,25 +182,6 @@ describe('发货（履约）', () => {
 });
 
 describe('支付标记与订单完成', () => {
-  test('mark_order_paid → paid + payments 记录 + 事件', async () => {
-    const { data } = await rpc(
-      'mark_order_paid',
-      { order_id: orderId, provider: 'manual', provider_ref: 'CASH-001' },
-      admin.token
-    );
-    expect((data as Record<string, unknown>).financial_status).toBe('paid');
-
-    const { data: pays } = await api(
-      `/rest/v1/payments?order_id=eq.${orderId}&select=provider,kind,status,amount`,
-      { token: customer.token }
-    );
-    const p = (pays as Record<string, unknown>[])[0];
-    expect(p.provider).toBe('manual');
-    expect(p.kind).toBe('charge');
-    expect(p.status).toBe('succeeded');
-    expect(Number(p.amount)).toBeCloseTo(orderTotal);
-  });
-
   test('payments.raw 对买家不可见', async () => {
     const { data } = await api(`/rest/v1/payments?order_id=eq.${orderId}&select=id,raw`, {
       token: customer.token,
@@ -216,8 +222,8 @@ describe('支付标记与订单完成', () => {
     );
     expect((data as { type: string }[]).map((e) => e.type)).toEqual([
       'order_created',
-      'fulfillment_created',
       'payment_received',
+      'fulfillment_created',
       'fulfillment_created',
     ]);
   });

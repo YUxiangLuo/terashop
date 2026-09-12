@@ -702,6 +702,7 @@ export type Database = {
           id: string
           order_number: number
           paid_at: string | null
+          payment_expires_at: string
           shipping_address: Json
           shipping_method_id: string | null
           shipping_method_name: string | null
@@ -730,6 +731,7 @@ export type Database = {
           id?: string
           order_number?: never
           paid_at?: string | null
+          payment_expires_at?: string
           shipping_address: Json
           shipping_method_id?: string | null
           shipping_method_name?: string | null
@@ -758,6 +760,7 @@ export type Database = {
           id?: string
           order_number?: never
           paid_at?: string | null
+          payment_expires_at?: string
           shipping_address?: Json
           shipping_method_id?: string | null
           shipping_method_name?: string | null
@@ -1530,6 +1533,7 @@ export type Database = {
         Args: {
           error_message?: string
           event_id: string
+          lease_token: string
           succeeded: boolean
           worker_id: string
         }
@@ -1648,6 +1652,10 @@ export type Database = {
         Args: { as_of?: string; max_quotes?: number }
         Returns: Json
       }
+      expire_unpaid_orders: {
+        Args: { as_of?: string; max_orders?: number }
+        Returns: Json
+      }
       get_checkout_quote: { Args: { quote_id: string }; Returns: Json }
       get_inventory_availability: {
         Args: { location_id?: string; variant_id: string }
@@ -1707,6 +1715,7 @@ export type Database = {
           id: string
           order_number: number
           paid_at: string | null
+          payment_expires_at: string
           shipping_address: Json
           shipping_method_id: string | null
           shipping_method_name: string | null
@@ -1746,6 +1755,10 @@ export type Database = {
       }
       prepare_paypal_capture: {
         Args: { customer_id: string; payment_intent_id: string }
+        Returns: Json
+      }
+      prepare_paypal_refund: {
+        Args: { actor_id: string; refund_request_id: string }
         Returns: Json
       }
       price_checkout: {

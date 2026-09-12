@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, TEST_ADDRESS, installTestTax, type TestUser } from './helpers';
 import { checked, fixtureOrder, fixtureIntent, paymentFixture, paymentEvent, type PaymentFixture } from './payment-fixtures';
 import { heldTransactionRace, testDatabase } from './database-concurrency';
@@ -11,9 +11,11 @@ const OTHER_ADDRESS = { ...TEST_ADDRESS, country: 'CA' };
 let removeTax: (() => Promise<void>) | undefined;
 beforeAll(async () => {
   removeTax = await installTestTax();
-  admin = await signup(); buyer = await signup(); await makeAdmin(admin.userId);
+  admin = await signup(); await makeAdmin(admin.userId);
   fixture = await paymentFixture(admin);
 });
+// Tests are independent; do not accumulate active orders against one customer's quota.
+beforeEach(async () => { buyer = await signup(); });
 afterAll(async () => {
   await removeTax?.();
   if (fixture) await api(`/rest/v1/products?id=eq.${fixture.productId}`, {

@@ -101,7 +101,7 @@ export async function handlePayPalCaptureOrder(request: Request): Promise<Respon
       amount: local.amount,
       currency: local.currency,
       processing_status: result.outcome,
-      pending_reconciliation: result.outcome === 'action_required',
+      pending_reconciliation: result.status === 'received' || result.outcome === 'action_required',
     }, 200, cors);
   } catch (error) {
     console.error('paypal-capture-order failed', error instanceof Error ? error.name : 'unknown');
