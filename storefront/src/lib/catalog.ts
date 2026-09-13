@@ -61,9 +61,18 @@ export const getProduct = (id: string) =>
 
 export function imageUrl(value: string | undefined): string | undefined {
   if (!value) return undefined;
-  if (/^\/images\/[a-z0-9-]+\.webp$/.test(value)) return value;
   try {
-    return new URL(value).protocol === "https:" ? value : undefined;
+    const url = new URL(value);
+    if (url.username || url.password) return undefined;
+    if (url.protocol === "https:") return value;
+    // HTTP is only for this configured local Supabase's public Storage endpoint.
+    const local = new URL(PUBLIC_SUPABASE_URL);
+    return url.protocol === "http:" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(local.hostname) &&
+      url.origin === local.origin &&
+      url.pathname.startsWith("/storage/v1/object/public/")
+      ? value
+      : undefined;
   } catch {
     return undefined;
   }

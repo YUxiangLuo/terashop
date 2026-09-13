@@ -11,7 +11,7 @@
 ```bash
 bun install
 bun run start             # API :54321 / Studio :54323 / DB :54322
-bun run setup             # 重放迁移 + 演示数据，会清空本地数据库
+bun run setup             # 重放迁移 + 演示数据 + 上传 Storage 图片，会清空本地数据库
 bun run storefront:dev   # 打开终端显示的前台地址
 ```
 

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { api, checked } from './helpers';
+import { API, ANON_KEY, api, checked, signup } from './helpers';
 
 test("default seed is a complete women's fashion catalog", async () => {
   const products = await checked<Array<{ id: string; product_type: string }>>(api(
@@ -32,8 +32,17 @@ test("default seed is a complete women's fashion catalog", async () => {
   ));
   expect(images).toHaveLength(10);
   for (const image of images) {
-    expect(image.url).toMatch(/^\/images\/[a-z0-9-]+\.webp$/);
-    expect(await Bun.file(`storefront/static${image.url}`).exists()).toBe(true);
+    const url = new URL(image.url);
+    expect(url.origin).toBe(new URL(API).origin);
+    expect(url.pathname).toMatch(/^\/storage\/v1\/object\/public\/catalog-media\/[a-z0-9-]+\/[a-f0-9]{64}\.webp$/);
+    const slug = url.pathname.split('/').at(-2)!;
+    const response = await fetch(image.url);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('image/webp');
+    expect(response.headers.get('cache-control')).toContain('max-age=31536000');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect(bytes).toEqual(await Bun.file(`supabase/seed-assets/${slug}.webp`).bytes());
+    expect(url.pathname.endsWith(`${new Bun.CryptoHasher('sha256').update(bytes).digest('hex')}.webp`)).toBe(true);
   }
   const variants = await checked<Array<{ id: string }>>(api(
     `/rest/v1/product_variants?product_id=in.(${ids})&select=id`, { service: true },
@@ -44,4 +53,34 @@ test("default seed is a complete women's fashion catalog", async () => {
   ));
   expect(stock.some(level => level.on_hand === 0)).toBe(true);
   expect(stock.some(level => level.on_hand > 0)).toBe(true);
+});
+
+test('public catalog Storage does not grant anonymous or customer writes', async () => {
+  const { token } = await signup();
+  const images = await checked<Array<{ url: string }>>(api('/rest/v1/product_images?url=like.*%2Fcatalog-media%2F*&select=url&limit=1', { service: true }));
+  const key = new URL(images[0].url).pathname.split('/catalog-media/')[1];
+  const bytes = await Bun.file('supabase/seed-assets/linen-wrap-dress.webp').bytes();
+  for (const credential of [ANON_KEY, token]) {
+    for (const [method, path] of [
+      ['POST', `catalog-media/forbidden-${crypto.randomUUID()}.webp`],
+      ['PUT', `catalog-media/${key}`],
+    ]) {
+      const response = await fetch(`${API}/storage/v1/object/${path}`, {
+        method, headers: { apikey: ANON_KEY, Authorization: `Bearer ${credential}`, 'Content-Type': 'image/webp' },
+        body: bytes,
+      });
+      expect(response.ok).toBe(false);
+      expect(JSON.stringify(await response.json())).toMatch(/row.level security|unauthorized/i);
+    }
+    // Storage may report a successful empty deletion when RLS hides the row.
+    await fetch(`${API}/storage/v1/object/catalog-media`, {
+      method: 'DELETE', headers: { apikey: ANON_KEY, Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefixes: [key] }),
+    });
+    const download = await fetch(images[0].url, { cache: 'no-store' });
+    expect(download.status).toBe(200);
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(
+      await Bun.file(`supabase/seed-assets/${key.split('/')[0]}.webp`).bytes(),
+    );
+  }
 });

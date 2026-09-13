@@ -1,5 +1,5 @@
 -- Women's fashion demonstration catalog (loaded by `supabase db reset`).
--- Prices are USD; illustrative AI images are served by the sample storefront.
+-- Prices are USD; `bun run setup` also uploads images and inserts their Storage URLs.
 do $$
 declare
   category_id uuid; child_category_id uuid; current_product_id uuid; color_option uuid; size_option uuid;
@@ -65,7 +65,6 @@ begin
       where v.product_id=current_product_id and
         ((ov.option_id=color_option and split_part(v.sku,'-',2)=ov.position::text) or
          (ov.option_id=size_option and split_part(v.sku,'-',3)=ov.value));
-    insert into public.product_images(product_id,url,alt,position) values(current_product_id,'/images/'||item.slug||'.webp',item.name,1);
     insert into public.inventory_levels(variant_id,location_id,on_hand)
       select id,location_id,case when position in (4,6) then 0 else 18+position end from public.product_variants where product_variants.product_id=current_product_id;
     insert into public.metafields(owner_type,owner_id,namespace,key,type,value) values
