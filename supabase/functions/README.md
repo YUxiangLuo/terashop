@@ -10,6 +10,7 @@ Edge Runtime 需提供 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_
 
 | 入口 | 认证 |
 | --- | --- |
+| `paypal-client-token` | handler 验证用户 JWT；卡开关控制，域名由服务器配置 |
 | PayPal 创建 / 捕获 / 退款 | handler 验证用户 JWT，数据库校验归属/管理员 |
 | `paypal-webhook` | 不验证 JWT；通过官方 postback API 验证 transmission headers |
 | `paypal-reconcile-refunds` | handler 校验 service-role token |
@@ -30,6 +31,8 @@ Cart 的创建/读取/编辑/预览可由游客调用；上线前在覆盖直接
 必填：`PAYPAL_CLIENT_ID`、`PAYPAL_CLIENT_SECRET`、`PAYPAL_WEBHOOK_ID`；创建 Order 还需 `PAYPAL_RETURN_URL` 和 `PAYPAL_CANCEL_URL`（生产 HTTPS）。
 生产显式设置 `PAYPAL_LIVEMODE=true`；`PAYPAL_BRAND_NAME` 可选。`PAYPAL_API_BASE` 生产留空，由模式选择官方地址。结账统一使用 USD，商户账户须具备对应收款能力。
 地址映射为通用 `recipient_name` / `line1` / `line2` / `city` / `region` / `postal_code` / `country`，不推断国家或强制所有地区填写城市、州及邮编；渠道的额外地区要求仍需满足。
+
+站内卡支付默认关闭。商户获批 Expanded Checkout 并通过 Sandbox 验收后，设置 `PAYPAL_CARDS_ENABLED=true`、`PAYPAL_STOREFRONT_DOMAIN` 为实际 Storefront hostname，部署 `paypal-client-token` 与匹配的 create/capture handler。浏览器仅获得域绑定的 SDK v6 client token；服务端 OAuth token 不下发。网关须对该入口和创建/捕获接口按 IP/用户限流；此仓库没有分布式限流实现。关闭卡开关会停止签发 token、新建卡 Order 和新卡 Capture，但不阻断已发生资金的入账与对账。卡表单、3DS 策略和验收清单见 [Storefront 合同](../../docs/storefront-paypal.md)。
 
 Webhook 指向 `/functions/v1/paypal-webhook`，订阅：
 

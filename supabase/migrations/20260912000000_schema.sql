@@ -301,6 +301,7 @@ CREATE TABLE commerce.payment_intents (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     order_id uuid NOT NULL,
     provider text NOT NULL,
+    payment_method text DEFAULT 'paypal'::text NOT NULL,
     status text DEFAULT 'requires_action'::text NOT NULL,
     amount numeric(12,2) NOT NULL CONSTRAINT payment_intents_amount_finite CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
     currency text NOT NULL,
@@ -318,6 +319,8 @@ CREATE TABLE commerce.payment_intents (
     CONSTRAINT payment_intents_currency_check CHECK (currency = 'USD'),
     CONSTRAINT payment_intents_idempotency_key_check CHECK ((length(btrim(idempotency_key)) > 0)),
     CONSTRAINT payment_intents_metadata_check CHECK ((jsonb_typeof(metadata) = 'object'::text)),
+    CONSTRAINT payment_intents_payment_method_check CHECK ((payment_method = ANY (ARRAY['paypal'::text, 'card'::text]))),
+    CONSTRAINT payment_intents_payment_method_provider_check CHECK (((payment_method <> 'card'::text) OR (provider = 'paypal'::text))),
     CONSTRAINT payment_intents_provider_check CHECK (provider = 'paypal'),
     CONSTRAINT payment_intents_status_check CHECK ((status = ANY (ARRAY['requires_action'::text, 'processing'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );

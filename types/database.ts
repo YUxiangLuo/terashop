@@ -1690,6 +1690,7 @@ export type Database = {
           idempotency_key: string
           metadata?: Json
           order_id: string
+          payment_method?: string
           provider: string
         }
         Returns: Json
@@ -1700,6 +1701,7 @@ export type Database = {
           idempotency_key: string
           metadata?: Json
           order_id: string
+          payment_method?: string
           provider: string
         }
         Returns: Json

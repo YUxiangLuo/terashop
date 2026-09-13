@@ -24,6 +24,7 @@ import {
   validatePayPalOrder,
   ingestPayPalCapture,
   payPalClientConfig,
+  requirePayPalCardsEnabled,
 } from '../_shared/paypal.ts';
 
 function bindStatus(status: string): 'requires_action' | 'processing' {
@@ -45,10 +46,16 @@ export async function handlePayPalCreateOrder(request: Request): Promise<Respons
     const body = await readJsonBody(request);
     const orderId = requireUuid(body.order_id, 'order_id');
     const idempotencyKey = requireIdempotencyKey(body.idempotency_key);
+    const paymentMethod = body.payment_method === undefined ? 'paypal' : body.payment_method;
+    if (paymentMethod !== 'paypal' && paymentMethod !== 'card') {
+      throw new HttpError('payment_method must be paypal or card');
+    }
+    if (paymentMethod === 'card') requirePayPalCardsEnabled();
     const local = await serviceRpc<LocalPayPalIntent>('create_payment_intent_for_customer', {
       order_id: orderId,
       actor_id: user.id,
       provider: 'paypal',
+      payment_method: paymentMethod,
       idempotency_key: idempotencyKey,
       metadata: { edge_function: 'paypal-create-order' },
     });
@@ -82,7 +89,15 @@ export async function handlePayPalCreateOrder(request: Request): Promise<Respons
               amount: { currency_code: local.currency, value: amount },
               shipping: payPalShippingUnit(local.shipping_address),
             }],
-            payment_source: {
+            payment_source: paymentMethod === 'card' ? {
+              card: {
+                attributes: { verification: { method: 'SCA_WHEN_REQUIRED' } },
+                experience_context: {
+                  return_url: configuredRedirectUrl(requiredEnv('PAYPAL_RETURN_URL'), 'PAYPAL_RETURN_URL'),
+                  cancel_url: configuredRedirectUrl(requiredEnv('PAYPAL_CANCEL_URL'), 'PAYPAL_CANCEL_URL'),
+                },
+              },
+            } : {
               paypal: {
                 experience_context: {
                   payment_method_preference: 'IMMEDIATE_PAYMENT_REQUIRED',
@@ -124,14 +139,15 @@ export async function handlePayPalCreateOrder(request: Request): Promise<Respons
         'capture_reconciliation_pending',
       );
     }
-    const approvalUrl = payPalApprovalUrl(order, config.livemode);
-    if (providerStatus === 'requires_action' && !approvalUrl) {
+    const approvalUrl = paymentMethod === 'card' ? null : payPalApprovalUrl(order, config.livemode);
+    if (paymentMethod === 'paypal' && providerStatus === 'requires_action' && !approvalUrl) {
       throw new HttpError('PayPal did not return an approval URL', 502, 'paypal_bad_response');
     }
     return jsonResponse({
       payment_intent_id: bound.id,
       order_id: bound.order_id,
       provider: 'paypal',
+      payment_method: paymentMethod,
       provider_reference: order.id,
       provider_status: order.status,
       status: processing?.outcome ?? bound.status,

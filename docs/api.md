@@ -284,7 +284,8 @@ SSG 页面、游客会话、PayPal 返回页及错误重试见 [Storefront PayPa
 
 | Edge Function | 调用方 | 请求 |
 | --- | --- | --- |
-| `paypal-create-order` | 客户 | `order_id`、`idempotency_key`；跳转返回的 `approve_url` |
+| `paypal-client-token` | 客户 | `{}`；卡支付启用时返回 SDK v6 `client_token` 与 `expires_in`，不得静态缓存 |
+| `paypal-create-order` | 客户 | `order_id`、`idempotency_key`、可选 `payment_method`（默认 `paypal` 或 `card`）；钱包返回 `approve_url`，卡由 SDK 提交 `provider_reference` |
 | `paypal-capture-order` | 客户 | 买家批准后传 `payment_intent_id` |
 | `paypal-create-refund` | 管理员 | `order_id`、`idempotency_key`、可选 `items`、`shipping_amount` 或互斥的 `amount`，以及 `restock`、`reason` |
 

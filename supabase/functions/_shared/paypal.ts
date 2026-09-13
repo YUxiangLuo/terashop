@@ -47,6 +47,45 @@ export function resetPayPalTokenCacheForTest(): void {
   tokenCache.clear();
 }
 
+export function requirePayPalCardsEnabled(): void {
+  const enabled = optionalEnv('PAYPAL_CARDS_ENABLED', 'false');
+  if (enabled !== 'true' && enabled !== 'false') {
+    throw new PayPalIntegrationError('Invalid card configuration', 500, 'paypal_config_invalid');
+  }
+  if (enabled !== 'true') {
+    throw new PayPalIntegrationError('Card payments are not enabled', 409, 'paypal_cards_disabled');
+  }
+}
+
+// SDK v6 tokens are deliberately separate from the server OAuth token cache.
+// The domain comes from deployment configuration, never from request input.
+export async function payPalBrowserToken(config: PayPalClientConfig) {
+  const domain = requiredEnv('PAYPAL_STOREFRONT_DOMAIN');
+  if (!/^(?=.{1,253}$)[a-z0-9]+(?:[.-][a-z0-9]+)*$/.test(domain)) {
+    throw new PayPalIntegrationError('Invalid storefront domain', 500, 'paypal_config_invalid');
+  }
+  const response = await fetchPayPal(`${normalizedApiBase(config.apiBase)}/v1/oauth2/token`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${base64Utf8(`${config.clientId}:${config.clientSecret}`)}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: 'application/json',
+    },
+    body: new URLSearchParams({
+      grant_type: 'client_credentials', response_type: 'client_token',
+      intent: 'sdk_init', 'domains[]': domain,
+    }),
+  }, config);
+  const parsed = await responseJson(response);
+  if (!response.ok || typeof parsed.access_token !== 'string'
+      || !/^\S{1,8192}$/.test(parsed.access_token)
+      || typeof parsed.expires_in !== 'number'
+      || !Number.isFinite(parsed.expires_in) || parsed.expires_in <= 0) {
+    throw new PayPalIntegrationError('SDK token request failed', 502, 'paypal_auth_failed');
+  }
+  return { client_token: parsed.access_token, expires_in: parsed.expires_in };
+}
+
 function base64Utf8(value: string): string {
   const bytes = encoder.encode(value);
   let binary = '';
@@ -503,6 +542,7 @@ export interface LocalPayPalIntent {
   order_id: string;
   order_number: number | string;
   provider: string;
+  payment_method?: 'paypal' | 'card';
   status: string;
   amount: number | string;
   currency: string;
@@ -553,6 +593,30 @@ export function validatePayPalOrder(
     throw new PayPalIntegrationError('PayPal Order reference changed', 409, 'provider_mismatch');
   }
   return unit;
+}
+
+// Only call before a new capture command. Existing money facts must always be
+// ingested, even if the source or authentication would now fail this policy.
+export function validatePayPalCardForCapture(order: PayPalOrder): void {
+  const source = record(order.payment_source);
+  const card = record(source?.card);
+  if (!card || Object.keys(source!).some(key => key !== 'card')) {
+    throw new PayPalIntegrationError('Expected a card payment source', 409, 'provider_mismatch');
+  }
+  if (order.status !== 'APPROVED') {
+    throw new PayPalIntegrationError('Card order is not approved', 409, 'paypal_order_not_approved');
+  }
+  // Under SCA_WHEN_REQUIRED an approved order can legitimately have no 3DS
+  // result. If PayPal supplies one, never discard an explicit failure/unknown.
+  if (card.authentication_result === undefined) return;
+  const authentication = record(card.authentication_result);
+  const threeDS = record(authentication?.three_d_secure);
+  if (!authentication || !['YES', 'POSSIBLE'].includes(String(authentication.liability_shift))
+      || (authentication.three_d_secure !== undefined && !threeDS)
+      || (threeDS?.authentication_status !== undefined
+          && !['Y', 'A'].includes(String(threeDS.authentication_status)))) {
+    throw new PayPalIntegrationError('Card authentication was not accepted', 409, 'paypal_card_authentication_required');
+  }
 }
 
 export function extractPayPalCapture(

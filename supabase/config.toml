@@ -175,6 +175,9 @@ inspector_port = 8083
 deno_version = 2
 
 # PayPal customer/admin commands verify JWT in the handler, not the gateway.
+[functions.paypal-client-token]
+verify_jwt = false
+
 [functions.paypal-create-order]
 verify_jwt = false
 

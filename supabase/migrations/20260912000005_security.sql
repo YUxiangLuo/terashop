@@ -474,8 +474,8 @@ REVOKE ALL ON FUNCTION public.create_checkout_quote(items jsonb, idempotency_key
 REVOKE ALL ON FUNCTION public.create_fulfillment(order_id uuid, items jsonb, idempotency_key text, carrier text, tracking_number text, tracking_url text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_order(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_order_from_quote(quote_id uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb, payment_method text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb, payment_method text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_refund_request(order_id uuid, actor_id uuid, provider text, idempotency_key text, items jsonb, amount numeric, reason text, restock boolean, metadata jsonb, shipping_amount numeric) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.enforce_single_default_address() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.expire_checkout_quotes(max_quotes integer, as_of timestamp with time zone) FROM PUBLIC;
@@ -543,8 +543,8 @@ GRANT ALL ON FUNCTION public.create_checkout_quote(items jsonb, idempotency_key 
 GRANT ALL ON FUNCTION public.create_fulfillment(order_id uuid, items jsonb, idempotency_key text, carrier text, tracking_number text, tracking_url text) TO authenticated;
 GRANT ALL ON FUNCTION public.create_order(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) TO authenticated;
 GRANT ALL ON FUNCTION public.create_order_from_quote(quote_id uuid) TO authenticated;
-GRANT ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb) TO service_role;
-GRANT ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb) TO service_role;
+GRANT ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb, payment_method text) TO service_role;
+GRANT ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb, payment_method text) TO service_role;
 GRANT ALL ON FUNCTION public.create_refund_request(order_id uuid, actor_id uuid, provider text, idempotency_key text, items jsonb, amount numeric, reason text, restock boolean, metadata jsonb, shipping_amount numeric) TO service_role;
 GRANT ALL ON FUNCTION public.expire_checkout_quotes(max_quotes integer, as_of timestamp with time zone) TO service_role;
 GRANT ALL ON FUNCTION public.get_checkout_quote(quote_id uuid) TO authenticated;

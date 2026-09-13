@@ -17,6 +17,8 @@ import {
   validatePayPalOrder,
   ingestPayPalCapture,
   payPalClientConfig,
+  requirePayPalCardsEnabled,
+  validatePayPalCardForCapture,
 } from '../_shared/paypal.ts';
 
 export async function handlePayPalCaptureOrder(request: Request): Promise<Response> {
@@ -60,6 +62,13 @@ export async function handlePayPalCaptureOrder(request: Request): Promise<Respon
           409,
           'paypal_order_not_approved',
         );
+      }
+      if (local.payment_method === 'card') {
+        requirePayPalCardsEnabled();
+        validatePayPalCardForCapture(order);
+      } else if (order.payment_source && typeof order.payment_source === 'object'
+          && 'card' in order.payment_source) {
+        throw new HttpError('Card source does not match wallet intent', 409, 'provider_mismatch');
       }
       // Recheck after the provider GET and durably reserve the capture command.
       // Cancellation must observe this marker; ambiguous network failures retain it
