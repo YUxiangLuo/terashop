@@ -1,6 +1,6 @@
 # tera-headless
 
-基于 Supabase 的 Headless 电商项目。PostgreSQL 承担通用交易逻辑与权限控制，TypeScript Edge Functions 适配 PayPal；`storefront/` 提供女装 SvelteKit SSG 示例，不包含管理后台。
+基于 Supabase 的 Headless 电商项目。PostgreSQL 承担通用交易逻辑与权限控制，TypeScript Edge Functions 适配 PayPal；`storefront/` 提供女装 SvelteKit SSG 示例，`admin/` 提供独立 CSR 管理端。
 
 一个 Supabase 项目承载一个店铺，统一使用 **USD**，结账使用默认仓。后端支持游客线上交易；前台目前只实现目录、实时库存、购物袋和库存预占报价，**没有下单或支付 UI，尚未完成真实 PayPal Sandbox 验收**。
 
@@ -32,6 +32,7 @@ bun run storefront:dev   # 打开终端显示的前台地址
 
 ```text
 storefront/             SvelteKit 静态女装站
+admin/                  SvelteKit SPA：登录、商品列表、草稿编辑及图片上传
 supabase/migrations/   六个初始化基线文件；开发期可直接修改并重建
 supabase/functions/    支付入口与共享适配代码
 supabase/seed.sql      本地演示数据
@@ -42,6 +43,7 @@ types/database.ts      自动生成的数据库类型，不手改
 ## 文档入口
 
 - [Storefront](storefront/README.md)：运行、静态部署、当前能力与限制。
+- [Admin](admin/README.md)：管理员初始化、SPA 运行与部署、图片上传及权限。
 - [API 使用参考](docs/api.md)：参数、权限、返回值与调用重试。
 - [架构决策](docs/architecture-decisions.md)：金额、库存、权限、支付与退款不变量及演进边界。
 - [数据库开发](docs/database.md)：基线文件职责、SQL 检查和历史审阅证据。
@@ -55,6 +57,7 @@ types/database.ts      自动生成的数据库类型，不手改
 ```bash
 bun run typecheck         # 无数据库的快速检查
 bun run storefront:check  # Svelte / 前台类型检查，无需数据库
+bun run admin:check       # 管理端类型检查，无需数据库
 bun run test:unit         # 支付适配、共享逻辑与测试设施单测；不需要 Supabase
 bun run docs:check        # 本地 Markdown 文件链接检查
 ```

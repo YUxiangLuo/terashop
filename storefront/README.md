@@ -25,7 +25,7 @@ PUBLIC_SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY \
 bun run storefront:build
 ```
 
-变量会写入浏览器产物，**绝不使用 service-role key 或 PayPal secret**。模板见 [`.env.example`](../.env.example)；文件本身不配置远程 Edge secrets。使用环境文件时可从根目录运行 `bun --env-file=.env scripts/storefront.ts build`，不要仅在 `storefront/.env` 放置配置并假设根脚本能读取。
+变量会写入浏览器产物，**绝不使用 service-role key 或 PayPal secret**。模板见 [`.env.example`](../.env.example)；文件本身不配置远程 Edge secrets。使用环境文件时可从根目录运行 `bun --env-file=.env scripts/frontend.ts storefront build`，不要仅在 `storefront/.env` 放置配置并假设根脚本能读取。
 
 发布 `storefront/build/` 到支持目录 `index.html` 的静态托管服务，使用域名根路径和 HTTPS。不需要 Node/Bun 服务端，也没有 SPA fallback。Supabase URL 必须能被买家浏览器访问，不能发布指向开发机 localhost 的构建。目录或公开配置变更后重新构建；个人信息和会话只在浏览器运行时处理，不进入构建或共享缓存。
 
@@ -40,11 +40,11 @@ bun run storefront:build
 
 ### 商品图片存储
 
-`bun run setup` 重建本地数据库后，通过 Storage API 创建公开 `catalog-media` bucket、上传 10 张示例图，再将完整公开 URL 写入 `product_images.url`。单独执行 SQL seed 不会上传图片；上传失败会让 setup 失败，可以运行 `bun run seed:media` 重试，无需再次清库。该命令仅面向默认本地演示目录，可重复执行，不重复插入图片记录。
+`bun run setup` 重建本地数据库时由迁移配置公开 `catalog-media` bucket，再通过 Storage API 上传 10 张示例图并将完整公开 URL 写入 `product_images.url`。单独执行 SQL seed 不会上传图片；上传失败会让 setup 失败，可以运行 `bun run seed:media` 重试，无需再次清库。该命令仅面向默认本地演示目录，可重复执行，不重复插入图片记录。管理员浏览器上传流程见 [Admin](../admin/README.md)。
 
 浏览器直接从 Supabase Storage 读取图片，不经过 SvelteKit 服务端，也不使用有时效的签名 URL。公开 bucket 仅用于非敏感商品图片；没有授予游客或普通客户上传、覆盖、删除权限。上传脚本从本地 CLI 读取 service-role 凭据，不接受远程目标或将凭据带入前端。
 
-对象路径为 `商品slug/SHA256.webp`，缓存期一年；替换原文件后运行 `bun run seed:media`，再重新构建 SSG，新内容产生新 URL。旧对象不会自动删除，避免破坏尚未更新的静态页面。
+示例脚本的对象路径为 `商品slug/SHA256.webp`，缓存期一年；替换原文件后运行 `bun run seed:media`，再重新构建 SSG，新内容产生新 URL。旧对象不会自动删除，避免破坏尚未更新的静态页面。
 
 生产环境通过受控管理端或部署流程创建对应公开 bucket、上传图片并保存 HTTPS URL，然后构建前台；**不要在远程运行本地 setup 脚本，也不要部署含 localhost 图片地址的产物**。当前本地 Storage 不代表已接入 AWS S3 或生产 CDN。数据库仍是通用 URL 字段，可换为其他 S3/CDN；前端接受 HTTPS，仅为配置匹配的回环 Supabase Storage 允许 HTTP。私有图片另用私有 bucket，不能放进此公开目录。
 

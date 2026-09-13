@@ -6,6 +6,7 @@ out
 dist
 .svelte-kit
 storefront/build
+admin/build
 *.tgz
 
 # code coverage

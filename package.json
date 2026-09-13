@@ -2,7 +2,7 @@
   "name": "tera-headless",
   "type": "module",
   "private": true,
-  "workspaces": ["storefront"],
+  "workspaces": ["storefront", "admin"],
   "packageManager": "bun@1.4.0",
   "devDependencies": {
     "@types/bun": "1.4.0",
@@ -10,10 +10,14 @@
     "typescript": "7.0.2"
   },
   "scripts": {
-    "storefront:dev": "bun scripts/storefront.ts dev",
-    "storefront:build": "bun scripts/storefront.ts build",
-    "storefront:check": "bun scripts/storefront.ts check",
+    "storefront:dev": "bun scripts/frontend.ts storefront dev",
+    "storefront:build": "bun scripts/frontend.ts storefront build",
+    "storefront:check": "bun scripts/frontend.ts storefront check",
     "storefront:preview": "bun run --cwd storefront preview --host 0.0.0.0",
+    "admin:dev": "bun scripts/frontend.ts admin dev",
+    "admin:build": "bun scripts/frontend.ts admin build",
+    "admin:check": "bun scripts/frontend.ts admin check",
+    "admin:preview": "bun run --cwd admin preview",
     "setup": "bun scripts/setup.ts",
     "seed:media": "bun scripts/seed-media.ts",
     "start": "bun scripts/start.ts",

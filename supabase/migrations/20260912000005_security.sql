@@ -1,6 +1,22 @@
 -- Attach invariants and publish the explicit API allowlist only after all functions exist.
 begin;
 
+-- Storage is part of the baseline, not seed configuration. Public buckets only
+-- bypass read RLS; writes remain restricted by storage.objects policies.
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'catalog-media',
+  'catalog-media',
+  true,
+  5242880,
+  ARRAY['image/jpeg', 'image/png', 'image/webp']
+)
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name,
+  public = EXCLUDED.public,
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
+
 -- Storefront view
 
 CREATE VIEW public.product_listing AS
@@ -253,6 +269,12 @@ CREATE TRIGGER on_auth_user_email_updated AFTER UPDATE OF email ON auth.users FO
 -- Row-level policies
 
 CREATE POLICY "customers: read own or admin" ON public.customers FOR SELECT USING (auth_user_id = auth.uid() OR public.is_admin());
+CREATE POLICY "catalog media: admin immutable insert" ON storage.objects FOR INSERT TO authenticated
+WITH CHECK (
+  bucket_id = 'catalog-media'
+  AND public.is_admin()
+  AND name ~ '^products/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp)$'
+);
 CREATE POLICY "customers: update own or admin" ON public.customers FOR UPDATE USING ((auth_user_id = auth.uid() AND anonymized_at IS NULL) OR public.is_admin());
 CREATE POLICY "addresses: own all" ON public.addresses USING (((public.current_customer_id() = customer_id) OR public.is_admin()));
 CREATE POLICY "categories: admin write" ON public.categories USING (public.is_admin());

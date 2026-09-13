@@ -24,14 +24,7 @@ if (files.length !== 10 || products.length !== files.length ||
     products.some(product => !files.includes(`${product.slug}.webp`))) {
   throw new Error('Media seed requires the default Atelier Tera catalog; run bun run setup');
 }
-const buckets: Array<{ id: string }> = await (await request('/storage/v1/bucket')).json();
-const settings = { public: true, file_size_limit: 1048576, allowed_mime_types: ['image/webp'] };
-if (buckets.some(item => item.id === bucket)) {
-  await request(`/storage/v1/bucket/${bucket}`, json('PUT', settings));
-} else {
-  await request('/storage/v1/bucket', json('POST', { id: bucket, name: bucket, ...settings }));
-}
-// A public bucket permits downloads, not writes. No client write policies are added.
+// The migration owns bucket configuration and client policies. Seed only uploads fixtures.
 for (const product of products) {
   const bytes = await Bun.file(`supabase/seed-assets/${product.slug}.webp`).bytes();
   const hash = new Bun.CryptoHasher('sha256').update(bytes).digest('hex');

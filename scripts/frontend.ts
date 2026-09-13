@@ -1,6 +1,9 @@
 import { localSupabase } from "./lib/local-supabase";
 
-const mode = Bun.argv[2];
+const app = Bun.argv[2];
+if (app !== "storefront" && app !== "admin")
+  throw new Error("Expected storefront or admin");
+const mode = Bun.argv[3];
 if (mode !== "dev" && mode !== "build" && mode !== "check")
   throw new Error("Expected dev, build or check");
 const env = { ...process.env };
@@ -19,7 +22,7 @@ if (!env.PUBLIC_SUPABASE_URL || !env.PUBLIC_SUPABASE_ANON_KEY) {
     "Both PUBLIC_SUPABASE_URL and PUBLIC_SUPABASE_ANON_KEY are required",
   );
 }
-const child = Bun.spawn(["bun", "run", "--cwd", "storefront", mode], {
+const child = Bun.spawn(["bun", "run", "--cwd", app, mode], {
   env,
   stdout: "inherit",
   stderr: "inherit",
