@@ -1004,6 +1004,63 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.list_admin_products(page_size integer DEFAULT 20, status_filter text DEFAULT NULL,
+    category_id uuid DEFAULT NULL, search text DEFAULT NULL, after_cursor jsonb DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_search text := nullif(btrim(search),'');
+  v_after_time timestamptz;
+  v_after_id uuid;
+  v_items jsonb;
+  v_next jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100
+    or (status_filter is not null and status_filter not in ('draft','active','archived'))
+    or char_length(search) > 200 then
+    raise exception using errcode = '22023', message = 'invalid page_size, status_filter or search (maximum 200 characters)';
+  end if;
+  if after_cursor is not null then
+    if jsonb_typeof(after_cursor) is distinct from 'object'
+      or jsonb_typeof(after_cursor -> 'updated_at') is distinct from 'string'
+      or jsonb_typeof(after_cursor -> 'id') is distinct from 'string'
+      or after_cursor - array['updated_at','id'] <> '{}'::jsonb then
+      raise exception using errcode = '22023', message = 'cursor requires updated_at and id';
+    end if;
+    v_after_time := (after_cursor ->> 'updated_at')::timestamptz;
+    v_after_id := (after_cursor ->> 'id')::uuid;
+    if not isfinite(v_after_time) then
+      raise exception using errcode = '22023', message = 'cursor timestamp must be finite';
+    end if;
+  end if;
+  with candidates as materialized (
+    select p.id,p.slug,p.name,p.status,p.updated_at,p.revision from public.products p
+    where (status_filter is null or p.status = status_filter)
+      and (v_after_time is null or (p.updated_at,p.id) < (v_after_time,v_after_id))
+      and (category_id is null or exists (select 1 from public.product_categories pc
+        where pc.product_id = p.id and pc.category_id = list_admin_products.category_id))
+      and (v_search is null or strpos(lower(p.name),lower(v_search)) > 0
+        or exists (select 1 from public.product_variants v where v.product_id = p.id
+          and strpos(lower(v.sku),lower(v_search)) > 0))
+    order by p.updated_at desc,p.id desc limit page_size + 1
+  ), page as materialized (select * from candidates order by updated_at desc,id desc limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'slug',p.slug,'name',p.name,'status',p.status,
+    'updated_at',p.updated_at,'revision',p.revision,'currency','USD',
+    'price_from',v.price_from,'price_to',v.price_to,'variant_count',v.variant_count,
+    'primary_image',(select i.url from public.product_images i where i.product_id = p.id
+      order by i.position,i.id limit 1)) order by p.updated_at desc,p.id desc),'[]'::jsonb),
+    case when (select count(*) from candidates) > page_size then
+      (select jsonb_build_object('updated_at',updated_at,'id',id) from page order by updated_at,id limit 1) end
+  into v_items,v_next from page p cross join lateral (
+    select min(price) price_from,max(price) price_to,count(*) variant_count
+    from public.product_variants where product_id = p.id
+  ) v;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 CREATE FUNCTION public.list_storefront_products(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL, category_id uuid DEFAULT NULL) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 declare v_items jsonb; v_next uuid;

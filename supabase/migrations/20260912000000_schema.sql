@@ -1691,6 +1691,7 @@ CREATE INDEX product_images_product_idx ON public.product_images USING btree (pr
 CREATE INDEX product_reviews_customer_idx ON public.product_reviews USING btree (customer_id);
 CREATE INDEX product_reviews_product_idx ON public.product_reviews USING btree (product_id, status);
 CREATE INDEX product_variants_product_idx ON public.product_variants USING btree (product_id);
+CREATE INDEX products_admin_updated_idx ON public.products USING btree (updated_at DESC, id DESC);
 CREATE INDEX products_status_idx ON public.products USING btree (status);
 CREATE INDEX products_type_idx ON public.products USING btree (product_type);
 CREATE INDEX promotion_targets_category_idx ON public.promotion_targets USING btree (category_id);

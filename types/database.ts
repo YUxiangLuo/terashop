@@ -1882,6 +1882,16 @@ export type Database = {
         Returns: Json
       }
       is_admin: { Args: never; Returns: boolean }
+      list_admin_products: {
+        Args: {
+          after_cursor?: Json
+          category_id?: string
+          page_size?: number
+          search?: string
+          status_filter?: string
+        }
+        Returns: Json
+      }
       list_carts: { Args: never; Returns: Json }
       list_pending_provider_refunds: {
         Args: { max_requests?: number; provider: string }

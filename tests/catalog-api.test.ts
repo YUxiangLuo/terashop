@@ -99,6 +99,81 @@ test('商品列表按 UUID 游标分页并精确过滤分类；非法 page_size 
   expect(await checked(command('list_storefront_products', { page_size: 1 }))).toHaveProperty('items');
 });
 
+test('Admin 列表使用时间和 UUID 复合游标，保留微秒且空页/末页无游标', async () => {
+  await withRollback(database, async sql => {
+    const marker = crypto.randomUUID();
+    const ids = Array.from({ length: 4 }, () => crypto.randomUUID()).sort();
+    const times = ['2026-01-01T00:00:00.123457Z', '2026-01-01T00:00:00.123456Z',
+      '2026-01-01T00:00:00.123456Z', '2025-01-01T00:00:00Z'];
+    for (const [i, id] of ids.entries()) {
+      await sql`insert into public.products(id,slug,name,updated_at) values (${id}::uuid,${id},${marker},${times[i]}::timestamptz)`;
+    }
+    await actor(sql, admin);
+    const first = (await sql`select public.list_admin_products(page_size=>2,search=>${marker}) dto`)[0].dto;
+    expect(first.items.map((p: { id: string }) => p.id)).toEqual([ids[0], ids[2]]);
+    expect(first.next_cursor.id).toBe(ids[2]);
+    expect(first.next_cursor.updated_at).toContain('.123456');
+    const second = (await sql.unsafe('select public.list_admin_products(page_size=>2,search=>$1,after_cursor=>$2::text::jsonb) dto',
+      [marker, JSON.stringify(first.next_cursor)]))[0].dto;
+    expect(second.items.map((p: { id: string }) => p.id)).toEqual([ids[1], ids[3]]);
+    expect(second.next_cursor).toBeNull();
+    expect(first.items[0]).toMatchObject({ variant_count: 0, price_from: null, price_to: null, primary_image: null, revision: 1 });
+    expect((await sql`select public.list_admin_products(search=>${crypto.randomUUID()}) dto`)[0].dto)
+      .toEqual({ items: [], next_cursor: null });
+  });
+});
+
+test('Admin 列表组合筛选全部状态、精确分类、字面名称/SKU，并只返回摘要', async () => {
+  await withRollback(database, async sql => {
+    const p = await product(sql), category = crypto.randomUUID(), child = crypto.randomUUID();
+    const inactive = crypto.randomUUID(), marker = crypto.randomUUID();
+    await sql`update public.products set name=${marker + ' 100%_Cotton'} where id=${p.id}::uuid`;
+    await sql`insert into public.product_variants(id,product_id,price,is_active,sku)
+      values (${inactive}::uuid,${p.id}::uuid,3,false,${marker + '-SecretSKU'})`;
+    await sql`insert into public.product_images(product_id,variant_id,url,position)
+      values (${p.id}::uuid,null,'later',9),(${p.id}::uuid,${inactive}::uuid,'first',1)`;
+    await sql`insert into public.categories(id,slug,name,is_active) values (${category}::uuid,${category},'Hidden',false)`;
+    await sql`insert into public.categories(id,slug,name,parent_id) values (${child}::uuid,${child},'Child',${category}::uuid)`;
+    await sql`insert into public.product_categories(product_id,category_id) values (${p.id}::uuid,${category}::uuid)`;
+    await actor(sql, admin);
+    for (const status of ['active', 'draft', 'archived']) {
+      await sql`update public.products set status=${status} where id=${p.id}::uuid`;
+      const result = (await sql`select public.list_admin_products(status_filter=>${status},category_id=>${category}::uuid,
+        search=>${' ' + marker.toUpperCase() + '-secretsku '}) dto`)[0].dto;
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]).toMatchObject({ id: p.id, status, variant_count: 2, price_from: 3, price_to: 17, primary_image: 'first' });
+      expect(Object.keys(result.items[0]).sort()).toEqual(['id','slug','name','status','updated_at','revision','currency',
+        'price_from','price_to','variant_count','primary_image'].sort());
+    }
+    expect((await sql`select public.list_admin_products(search=>${marker + ' 100%_cotton'}) dto`)[0].dto.items).toHaveLength(1);
+    expect((await sql`select public.list_admin_products(search=>${marker + '%Cotton'}) dto`)[0].dto.items).toEqual([]);
+    expect((await sql`select public.list_admin_products(status_filter=>'active',search=>${marker}) dto`)[0].dto.items).toEqual([]);
+    expect((await sql`select public.list_admin_products(category_id=>${child}::uuid,search=>${marker}) dto`)[0].dto.items).toEqual([]);
+    expect((await sql`select public.list_admin_products(search=>${marker}) dto`)[0].dto.items).toHaveLength(1);
+    expect((await sql`select public.get_storefront_product(${p.id}::uuid) dto`)[0].dto).toBeNull();
+  });
+});
+
+test('Admin 列表拒绝匿名/客户以及非法筛选或游标，service 可读取', async () => {
+  for (const token of [undefined, buyer.token]) {
+    expect((await rpc('list_admin_products', {}, token)).data).toMatchObject({ code: '42501' });
+  }
+  const cursor = { id: crypto.randomUUID(), updated_at: '2026-01-01T00:00:00Z' };
+  for (const args of [{ page_size: 0 }, { page_size: 101 }, { page_size: null }, { status_filter: 'unknown' },
+    { search: 'x'.repeat(201) }, { after_cursor: [] }, { after_cursor: {} }, { after_cursor: { ...cursor, extra: 1 } },
+    { after_cursor: { ...cursor, id: null } }, { after_cursor: { ...cursor, updated_at: 'infinity' } },
+    { after_cursor: { ...cursor, updated_at: 'bad date' } }]) {
+    expect((await rpc('list_admin_products', args, admin.token)).status).toBe(400);
+  }
+  expect(await checked<{ items: unknown[]; next_cursor: null }>(rpc('list_admin_products', { search: 'x'.repeat(200), page_size: 100 }, admin.token)))
+    .toEqual({ items: [], next_cursor: null });
+  await withRollback(database, async sql => {
+    await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+    await sql`set local role service_role`;
+    expect((await sql`select public.list_admin_products(page_size=>1) dto`)[0].dto.items).toHaveLength(1);
+  });
+});
+
 test('新建/未定义扩展默认私有；公开必须显式，定义收紧立即影响旧表及 Storefront DTO', async () => {
   await withRollback(database, async sql => {
     const p = await product(sql);

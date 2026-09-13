@@ -14,14 +14,33 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 | `list_storefront_products` | `page_size` 默认 20，1–100；可选 `after_id`、`category_id` | `{items,next_cursor}`；匿名可用，只含 active 商品；分类精确匹配且须启用，不包含子分类闭包 |
 | `get_storefront_product` | `product_id` | 商品详情或 null；匿名可用，草稿/归档/不存在均返回 null |
 | `get_admin_product` | `product_id` | 管理详情或 null；仅 admin/service，包含草稿、停用子资源、成本及内部扩展值 |
+| `list_admin_products` | `page_size` 默认 20，1–100；可选 `status_filter/category_id/search/after_cursor` | `{items,next_cursor}`；仅 admin/service；更新时间倒序的管理摘要 |
 
-列表以 UUID 升序分页，将 `next_cursor` 传给下一次 `after_id`；无后续页时为 null。并发新增商品可能落在已翻过的范围，游标不保证跨请求快照。卡片包含 `id/slug/name/currency/price_from/in_stock/primary_image`，不返回精确库存。仅对当前页商品计算库存，不复用全店预占聚合视图。
+Storefront 列表以 UUID 升序分页，将 `next_cursor` 传给下一次 `after_id`；无后续页时为 null。并发新增商品可能落在已翻过的范围，游标不保证跨请求快照。卡片包含 `id/slug/name/currency/price_from/in_stock/primary_image`，不返回精确库存。仅对当前页商品计算库存，不复用全店预占聚合视图。
 
 详情包含基本商品/SEO 字段、`variants`、`options`、`images`、`categories` 和 `metafields`。变体通过 `option_value_ids` 对应选项值；商品/变体扩展值使用 `{namespace,key,type,value}`。Storefront 隐藏停用变体及其专属图片、停用分类、内部扩展字段和成本；**管理员调用 Storefront 也不会扩大输出范围**。库存仍只看默认仓可用量及有效 Quote 预占，不承诺后续结账成功。
 
 Admin 详情增加商品状态/时间戳、编辑版本 `revision` 及变体 `cost/is_active/track_inventory`；精确库存继续使用管理员 `get_inventory_availability`，不是将 Storefront 切换为“管理员模式”。公共扩展引用不会自动递归展开，需按 Metaobject ID 读取其受保护资源。
 
-现有底表/视图读取保留原授权，用于逐步迁移已有调用与测试；本阶段没有完成全部订单/客户管理查询分层，也未增加搜索或运营排序。底表的扩展字段读取同样执行下文的新可见性规则。
+现有底表/视图读取保留原授权，用于逐步迁移已有调用与测试；本阶段没有完成全部订单/客户管理查询分层，也未增加 Storefront 搜索或运营排序。底表的扩展字段读取同样执行下文的新可见性规则。
+
+### Admin 商品列表
+
+`list_admin_products` 默认包含 draft/active/archived，`status_filter` 可选其中一个。`category_id` 精确匹配商品关联，允许停用分类，不包含子分类；不存在的分类返回空集合。所有筛选以 AND 组合。
+
+`search` 最多 200 字符，去除首尾空格后为空表示不筛选；按名称或任一变体 SKU 不区分大小写的字面子串匹配（包含停用变体），`%`、`_` 不是通配符。不搜索描述、标签、条码或扩展字段，不提供模糊纠错或相关性排序。
+
+摘要包含 `id/slug/name/status/updated_at/revision/currency/price_from/price_to/variant_count/primary_image`。价格范围和数量包含全部变体，无变体时价格为 null、数量为 0；主图取全部图片中 `(position,id)` 最小者的 URL，无图为 null。不返回成本、精确库存或完整子资源，不计算精确总数。
+
+按 `(updated_at DESC,id DESC)` 分页，将返回的 `next_cursor:{updated_at,id}` 原样传入下一次 `after_cursor`，无后续页时为 null。不要经 JavaScript Date 转换时间戳，否则会丢失微秒；修改筛选条件时清除游标。游标不提供跨请求快照：并发编辑可能将未读商品移到游标之前，刷新列表才能看到；列表 revision 也可能立即过期，进入编辑页应重新读取管理详情。
+
+```http
+POST /rest/v1/rpc/list_admin_products
+
+{"page_size":20,"status_filter":"draft","search":"shirt"}
+```
+
+默认排序有复合索引，先限定当前页再聚合价格/数量。子串搜索及低命中率筛选仍可能扫描较多候选，不承诺目录规模无关的延迟，也不是全文搜索引擎。
 
 ### 原子商品编辑
 
