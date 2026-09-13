@@ -220,6 +220,14 @@ POST /rest/v1/rpc/receive_return
 普通客户创建评价只能为 pending，作者修改内容后重新待审。首次管理员由可信 SQL 引导，后续走角色 RPC。
 管理员与客户同属数据库 `authenticated` 角色；订单状态、支付、履约、库存等交易写入必须走受控命令，不能绕过流程直写表。
 
+## 促销范围与扩展字段管理
+
+商品百分比及买赠的 `promotions.apply_scope` 为 `all`（默认）或 `selected`；买赠的 `get_scope` 为 `same_as_apply`（默认）或 `selected`。定向活动应以 selected 或 inactive 创建，再配置目标，避免先公开全店优惠。INSERT `promotion_targets` 自动将对应范围收窄为 selected，删除最后一条仍匹配零商品；扩大范围须先删除对应目标，再显式 PATCH scope。规则、范围与目标一起进入交易快照。整单百分比/固定金额与免邮仍按原有整单语义执行，不借此改变算法或增加条件 DSL。
+
+`metafields` 继续写 owner_type / owner_id / type / value，未知类型拒绝；任意 JSON 使用 `type:"json"`。响应中的 `owner_*_id` 是不可直写的生成 FK 路由；商品、变体、分类删除会级联清理其 metafields。Customer/Order 不可删除及匿名化的既有合同不变。
+
+`order_number` 在数据库保证唯一，创建后不可 PATCH（包括 service role）。库存预占和每条新增履约事实都会写共享资源版本；直接 SQL / Worker 遇到 `40001` 应重试整笔事务，不假设仅取行锁就能刷新 REPEATABLE READ 快照。
+
 ## 即时下单与手工命令
 
 以下是当前调用链的一部分，不代表历史兼容承诺；新商城优先采用上面的 Quote 流程。

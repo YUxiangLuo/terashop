@@ -273,16 +273,19 @@ export type Database = {
         Row: {
           location_id: string
           on_hand: number
+          reservation_revision: number
           variant_id: string
         }
         Insert: {
           location_id: string
           on_hand?: number
+          reservation_revision?: number
           variant_id: string
         }
         Update: {
           location_id?: string
           on_hand?: number
+          reservation_revision?: number
           variant_id?: string
         }
         Relationships: [
@@ -448,8 +451,13 @@ export type Database = {
           id: string
           key: string
           namespace: string
+          owner_category_id: string | null
+          owner_customer_id: string | null
           owner_id: string
+          owner_order_id: string | null
+          owner_product_id: string | null
           owner_type: string
+          owner_variant_id: string | null
           type: string
           updated_at: string
           value: Json
@@ -459,8 +467,13 @@ export type Database = {
           id?: string
           key: string
           namespace?: string
+          owner_category_id?: string | null
+          owner_customer_id?: string | null
           owner_id: string
+          owner_order_id?: string | null
+          owner_product_id?: string | null
           owner_type: string
+          owner_variant_id?: string | null
           type: string
           updated_at?: string
           value: Json
@@ -470,13 +483,61 @@ export type Database = {
           id?: string
           key?: string
           namespace?: string
+          owner_category_id?: string | null
+          owner_customer_id?: string | null
           owner_id?: string
+          owner_order_id?: string | null
+          owner_product_id?: string | null
           owner_type?: string
+          owner_variant_id?: string | null
           type?: string
           updated_at?: string
           value?: Json
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "metafields_owner_category_id_fkey"
+            columns: ["owner_category_id"]
+            isOneToOne: false
+            referencedRelation: "categories"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "metafields_owner_customer_id_fkey"
+            columns: ["owner_customer_id"]
+            isOneToOne: false
+            referencedRelation: "customers"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "metafields_owner_order_id_fkey"
+            columns: ["owner_order_id"]
+            isOneToOne: false
+            referencedRelation: "orders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "metafields_owner_product_id_fkey"
+            columns: ["owner_product_id"]
+            isOneToOne: false
+            referencedRelation: "product_listing"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "metafields_owner_product_id_fkey"
+            columns: ["owner_product_id"]
+            isOneToOne: false
+            referencedRelation: "products"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "metafields_owner_variant_id_fkey"
+            columns: ["owner_variant_id"]
+            isOneToOne: false
+            referencedRelation: "product_variants"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       metaobject_definitions: {
         Row: {
@@ -1292,9 +1353,11 @@ export type Database = {
       }
       promotions: {
         Row: {
+          apply_scope: string
           code: string | null
           created_at: string
           ends_at: string | null
+          get_scope: string
           id: string
           is_active: boolean
           name: string
@@ -1309,9 +1372,11 @@ export type Database = {
           used_count: number
         }
         Insert: {
+          apply_scope?: string
           code?: string | null
           created_at?: string
           ends_at?: string | null
+          get_scope?: string
           id?: string
           is_active?: boolean
           name: string
@@ -1326,9 +1391,11 @@ export type Database = {
           used_count?: number
         }
         Update: {
+          apply_scope?: string
           code?: string | null
           created_at?: string
           ends_at?: string | null
+          get_scope?: string
           id?: string
           is_active?: boolean
           name?: string
@@ -1488,6 +1555,7 @@ export type Database = {
         Returns: {
           location_id: string
           on_hand: number
+          reservation_revision: number
           variant_id: string
         }
         SetofOptions: {

@@ -369,18 +369,31 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.schedule_order_totals() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_row jsonb := case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end;
+  v_id uuid := (v_row ->> case when tg_table_name = 'orders' then 'id' else 'order_id' end)::uuid;
+begin
+  insert into private.order_validation_queue(order_id) values (v_id) on conflict do nothing;
+  return null;
+end;
+$$;
+
 CREATE FUNCTION private.assert_order_totals() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 declare
-  v_id uuid;
+  v_id uuid := new.order_id;
   v_order public.orders;
   v_subtotal numeric;
   v_discount numeric;
   v_count bigint;
 begin
-  -- JSON field lookup avoids invalid NEW fields on the other trigger relation.
-  v_id := case when tg_table_name = 'orders' then (to_jsonb(new)->>'id')::uuid
-    else coalesce(to_jsonb(new)->>'order_id', to_jsonb(old)->>'order_id')::uuid end;
+  -- Consume BEFORE checking. Subsequent writes (including after an explicit
+  -- SET CONSTRAINTS flush) must enqueue a fresh check. Both queue and checks
+  -- participate in subtransaction rollback; no non-transactional cache exists.
+  delete from private.order_validation_queue where order_id = v_id;
+  if not found then return null; end if;
   select * into v_order from public.orders where id = v_id for update;
   if not found then return null; end if;
   select count(*), coalesce(sum(total),0), coalesce(sum(discount_total),0)
@@ -1552,8 +1565,11 @@ declare
   v_balance record;
   v_status text;
 begin
-  select * into v_order from public.orders o where o.id = new.order_id for update;
+  select * into v_order from public.orders o where o.id = new.order_id for update nowait;
   if not found then raise exception 'order not found'; end if;
+  -- Every inserted fact fences old RR snapshots, even if the projected order
+  -- status remains partially_fulfilled. Covers RPC and trusted direct INSERT.
+  update public.orders set updated_at = now() where id = new.order_id;
   select * into v_balance from private.order_item_fulfillment_balance(new.order_item_id);
   if not found or not exists (
     select 1 from public.order_items oi where oi.id = new.order_item_id and oi.order_id = new.order_id

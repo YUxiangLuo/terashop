@@ -345,17 +345,28 @@ test('事实不可修改/删除；完整指纹防止事后添行，空头/伪造
   }
   await expect(database`update commerce.return_receipts set note='changed' where id=${receipt.id}::uuid`.execute()).rejects.toThrow('append-only');
   await expect(database`update commerce.return_lines set quantity=3 where id=${r.lines[0].id}::uuid`.execute()).rejects.toThrow('immutable');
+  // Use the command's order-first lock sequence: fingerprint assertions must
+  // not depend on pooled connections finishing a previous failed COMMIT's
+  // cleanup before the next NOWAIT child insert. Lock races are tested above.
   await expect(database.begin(async tx=>{
+    await tx`select id from public.orders where id=${s.order.id}::uuid for update`;
     await tx`insert into commerce.return_receipts(return_id,order_id,location_id,idempotency_key,request_hash) values (${r.id}::uuid,${s.order.id}::uuid,${location}::uuid,${crypto.randomUUID()},${'a'.repeat(64)})`;
   })).rejects.toThrow('receipt fingerprint');
   await expect(database.begin(async tx=>{
+    await tx`select id from public.orders where id=${s.order.id}::uuid for update`;
     await tx`insert into commerce.returns(order_id,fulfillment_id,idempotency_key,request_hash) values (${s.order.id}::uuid,${s.id}::uuid,${crypto.randomUUID()},${'a'.repeat(64)})`;
   })).rejects.toThrow('authorization fingerprint');
   const next=await receive(r,1);
-  await expect(database`insert into commerce.return_dispositions(receipt_line_id,receipt_id,order_id,quantity,disposition,inventory_movement_id,idempotency_key,request_hash)
-    values (${next.lines[0].id}::uuid,${next.id}::uuid,${s.order.id}::uuid,1,'restock',${d.inventory_movement_id!},${crypto.randomUUID()},${'a'.repeat(64)})`.execute()).rejects.toThrow('assigned by disposition');
-  await expect(database`insert into commerce.return_dispositions(receipt_line_id,receipt_id,order_id,quantity,disposition,idempotency_key,request_hash)
-    values (${next.lines[0].id}::uuid,${next.id}::uuid,${s.order.id}::uuid,1,'restock',${crypto.randomUUID()},${'a'.repeat(64)})`.execute()).rejects.toThrow('fingerprint or stock movement');
+  await expect(database.begin(async tx=>{
+    await tx`select id from public.orders where id=${s.order.id}::uuid for update`;
+    await tx`insert into commerce.return_dispositions(receipt_line_id,receipt_id,order_id,quantity,disposition,inventory_movement_id,idempotency_key,request_hash)
+      values (${next.lines[0].id}::uuid,${next.id}::uuid,${s.order.id}::uuid,1,'restock',${d.inventory_movement_id!},${crypto.randomUUID()},${'a'.repeat(64)})`;
+  })).rejects.toThrow('assigned by disposition');
+  await expect(database.begin(async tx=>{
+    await tx`select id from public.orders where id=${s.order.id}::uuid for update`;
+    await tx`insert into commerce.return_dispositions(receipt_line_id,receipt_id,order_id,quantity,disposition,idempotency_key,request_hash)
+      values (${next.lines[0].id}::uuid,${next.id}::uuid,${s.order.id}::uuid,1,'restock',${crypto.randomUUID()},${'a'.repeat(64)})`;
+  })).rejects.toThrow('fingerprint or stock movement');
   expect(await stockOf(fixture.sku)).toBe(before);
 });
 

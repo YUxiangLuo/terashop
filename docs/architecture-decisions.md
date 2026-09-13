@@ -22,6 +22,7 @@
 已支付订单的商品、价格、税、运费和地址快照不可原地重算，trigger 同样约束 service role；退款字段仅由受控流程单向推进。
 后续商业变更必须由 Order Edit、Adjustment、补扣或退款事实表达，而不是覆盖原始记录。
 所有订单（包括非 Quote 订单）必须有商品行；行毛额等于单价 × 数量，订单 subtotal / discount_total 等于行汇总。延迟约束在提交时校验，允许同一事务先头后行构建，但不允许分两个 HTTP 请求留下不完整订单；账本 `is_balanced` 也检查头行一致性。
+`order_number` 有 UNIQUE 约束，创建后与订单 ID 一样不可变，identity 不代替唯一性。整单校验通过隐藏的 `private.order_validation_queue` 按待检订单去重；触发时消费标记，强制校验后新改动重新排队，保存点回滚同时回滚标记，不以会话缓存跳过检查。
 
 活动 PaymentIntent 同样锁定未支付订单的商业快照。
 金额/币种错配的资金进入对账，不改写意图金额来掩盖错配。
@@ -33,6 +34,8 @@
 Quote 流程采用 `on_hand - active reserved = available`：报价预占、转单继续持有，支付成功时在同一事务中转为实际扣减；取消/超时仅释放预占。
 `create_order` / `create_order_v2` 保留下单即扣库存的路径，但不能消耗 Quote 预占；付款窗口固定 15 分钟，到期由 `expire_unpaid_orders` 按原仓释放库存。订单及意图的付款期限不可延长，Quote 转单沿用报价期限。
 `inventory_movements` 只记录真实 on_hand 变化；取消/退款以原始负流水为回补依据，不依赖变体当前的库存配置。所有订单必须先付款再履约，避免未付款却已出库的订单无法安全过期。
+
+每次预占行 INSERT 都更新相应库存行的 `reservation_revision`，但不改 on_hand、不记物理流水。单纯行锁不能防止 REPEATABLE READ 旧快照漏看其他客户的预占；真实版本写冲突要求调用方重试整笔事务。每条新增履约事实也写父订单版本，即使连续部分履约没有改变状态投影，RPC 与受信 INSERT 都不能绕过。
 
 库存统一按 `(variant_id, location_id)` 取锁；退款/取消在分摊前锁全部原库存，过期 Worker 锁整个批次，不能仅对每个订单单独排序。结账的变体锁使用 `NO KEY UPDATE`，避免与库存流水 FK 的 `KEY SHARE` 形成反向等待。Quote 与即时订单过期 Worker 分别调用，不能在同一事务中先锁库存再取得 Quote 锁。
 
@@ -47,12 +50,14 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 商品百分比和买赠先按变体聚合数量/剩余额度确定收益，再分摊到商业行；整单优惠同样先分摊到变体。客户可控属性和商业拆行不得放大舍入优惠，也不能改变后续促销的 SKU 级可用额度。
 免邮只记录实际收益：已满额包邮时不占独占资格，零收益独占免邮被跳过；最早的可叠加免邮可在后续优惠使金额跌破包邮线时延后生效，但不能穿透独占商品优惠。
 
+商品百分比/买赠使用持久化 `apply_scope=all/selected`，买赠的赠送集合使用 `get_scope=same_as_apply/selected`。插入目标自动收窄；删除最后一个目标仍是 selected 空集合，不扩大为全店或回退同款买赠。扩大范围须先删除对应目标，再显式重设 scope；创建定向活动应从 selected 或 inactive 开始，不能先公开全店活动再分请求补目标。目标变更写父促销版本并使用 NOWAIT；规则、scope、目标从同一 SQL 快照读取并进入 hash。整单优惠/免邮保留原有整单语义，本次不扩展目标 DSL。
+
 当前已保存实际应用顺序、规则/目标快照与关系化分摊；它们不是可编辑促销的发布版本。
 版本化发布、候选组合选择和条件 DSL 仍是后续设计，不是已实现能力；替换当前贪心引擎前须双算验证。
 
 ## ADR-006：API 与权限
 
-`public` 暴露部分业务表与 RPC，`private` 存放内部函数及目录树同步哨兵，`commerce` 保存交易事实且不对 PostgREST 暴露。
+`public` 暴露部分业务表与 RPC，`private` 存放内部函数、目录树同步哨兵及事务性订单校验队列，`commerce` 保存交易事实且不对 PostgREST 暴露。
 表启用 RLS，新对象默认不授予客户端权限；已有对象也按表/列列举 SELECT / INSERT / UPDATE / DELETE 授权，anon/authenticated 不得拥有 TRUNCATE / TRIGGER / REFERENCES / MAINTAIN 或序列权限。显式 DTO 选择字段，内部表不是长期 Storefront 合同。`api` / `admin_api` 分层仍是演进目标。
 管理员与客户同属 `authenticated` 角色；订单状态、支付、履约和库存写入必须走受控命令，不能依靠客户端区分管理员。
 
@@ -179,3 +184,9 @@ Return 按一次有效发货授权商业行数量；open 授权占用可退量�
 回库统一校验原始负库存事实和累计恢复上限；取消按原扣减地点分摊，实收 restock 写入明确的收货地点并绑定唯一库存流水。当前 track_inventory、默认仓或商品价格变化不是历史库存证据。库存仍统一按 variant/location 排序锁定，新增收货地点不在锁完原仓后倒序追加；父订单真实写版本保护直接写表及 REPEATABLE READ 旧快照。已持发货/退货子行的更新使用 NOWAIT 防止反向等待。
 
 Receipt 不立即增加可售量，未处置数量只是该退货的待验收余额。现有 on_hand 仍在下单/付款时扣减，不是完整实物在库/不可售库存模型；本阶段不引入全仓实物库存、批次序列号、换货、面单、退货费用或自动退款政策。金额退款可在收货前后独立执行，不能把 Return 数量当作税务冲销或退款到账证明。当前无 Return 关联退款命令，既有商品退款仍优先取消未发货量；需要保留未发货履约量时，纯金额退款保持 unallocated，不猜商品或税归属。
+
+## ADR-019：Metafield 类型与 owner 引用完整性
+
+Metafield 类型使用封闭 CHECK，未知类型拒绝；任意 JSON 必须显式选择 `json`。输入仍为 owner_type / owner_id，五个生成的 owner_*_id 列只负责路由真实外键，不接受客户端赋值。商品、变体、分类删除由 FK 级联清理对应扩展值；Customer / Order 的不可删除保护与匿名化合同不变。父对象删除与旧快照写入的并发正确性由 PostgreSQL RI 保证，EXISTS 检查只提供可读错误。
+
+shop 继续沿用单店约定，Metaobject JSON 引用及 definition 发布规则不是本轮新设计。实验、性能计数及重建回归见 [数据库设计复审](database-design-fixes.md)。

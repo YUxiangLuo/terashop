@@ -56,6 +56,8 @@ CREATE VIEW public.product_listing AS
 
 -- Transaction and audit triggers
 
+CREATE CONSTRAINT TRIGGER order_validation_check AFTER INSERT ON private.order_validation_queue DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_order_totals();
+
 CREATE TRIGGER carts_write BEFORE UPDATE ON commerce.carts FOR EACH ROW EXECUTE FUNCTION private.guard_cart_write();
 CREATE TRIGGER cart_lines_write BEFORE INSERT OR UPDATE OR DELETE ON commerce.cart_lines FOR EACH ROW EXECUTE FUNCTION private.guard_cart_write();
 CREATE CONSTRAINT TRIGGER carts_lines_check AFTER INSERT OR UPDATE ON commerce.carts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_cart_lines();
@@ -194,16 +196,16 @@ CREATE TRIGGER orders_quote_payment_guard BEFORE UPDATE OF financial_status ON p
 CREATE TRIGGER orders_quoted_snapshot_immutable BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION private.protect_quoted_order_snapshot();
 CREATE TRIGGER orders_sync_cancelled_quote AFTER UPDATE OF status ON public.orders FOR EACH ROW EXECUTE FUNCTION private.sync_cancelled_order_quote();
 CREATE TRIGGER orders_payment_window_immutable BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION private.protect_order_payment_window();
-CREATE CONSTRAINT TRIGGER orders_totals_match AFTER INSERT OR UPDATE ON public.orders DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_order_totals();
-CREATE CONSTRAINT TRIGGER order_items_totals_match AFTER INSERT OR UPDATE OR DELETE ON public.order_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_order_totals();
+CREATE TRIGGER orders_totals_match AFTER INSERT OR UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION private.schedule_order_totals();
+CREATE TRIGGER order_items_totals_match AFTER INSERT OR UPDATE OR DELETE ON public.order_items FOR EACH ROW EXECUTE FUNCTION private.schedule_order_totals();
 CREATE TRIGGER shipping_lines_price_guard BEFORE INSERT OR UPDATE OR DELETE ON commerce.order_shipping_lines FOR EACH ROW EXECUTE FUNCTION private.protect_order_pricing();
 CREATE TRIGGER tax_lines_price_guard BEFORE INSERT OR UPDATE OR DELETE ON commerce.order_tax_lines FOR EACH ROW EXECUTE FUNCTION private.protect_order_pricing();
 CREATE TRIGGER discount_allocations_price_guard BEFORE INSERT OR UPDATE OR DELETE ON commerce.order_discount_allocations FOR EACH ROW EXECUTE FUNCTION private.protect_order_pricing();
 CREATE TRIGGER order_promotions_price_guard BEFORE INSERT OR UPDATE OR DELETE ON public.order_promotions FOR EACH ROW EXECUTE FUNCTION private.protect_order_pricing();
-CREATE CONSTRAINT TRIGGER shipping_lines_totals AFTER INSERT OR UPDATE OR DELETE ON commerce.order_shipping_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_order_totals();
-CREATE CONSTRAINT TRIGGER tax_lines_totals AFTER INSERT OR UPDATE OR DELETE ON commerce.order_tax_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_order_totals();
-CREATE CONSTRAINT TRIGGER discount_allocations_totals AFTER INSERT OR UPDATE OR DELETE ON commerce.order_discount_allocations DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_order_totals();
-CREATE CONSTRAINT TRIGGER order_promotions_totals AFTER INSERT OR UPDATE OR DELETE ON public.order_promotions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_order_totals();
+CREATE TRIGGER shipping_lines_totals AFTER INSERT OR UPDATE OR DELETE ON commerce.order_shipping_lines FOR EACH ROW EXECUTE FUNCTION private.schedule_order_totals();
+CREATE TRIGGER tax_lines_totals AFTER INSERT OR UPDATE OR DELETE ON commerce.order_tax_lines FOR EACH ROW EXECUTE FUNCTION private.schedule_order_totals();
+CREATE TRIGGER discount_allocations_totals AFTER INSERT OR UPDATE OR DELETE ON commerce.order_discount_allocations FOR EACH ROW EXECUTE FUNCTION private.schedule_order_totals();
+CREATE TRIGGER order_promotions_totals AFTER INSERT OR UPDATE OR DELETE ON public.order_promotions FOR EACH ROW EXECUTE FUNCTION private.schedule_order_totals();
 CREATE TRIGGER shipping_lines_no_truncate BEFORE TRUNCATE ON commerce.order_shipping_lines FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER tax_lines_no_truncate BEFORE TRUNCATE ON commerce.order_tax_lines FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER discount_allocations_no_truncate BEFORE TRUNCATE ON commerce.order_discount_allocations FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
@@ -237,6 +239,7 @@ CREATE TRIGGER profiles_updated_at BEFORE UPDATE ON public.profiles FOR EACH ROW
 CREATE TRIGGER customers_identity BEFORE UPDATE ON public.customers FOR EACH ROW EXECUTE FUNCTION private.protect_customer();
 CREATE TRIGGER customers_updated_at BEFORE UPDATE ON public.customers FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER customers_no_delete BEFORE DELETE OR TRUNCATE ON public.customers FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
+CREATE TRIGGER promotion_targets_scope BEFORE INSERT OR UPDATE OR DELETE ON public.promotion_targets FOR EACH ROW EXECUTE FUNCTION private.guard_promotion_targets();
 CREATE TRIGGER promotions_normalize_code BEFORE INSERT OR UPDATE OF code ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.normalize_promotion_code();
 CREATE TRIGGER promotions_updated_at BEFORE UPDATE ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER promotions_validate BEFORE INSERT OR UPDATE ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.validate_promotion_params();
@@ -345,6 +348,8 @@ CREATE POLICY "variant_option_values: public read published" ON public.variant_o
   WHERE ((v.id = variant_option_values.variant_id) AND v.is_active AND (p.status = 'active'::text))))));
 
 -- Explicit schema, function, table and column privileges
+
+REVOKE ALL ON FUNCTION private.schedule_order_totals(), private.assert_order_totals(), private.guard_promotion_targets() FROM PUBLIC, anon, authenticated, service_role;
 
 REVOKE ALL ON FUNCTION private.valid_line_attributes(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.checkout_line_key(uuid, jsonb) FROM PUBLIC;

@@ -222,6 +222,33 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.guard_promotion_targets() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_row jsonb := case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end;
+  v_id uuid := (v_row ->> 'promotion_id')::uuid;
+begin
+  if tg_op = 'UPDATE' and (new.id, new.promotion_id, new.role) is distinct from (old.id, old.promotion_id, old.role) then
+    raise exception 'promotion target identity and role are immutable; delete and recreate the association';
+  end if;
+  -- Child rows may already be locked, so fail fast rather than wait backwards
+  -- on checkout's promotion lock. The parent write also fences old RR snapshots.
+  perform 1 from public.promotions where id = v_id for no key update nowait;
+  if not found then
+    if tg_op = 'DELETE' then return old; end if; -- deleting the promotion itself
+    raise exception using errcode = '23503', message = 'promotion target parent must exist';
+  end if;
+  update public.promotions set
+    apply_scope = case when tg_op <> 'DELETE' and v_row ->> 'role' = 'apply' then 'selected' else apply_scope end,
+    get_scope = case when tg_op <> 'DELETE' and v_row ->> 'role' = 'get' then 'selected' else get_scope end,
+    updated_at = now()
+  where id = v_id;
+  -- Deleting the last target deliberately retains selected/empty (matches none).
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+
 CREATE FUNCTION private.enforce_metafield_definition_compatibility() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -720,7 +747,7 @@ begin
     when 'json' then
       null;  -- 任意结构
     else
-      null;
+      raise exception 'unsupported metafield type: %', new.type;
   end case;
 
   -- definition.validations 执行：min/max（number）、choices（标量白名单）

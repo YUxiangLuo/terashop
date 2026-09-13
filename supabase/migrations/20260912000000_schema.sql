@@ -108,7 +108,7 @@ $$;
 
 CREATE TABLE public.orders (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
-    order_number bigint NOT NULL,
+    order_number bigint NOT NULL UNIQUE,
     customer_id uuid NOT NULL,
     email text NOT NULL,
     status text DEFAULT 'open'::text NOT NULL,
@@ -391,6 +391,7 @@ CREATE TABLE public.inventory_levels (
     variant_id uuid NOT NULL,
     location_id uuid NOT NULL,
     on_hand integer DEFAULT 0 NOT NULL,
+    reservation_revision bigint NOT NULL DEFAULT 0 CHECK (reservation_revision >= 0),
     CONSTRAINT inventory_levels_on_hand_check CHECK ((on_hand >= 0))
 );
 
@@ -674,12 +675,20 @@ CREATE TABLE public.metafields (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     owner_type text NOT NULL,
     owner_id uuid NOT NULL,
+    -- Derived FK routing, never client-supplied identities. Real RI also protects
+    -- concurrent deletes and old snapshots; an EXISTS trigger alone cannot.
+    owner_product_id uuid GENERATED ALWAYS AS (case when owner_type = 'product' then owner_id end) STORED,
+    owner_variant_id uuid GENERATED ALWAYS AS (case when owner_type = 'variant' then owner_id end) STORED,
+    owner_category_id uuid GENERATED ALWAYS AS (case when owner_type = 'category' then owner_id end) STORED,
+    owner_customer_id uuid GENERATED ALWAYS AS (case when owner_type = 'customer' then owner_id end) STORED,
+    owner_order_id uuid GENERATED ALWAYS AS (case when owner_type = 'order' then owner_id end) STORED,
     namespace text DEFAULT 'custom'::text NOT NULL,
     key text NOT NULL,
     type text NOT NULL,
     value jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT metafields_type_check CHECK (type IN ('text','rich_text','number','boolean','date','datetime','url','color','json','list_text','list_number','metaobject_reference','list_metaobject_reference')),
     CONSTRAINT metafields_owner_type_check CHECK ((owner_type = ANY (ARRAY['product'::text, 'variant'::text, 'category'::text, 'customer'::text, 'order'::text, 'shop'::text])))
 );
 
@@ -851,6 +860,8 @@ CREATE TABLE public.promotions (
     params jsonb DEFAULT '{}'::jsonb NOT NULL,
     priority integer DEFAULT 100 NOT NULL,
     stackable boolean DEFAULT false NOT NULL,
+    apply_scope text NOT NULL DEFAULT 'all' CHECK (apply_scope IN ('all','selected')),
+    get_scope text NOT NULL DEFAULT 'same_as_apply' CHECK (get_scope IN ('same_as_apply','selected')),
     usage_limit integer,
     used_count integer DEFAULT 0 NOT NULL,
     per_customer_limit integer DEFAULT 1 NOT NULL,
@@ -1477,6 +1488,27 @@ ALTER TABLE ONLY public.variant_option_values
 
 ALTER TABLE ONLY public.variant_option_values
     ADD CONSTRAINT variant_option_values_variant_id_fkey FOREIGN KEY (variant_id) REFERENCES public.product_variants(id) ON DELETE CASCADE;
+
+ALTER TABLE public.metafields
+    ADD FOREIGN KEY (owner_product_id) REFERENCES public.products(id) ON DELETE CASCADE,
+    ADD FOREIGN KEY (owner_variant_id) REFERENCES public.product_variants(id) ON DELETE CASCADE,
+    ADD FOREIGN KEY (owner_category_id) REFERENCES public.categories(id) ON DELETE CASCADE,
+    ADD FOREIGN KEY (owner_customer_id) REFERENCES public.customers(id) ON DELETE CASCADE,
+    ADD FOREIGN KEY (owner_order_id) REFERENCES public.orders(id) ON DELETE CASCADE;
+CREATE INDEX metafields_product_fk_idx ON public.metafields(owner_product_id) WHERE owner_product_id IS NOT NULL;
+CREATE INDEX metafields_variant_fk_idx ON public.metafields(owner_variant_id) WHERE owner_variant_id IS NOT NULL;
+CREATE INDEX metafields_category_fk_idx ON public.metafields(owner_category_id) WHERE owner_category_id IS NOT NULL;
+CREATE INDEX metafields_customer_fk_idx ON public.metafields(owner_customer_id) WHERE owner_customer_id IS NOT NULL;
+CREATE INDEX metafields_order_fk_idx ON public.metafields(owner_order_id) WHERE owner_order_id IS NOT NULL;
+
+-- Transaction-local in effect: one queued validation per dirty order, removed
+-- by its deferred constraint trigger before commit. MVCC handles savepoint
+-- rollback and re-enqueue after SET CONSTRAINTS; no session/GUC skip flags.
+CREATE TABLE private.order_validation_queue (
+    order_id uuid PRIMARY KEY REFERENCES public.orders(id) ON DELETE CASCADE
+);
+ALTER TABLE private.order_validation_queue ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.order_validation_queue FROM PUBLIC, anon, authenticated, service_role;
 
 -- Return authorization, physical receipt, and inspection decisions are not refunds.
 -- A return is scoped to one existing shipment; multiple shipments use multiple returns.

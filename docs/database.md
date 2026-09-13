@@ -49,6 +49,7 @@ bun run typecheck
 ## 深度审阅回归
 
 退款发出/取消、库存锁与批量过期、瞬时入账故障、有限金额、头行守恒、Outbox fencing 和最小权限已纳入正式回归，见 [审阅与修复闭环](database-review.md)。
+促销范围、RR 库存/部分履约、Metafield owner FK、订单号及整单校验去重的二轮实验见 [数据库设计复审](database-design-fixes.md)。正式回归先在未修改基线上确认失败，再重建验证修复；不把架构收敛建议混入本轮。
 时间推进和故障注入使用可回滚事务；库存交错仅安装测试暂停触发器，finally 删除，不禁用业务约束。测试异常中断后重建本地库清理，禁止在生产或宿主 PostgreSQL 上运行。
 
 ## 目录与商业行回归
@@ -64,7 +65,8 @@ bun run typecheck
 退款商品净额继续使用 `refund_lines` / `refund_request_lines`；新增 `refund_components` / `refund_request_components` 保存税、配送和未分配金额。外键约束同一订单归属，提交时校验组成总额；事实不可改写，异步成功原样复制请求分摊。
 
 [`pricing-breakdown.test.ts`](../tests/pricing-breakdown.test.ts) 覆盖国家/wildcard/零税、拆属性与美分守恒、两条建单路径、历史快照、支付锁、缺失/跨单明细、混合/未分配退款、取消/逆序完成、handler 与受控并发。定价明细与意图创建均写订单行版本；退款请求 INSERT 同样写父订单并检查 Capture 剩余额度，拒绝旧 REPEATABLE READ 快照绕过保护。税规则清理使用停用，不能删除历史引用。
-这些测试不代表全球税务合规或生产吞吐验证；关系明细/逐行延迟校验的生产基数查询与批量写入仍须实测。
+整单延迟校验现在经 `private.order_validation_queue` 按待检 order_id 去重，而不是每个明细行重新校验整单。队列触发时消费、检查，支持 `SET CONSTRAINTS` 后重新入队及保存点回滚，提交后无残留；API 角色没有队列表权限。`order_pricing_json` 的子查询显式限定 order_id，复用复合索引；不强制所有商品税查询放弃更精确的行索引。
+这些测试不代表全球税务合规或生产吞吐验证；生产基数查询、Quote/Return 延迟校验及批量写入仍须实测。
 
 ## 独立客户与 Cart
 

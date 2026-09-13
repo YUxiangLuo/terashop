@@ -294,6 +294,9 @@ $$;
 CREATE FUNCTION private.protect_order_payment_window() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 begin
+  if (new.id, new.order_number) is distinct from (old.id, old.order_number) then
+    raise exception 'order identity and number are immutable';
+  end if;
   if (new.payment_expires_at, new.created_at) is distinct from (old.payment_expires_at, old.created_at) then
     raise exception 'order payment window is immutable';
   end if;
@@ -712,15 +715,15 @@ CREATE FUNCTION private.order_pricing_json(p_order_id uuid) RETURNS jsonb
       'unit_price', i.unit_price, 'quantity', i.quantity, 'total', i.total,
       'discount_total', i.discount_total, 'line_total', i.line_total,
       'discount_allocations', (select coalesce(jsonb_agg(jsonb_build_object('promotion_id', a.promotion_id,
-        'label', a.label, 'amount', a.amount) order by a.promotion_id), '[]') from commerce.order_discount_allocations a where a.order_item_id = i.id),
+        'label', a.label, 'amount', a.amount) order by a.promotion_id), '[]') from commerce.order_discount_allocations a where a.order_id = o.id and a.order_item_id = i.id),
       'tax_lines', (select coalesce(jsonb_agg(to_jsonb(t) - array['order_id','order_item_id','shipping_line_id'] order by t.tax_rate_id), '[]')
-        from commerce.order_tax_lines t where t.order_item_id = i.id)
+        from commerce.order_tax_lines t where t.order_id = o.id and t.order_item_id = i.id)
       ) order by i.variant_id, i.line_key), '[]') from public.order_items i where i.order_id = o.id),
     'shipping_line', (select to_jsonb(s) - 'order_id' || jsonb_build_object(
       'discount_allocations', (select coalesce(jsonb_agg(jsonb_build_object('promotion_id', a.promotion_id, 'label', a.label, 'amount', a.amount) order by a.promotion_id), '[]')
-        from commerce.order_discount_allocations a where a.shipping_line_id = s.id),
+        from commerce.order_discount_allocations a where a.order_id = o.id and a.shipping_line_id = s.id),
       'tax_lines', (select coalesce(jsonb_agg(to_jsonb(t) - array['order_id','order_item_id','shipping_line_id'] order by t.tax_rate_id), '[]')
-        from commerce.order_tax_lines t where t.shipping_line_id = s.id)) from commerce.order_shipping_lines s where s.order_id = o.id),
+        from commerce.order_tax_lines t where t.order_id = o.id and t.shipping_line_id = s.id)) from commerce.order_shipping_lines s where s.order_id = o.id),
     'promotions', (select coalesce(jsonb_agg(jsonb_build_object('promotion_id', p.promotion_id, 'name', p.name,
       'code', p.code, 'amount', p.amount, 'snapshot', p.snapshot) order by (p.snapshot ->> 'application_index')::integer, p.promotion_id), '[]') from public.order_promotions p where p.order_id = o.id)
   ) from public.orders o where o.id = p_order_id;
@@ -1170,7 +1173,8 @@ declare
   v_deferred_snapshot jsonb;
   v_threshold_discount numeric := 0;
   v_shipping public.shipping_methods;
-  v_promo record;
+  v_promo public.promotions;
+  v_candidate record;
   v_code_found boolean := false;
   v_applied integer := 0;
   v_has_exclusive boolean := false;
@@ -1284,8 +1288,14 @@ begin
     end if;
   end if;
 
-  for v_promo in
-    select p.* from public.promotions p
+  -- Rule, scope and targets must come from ONE MVCC snapshot. Reading targets
+  -- in a later statement could combine an old all-scope with new selected rows.
+  for v_candidate in
+    select p as promotion,
+      (select coalesce(jsonb_agg(jsonb_build_object('role', t.role, 'product_id', t.product_id,
+        'variant_id', t.variant_id, 'category_id', t.category_id) order by t.id), '[]')
+       from public.promotion_targets t where t.promotion_id = p.id) as targets
+    from public.promotions p
     where p.is_active
       and (p.type <> 'free_shipping' or v_shipping.price > 0)
       and (p.starts_at is null or now() >= p.starts_at)
@@ -1294,6 +1304,7 @@ begin
       and (p.code is null or p.code = upper(coalesce(discount_code, '')))
     order by p.priority, p.created_at, (p.code is null), p.code, p.name, p.id
   loop
+    v_promo := v_candidate.promotion;
     if v_promo.code is not null then v_code_found := true; end if;
     if v_applied > 0 and (v_has_exclusive or not v_promo.stackable) then continue; end if;
     if v_promo.code is not null then
@@ -1312,10 +1323,9 @@ begin
     end if;
     v_snapshot := jsonb_build_object('type', v_promo.type, 'params', v_promo.params,
       'priority', v_promo.priority, 'stackable', v_promo.stackable,
+      'apply_scope', v_promo.apply_scope, 'get_scope', v_promo.get_scope,
       'starts_at_epoch', extract(epoch from v_promo.starts_at), 'ends_at_epoch', extract(epoch from v_promo.ends_at),
-      'targets', (select coalesce(jsonb_agg(jsonb_build_object('role', t.role, 'product_id', t.product_id,
-        'variant_id', t.variant_id, 'category_id', t.category_id) order by t.id), '[]')
-        from public.promotion_targets t where t.promotion_id = v_promo.id));
+      'targets', v_candidate.targets);
     update _price_lines set discount_before = discount_total where idx > 0;
     v_amount := 0;
     case v_promo.type
@@ -1323,13 +1333,13 @@ begin
       v_pct := (v_promo.params ->> 'percent')::numeric;
       v_min_qty := coalesce((v_promo.params ->> 'min_quantity')::int, 0);
       select coalesce(sum(l.quantity), 0) into v_scope_qty from _price_lines l
-      where private.line_in_scope(v_snapshot -> 'targets', 'apply', l.variant_id, l.product_id, l.category_ids);
+      where private.line_in_scope(v_snapshot, 'apply', l.variant_id, l.product_id, l.category_ids);
       if v_scope_qty > 0 and v_scope_qty >= v_min_qty then
         for v_line in
           select l.variant_id, sum(l.unit_price * l.quantity) gross,
                  sum(l.unit_price * l.quantity - l.discount_total) room
           from _price_lines l
-          where private.line_in_scope(v_snapshot -> 'targets', 'apply', l.variant_id, l.product_id, l.category_ids)
+          where private.line_in_scope(v_snapshot, 'apply', l.variant_id, l.product_id, l.category_ids)
           group by l.variant_id order by l.variant_id
         loop
           -- Customer-controlled text must not multiply percentage-rounding benefits.
@@ -1343,15 +1353,13 @@ begin
       v_get := (v_promo.params ->> 'get')::int;
       v_get_pct := coalesce((v_promo.params ->> 'get_percent')::numeric, 100);
       select coalesce(sum(l.quantity), 0) into v_scope_qty from _price_lines l
-      where private.line_in_scope(v_snapshot -> 'targets', 'apply', l.variant_id, l.product_id, l.category_ids);
-      v_get_role := case when exists (
-        select 1 from jsonb_array_elements(v_snapshot -> 'targets') t where t ->> 'role' = 'get'
-      ) then 'get' else 'apply' end;
+      where private.line_in_scope(v_snapshot, 'apply', l.variant_id, l.product_id, l.category_ids);
+      v_get_role := case when v_snapshot ->> 'get_scope' = 'selected' then 'get' else 'apply' end;
       if v_get_role = 'get' then
         v_free := least(
           (floor(v_scope_qty / v_buy))::int * v_get,
           (select coalesce(sum(l.quantity), 0) from _price_lines l
-           where private.line_in_scope(v_snapshot -> 'targets', 'get', l.variant_id, l.product_id, l.category_ids))
+           where private.line_in_scope(v_snapshot, 'get', l.variant_id, l.product_id, l.category_ids))
         );
       else
         v_free := (floor(v_scope_qty / (v_buy + v_get)))::int * v_get;
@@ -1359,7 +1367,7 @@ begin
       for v_line in
         select l.variant_id, l.unit_price, sum(l.quantity)::integer quantity, sum(l.discount_total) discount_total
         from _price_lines l
-        where private.line_in_scope(v_snapshot -> 'targets', v_get_role, l.variant_id, l.product_id, l.category_ids)
+        where private.line_in_scope(v_snapshot, v_get_role, l.variant_id, l.product_id, l.category_ids)
         group by l.variant_id, l.unit_price
         order by l.unit_price, l.variant_id
       loop
@@ -1783,9 +1791,11 @@ begin
     raise exception 'reservation line does not match an active variant';
   end if;
   if new.track_inventory then
-    select il.on_hand into v_on_hand from public.inventory_levels il
+    -- A lock without a write cannot fence an old REPEATABLE READ snapshot.
+    -- Do not record a physical movement: only the reservation version changes.
+    update public.inventory_levels il set reservation_revision = il.reservation_revision + 1
     where il.variant_id = new.variant_id and il.location_id = new.location_id
-    for update;
+    returning il.on_hand into v_on_hand;
     if not found then raise exception 'inventory level not found for reservation'; end if;
     v_reserved := private.active_reserved_quantity(
       new.variant_id, new.location_id, null
@@ -1798,12 +1808,13 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.line_in_scope(p_targets jsonb, p_role text, p_variant_id uuid, p_product_id uuid, p_category_ids uuid[]) RETURNS boolean
+CREATE FUNCTION private.line_in_scope(p_snapshot jsonb, p_role text, p_variant_id uuid, p_product_id uuid, p_category_ids uuid[]) RETURNS boolean
     LANGUAGE sql IMMUTABLE SET search_path TO '' AS $$
-  select not exists (select 1 from jsonb_array_elements(p_targets) t where t ->> 'role' = p_role)
-    or exists (select 1 from jsonb_array_elements(p_targets) t where t ->> 'role' = p_role and (
-      (t ->> 'variant_id')::uuid = p_variant_id or (t ->> 'product_id')::uuid = p_product_id
-      or (t ->> 'category_id')::uuid = any(p_category_ids)));
+  select coalesce((p_role = 'apply' and p_snapshot ->> 'apply_scope' = 'all')
+    or (p_snapshot ->> case when p_role = 'get' then 'get_scope' else 'apply_scope' end = 'selected'
+      and exists (select 1 from jsonb_array_elements(p_snapshot -> 'targets') t where t ->> 'role' = p_role and (
+        (t ->> 'variant_id')::uuid = p_variant_id or (t ->> 'product_id')::uuid = p_product_id
+        or (t ->> 'category_id')::uuid = any(p_category_ids)))), false);
 $$;
 
 CREATE FUNCTION public.cancel_checkout_quote(quote_id uuid, reason text DEFAULT 'checkout cancelled'::text) RETURNS jsonb
@@ -2444,10 +2455,14 @@ end;
 $$;
 
 CREATE FUNCTION public.validate_promotion_params() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO ''
     AS $$
 declare v_key text;
 begin
+  if (new.apply_scope = 'all' and exists (select 1 from public.promotion_targets where promotion_id = new.id and role = 'apply'))
+    or (new.get_scope = 'same_as_apply' and exists (select 1 from public.promotion_targets where promotion_id = new.id and role = 'get')) then
+    raise exception 'remove selected targets before explicitly resetting promotion scope';
+  end if;
   foreach v_key in array array['percent', 'amount', 'get_percent', 'threshold'] loop
     if (new.params->>v_key)::numeric in ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric) then
       raise exception 'promotion amount and percentage must be finite';
