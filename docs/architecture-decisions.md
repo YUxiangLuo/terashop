@@ -129,7 +129,7 @@ PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard
 默认地址命令先锁活跃 Customer 行，再锁目标地址并清理旧默认；所有新建地址都先取客户锁，`is_default=true` 沿用该顺序。地址/客户 metafield 内容修改与匿名化串行化；已持子行的 UPDATE 用 NOWAIT，竞争时整笔事务重试，不能在擦除后补入旧客户 PII。
 客户端仅可 PATCH 地址内容，身份/归属不可变，既有默认值切换必须走 `set_default_address`，service-role 表写入也不能绕过。
 唯一索引保证每客户最多一个默认地址；`make_default=false` 或删除允许留下零个，不自动另选。
-owner 权限的 `product_listing` 必须显式过滤停用分类；Metaobject definition 停用是否隐藏子对象仍待产品确认。
+owner 权限的 `product_listing` 必须显式过滤停用分类；Metaobject definition 停用时隐藏公开子对象，管理员仍可读取修复。
 
 ## ADR-013：目录完整性与发布
 
@@ -190,4 +190,12 @@ Receipt 不立即增加可售量，未处置数量只是该退货的待验收余
 
 Metafield 类型使用封闭 CHECK，未知类型拒绝；任意 JSON 必须显式选择 `json`。输入仍为 owner_type / owner_id，五个生成的 owner_*_id 列只负责路由真实外键，不接受客户端赋值。商品、变体、分类删除由 FK 级联清理对应扩展值；Customer / Order 的不可删除保护与匿名化合同不变。父对象删除与旧快照写入的并发正确性由 PostgreSQL RI 保证，EXISTS 检查只提供可读错误。
 
-shop 继续沿用单店约定，Metaobject JSON 引用及 definition 发布规则不是本轮新设计。实验、性能计数及重建回归见 [归档设计复审](reviews/76cba7b.md)。
+shop 继续沿用单店约定。历史 owner 引用实验、性能计数及重建回归见 [归档设计复审](reviews/76cba7b.md)。
+
+## ADR-020：显式目录读合同与扩展可见性
+
+Storefront 商品列表/详情与 Admin 商品详情使用不同 public RPC，输出显式 DTO；无需为了命名分层复制数据库或交易逻辑。Storefront 的发布/字段过滤不随调用者角色扩大，管理员预览也不得得到私有数据。Admin 入口先验证管理员/service 身份，再返回成本、草稿及内部扩展。现有底表 API 暂保留授权；完整订单/客户查询分层、管理列表和原子目录编辑仍需后续实现，不把新增三个接口称为已完成全部 API 分层。
+
+列表使用有界 UUID keyset 分页和精确分类过滤，先限定候选商品再计算默认仓可用量；不复用全店预占聚合，也不承诺库存快照、跨页一致性或已完成生产性能验证。详情只返回活跃变体、其可见图片和启用分类，库存口径与结账共享有效预占函数。
+
+Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop，customer 仅用于客户/订单且继续验证归属。没有定义的值默认私有，既有底表 RLS 同样限制，字段类型校验不替代访问控制。Metaobject 定义默认私有；公开对象须同时满足定义 public/is_active 及条目 active。类型化引用只有全部目标可公开读取时才对非管理员显示，定义/目标收紧时无需批量改写引用值；任意 JSON 内容不做递归权限解释。seed 显式声明其展示字段和客户礼品留言的访问级别。

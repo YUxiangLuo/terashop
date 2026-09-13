@@ -662,6 +662,10 @@ CREATE TABLE public.metafield_definitions (
     key text NOT NULL,
     name text NOT NULL,
     type text NOT NULL,
+    access text DEFAULT 'admin' NOT NULL CHECK (access IN ('admin', 'public', 'customer')),
+    CONSTRAINT metafield_definitions_access_owner_check CHECK (
+      access = 'admin' OR (access = 'public' AND owner_type IN ('product','variant','category','shop'))
+      OR (access = 'customer' AND owner_type IN ('customer','order'))),
     description text DEFAULT ''::text NOT NULL,
     validations jsonb DEFAULT '{}'::jsonb NOT NULL,
     "position" integer DEFAULT 0 NOT NULL,
@@ -698,6 +702,7 @@ CREATE TABLE public.metaobject_definitions (
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
     fields jsonb NOT NULL,
+    access text DEFAULT 'admin' NOT NULL CHECK (access IN ('admin', 'public')),
     is_active boolean DEFAULT true NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL

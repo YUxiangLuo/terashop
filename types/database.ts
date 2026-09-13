@@ -405,6 +405,7 @@ export type Database = {
       }
       metafield_definitions: {
         Row: {
+          access: string
           created_at: string
           description: string
           id: string
@@ -418,6 +419,7 @@ export type Database = {
           validations: Json
         }
         Insert: {
+          access?: string
           created_at?: string
           description?: string
           id?: string
@@ -431,6 +433,7 @@ export type Database = {
           validations?: Json
         }
         Update: {
+          access?: string
           created_at?: string
           description?: string
           id?: string
@@ -541,6 +544,7 @@ export type Database = {
       }
       metaobject_definitions: {
         Row: {
+          access: string
           created_at: string
           description: string
           fields: Json
@@ -551,6 +555,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          access?: string
           created_at?: string
           description?: string
           fields: Json
@@ -561,6 +566,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          access?: string
           created_at?: string
           description?: string
           fields?: Json
@@ -1834,6 +1840,7 @@ export type Database = {
         Args: { as_of?: string; max_orders?: number }
         Returns: Json
       }
+      get_admin_product: { Args: { product_id: string }; Returns: Json }
       get_cart: {
         Args: { cart_id: string; guest_token?: string }
         Returns: Json
@@ -1856,6 +1863,7 @@ export type Database = {
         Returns: Json
       }
       get_payment_operations: { Args: { order_id: string }; Returns: Json }
+      get_storefront_product: { Args: { product_id: string }; Returns: Json }
       ingest_payment_provider_event: {
         Args: {
           data: Json
@@ -1874,6 +1882,10 @@ export type Database = {
       list_carts: { Args: never; Returns: Json }
       list_pending_provider_refunds: {
         Args: { max_requests?: number; provider: string }
+        Returns: Json
+      }
+      list_storefront_products: {
+        Args: { after_id?: string; category_id?: string; page_size?: number }
         Returns: Json
       }
       mark_order_paid: {

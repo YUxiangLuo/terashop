@@ -6,6 +6,8 @@ import { Cleanup } from './support/cleanup';
 let admin: TestUser;
 let userA: TestUser;
 let userB: TestUser;
+const definitionFixtures = new Cleanup();
+afterAll(() => definitionFixtures.run());
 
 beforeAll(async () => {
   admin = await signup();
@@ -66,11 +68,18 @@ describe('Metafields', () => {
   });
 
   test('customer 域 metafield 仅本人和 admin 可见', async () => {
-    await api('/rest/v1/metafields', {
+    const key = `vip_${crypto.randomUUID().replaceAll('-', '')}`;
+    definitionFixtures.defer(() => checked(api(`/rest/v1/metafield_definitions?key=eq.${key}`, { service: true, method: 'DELETE' })));
+    definitionFixtures.defer(() => checked(api(`/rest/v1/metafields?key=eq.${key}`, { service: true, method: 'DELETE' })));
+    await checked(api('/rest/v1/metafield_definitions', {
+      token: admin.token, method: 'POST',
+      body: { owner_type: 'customer', namespace: 'custom', key, name: 'VIP level', type: 'number', access: 'customer' },
+    }));
+    await checked(api('/rest/v1/metafields', {
       token: admin.token,
       method: 'POST',
-      body: { owner_type: 'customer', owner_id: userA.customerId, namespace: 'custom', key: 'vip_level', type: 'number', value: 3 },
-    });
+      body: { owner_type: 'customer', owner_id: userA.customerId, namespace: 'custom', key, type: 'number', value: 3 },
+    }));
 
     const asA = await api(
       `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${userA.customerId}&select=value`,

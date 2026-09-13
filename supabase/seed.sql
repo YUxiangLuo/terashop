@@ -133,8 +133,8 @@ select v.id, loc, case
 from public.product_variants v;
 
 -- ---------- Metaobject：尺码表定义 + 3 条条目 ----------
-insert into public.metaobject_definitions (type, name, description, fields) values
-  ('size_guide', '尺码表', '服装尺码测量数据', '[
+insert into public.metaobject_definitions (type, name, description, access, fields) values
+  ('size_guide', '尺码表', '服装尺码测量数据', 'public', '[
     {"key": "size",      "name": "尺码",     "type": "text",   "required": true},
     {"key": "bust_cm",   "name": "胸围(cm)", "type": "number", "required": true},
     {"key": "length_cm", "name": "衣长(cm)", "type": "number", "required": true},
@@ -149,12 +149,12 @@ insert into public.metaobjects (definition_id, handle, values) values
   (def_sg, 'l', '{"size":"L","bust_cm":108,"length_cm":72,"note":"偏宽松"}') returning id into mo_l;
 
 -- ---------- Metafield 定义 ----------
-insert into public.metafield_definitions (owner_type, namespace, key, name, type, description, position) values
-  ('product', 'custom', 'care_instructions', '洗护说明', 'text',     '洗涤保养说明',      1),
-  ('product', 'custom', 'material',          '材质',     'list_text', '面料成分列表',      2),
-  ('product', 'specs',  'size_guide',        '尺码表',   'list_metaobject_reference', '引用 size_guide metaobject', 3),
-  ('variant', 'custom', 'weight_g',          '重量(g)',  'number',   '用于运费估算',      1),
-  ('order',   'custom', 'gift_message',      '礼品留言', 'text',     '礼品卡留言',        1);
+insert into public.metafield_definitions (owner_type, namespace, key, name, type, description, position, access) values
+  ('product', 'custom', 'care_instructions', '洗护说明', 'text',     '洗涤保养说明',      1, 'public'),
+  ('product', 'custom', 'material',          '材质',     'list_text', '面料成分列表',      2, 'public'),
+  ('product', 'specs',  'size_guide',        '尺码表',   'list_metaobject_reference', '引用 size_guide metaobject', 3, 'public'),
+  ('variant', 'custom', 'weight_g',          '重量(g)',  'number',   '用于运费估算',      1, 'public'),
+  ('order',   'custom', 'gift_message',      '礼品留言', 'text',     '礼品卡留言',        1, 'customer');
 
 -- ---------- Metafield 值（挂到 T 恤商品） ----------
 insert into public.metafields (owner_type, owner_id, namespace, key, type, value) values

@@ -268,8 +268,14 @@ CREATE POLICY "inventory_movements: admin read" ON public.inventory_movements FO
 CREATE POLICY "locations: admin write" ON public.locations USING (public.is_admin());
 CREATE POLICY "locations: public read active" ON public.locations FOR SELECT USING ((is_active OR public.is_admin()));
 CREATE POLICY "metafield_definitions: admin write" ON public.metafield_definitions USING (public.is_admin());
-CREATE POLICY "metafield_definitions: public read" ON public.metafield_definitions FOR SELECT USING (true);
+CREATE POLICY "metafield_definitions: public read" ON public.metafield_definitions FOR SELECT
+  USING (access = 'public' OR (access = 'customer' AND public.current_customer_id() IS NOT NULL));
 CREATE POLICY "metafields: admin write" ON public.metafields USING (public.is_admin());
+CREATE POLICY "metafields: definition access" ON public.metafields AS RESTRICTIVE FOR SELECT USING (
+  public.is_admin() OR (EXISTS (SELECT 1 FROM public.metafield_definitions d
+    WHERE (d.owner_type,d.namespace,d.key) = (metafields.owner_type,metafields.namespace,metafields.key)
+      AND d.access IN ('public','customer'))
+    AND private.metaobject_references_public(type,value)));
 CREATE POLICY "metafields: order owner read" ON public.metafields FOR SELECT USING (((owner_type = 'order'::text) AND (EXISTS ( SELECT 1
    FROM public.orders o
   WHERE ((o.id = metafields.owner_id) AND (o.customer_id = public.current_customer_id()))))));
@@ -282,9 +288,11 @@ CREATE POLICY "metafields: scoped read" ON public.metafields FOR SELECT USING ((
    FROM public.categories c
   WHERE ((c.id = metafields.owner_id) AND c.is_active))))));
 CREATE POLICY "metaobject_definitions: admin write" ON public.metaobject_definitions USING (public.is_admin());
-CREATE POLICY "metaobject_definitions: public read" ON public.metaobject_definitions FOR SELECT USING ((is_active OR public.is_admin()));
+CREATE POLICY "metaobject_definitions: public read" ON public.metaobject_definitions FOR SELECT USING ((is_active AND access = 'public') OR public.is_admin());
 CREATE POLICY "metaobjects: admin write" ON public.metaobjects USING (public.is_admin());
-CREATE POLICY "metaobjects: public read active" ON public.metaobjects FOR SELECT USING (((status = 'active'::text) OR public.is_admin()));
+CREATE POLICY "metaobjects: public read active" ON public.metaobjects FOR SELECT USING (
+  public.is_admin() OR (status = 'active' AND EXISTS (SELECT 1 FROM public.metaobject_definitions d
+    WHERE d.id = metaobjects.definition_id AND d.is_active AND d.access = 'public')));
 CREATE POLICY "order_events: read own or admin" ON public.order_events FOR SELECT USING ((EXISTS ( SELECT 1
    FROM public.orders o
   WHERE ((o.id = order_events.order_id) AND ((o.customer_id = public.current_customer_id()) OR public.is_admin())))));
@@ -507,6 +515,9 @@ REVOKE ALL ON FUNCTION public.update_order_address(order_id uuid, address jsonb,
 REVOKE ALL ON FUNCTION public.validate_metafield_value() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.validate_promotion_params() FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION private.metaobject_references_public(text,jsonb) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.list_storefront_products(integer,uuid,uuid), public.get_storefront_product(uuid) TO anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.get_admin_product(uuid) TO authenticated, service_role;
 GRANT ALL ON FUNCTION private.cancel_order(order_id uuid, reason text) TO service_role;
 GRANT ALL ON FUNCTION private.create_fulfillment(order_id uuid, items jsonb, carrier text, tracking_number text, tracking_url text) TO service_role;
 GRANT ALL ON FUNCTION private.create_order(items jsonb, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) TO service_role;

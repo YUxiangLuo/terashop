@@ -5,7 +5,25 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 参数名与默认值见 [生成类型](../types/database.ts)，业务约束见 [ADR](architecture-decisions.md)。
 所有商品、运费、固定金额优惠、订单、收款和退款均以 **USD** 计价；`product_listing.currency` 显式返回 `USD`，不提供币种切换或自动换汇。
 
-## 商品查询（匿名）
+## Storefront / Admin 商品读取合同
+
+新客户端优先使用以下显式 DTO，而不是把底表结构作为商城合同。RPC 均位于 `public`；命名不授予权限，数据库独立验证身份、发布状态和输出字段。
+
+| RPC | 参数 | 返回 / 权限 |
+| --- | --- | --- |
+| `list_storefront_products` | `page_size` 默认 20，1–100；可选 `after_id`、`category_id` | `{items,next_cursor}`；匿名可用，只含 active 商品；分类精确匹配且须启用，不包含子分类闭包 |
+| `get_storefront_product` | `product_id` | 商品详情或 null；匿名可用，草稿/归档/不存在均返回 null |
+| `get_admin_product` | `product_id` | 管理详情或 null；仅 admin/service，包含草稿、停用子资源、成本及内部扩展值 |
+
+列表以 UUID 升序分页，将 `next_cursor` 传给下一次 `after_id`；无后续页时为 null。并发新增商品可能落在已翻过的范围，游标不保证跨请求快照。卡片包含 `id/slug/name/currency/price_from/in_stock/primary_image`，不返回精确库存。仅对当前页商品计算库存，不复用全店预占聚合视图。
+
+详情包含基本商品/SEO 字段、`variants`、`options`、`images`、`categories` 和 `metafields`。变体通过 `option_value_ids` 对应选项值；商品/变体扩展值使用 `{namespace,key,type,value}`。Storefront 隐藏停用变体及其专属图片、停用分类、内部扩展字段和成本；**管理员调用 Storefront 也不会扩大输出范围**。库存仍只看默认仓可用量及有效 Quote 预占，不承诺后续结账成功。
+
+Admin 详情增加商品状态/时间戳及变体 `cost/is_active/track_inventory`；精确库存继续使用管理员 `get_inventory_availability`，不是将 Storefront 切换为“管理员模式”。公共扩展引用不会自动递归展开，需按 Metaobject ID 读取其受保护资源。
+
+现有底表/视图读取保留原授权，用于逐步迁移已有调用与测试；本阶段没有完成全部订单/客户管理查询分层，也未增加搜索、运营排序或写入命令。底表的扩展字段读取同样执行下文的新可见性规则。
+
+### 现有底表查询
 
 ```http
 GET /rest/v1/product_listing?select=id,slug,name,price_from,in_stock
@@ -225,6 +243,16 @@ POST /rest/v1/rpc/receive_return
 商品百分比及买赠的 `promotions.apply_scope` 为 `all`（默认）或 `selected`；买赠的 `get_scope` 为 `same_as_apply`（默认）或 `selected`。定向活动应以 selected 或 inactive 创建，再配置目标，避免先公开全店优惠。INSERT `promotion_targets` 自动将对应范围收窄为 selected，删除最后一条仍匹配零商品；扩大范围须先删除对应目标，再显式 PATCH scope。规则、范围与目标一起进入交易快照。整单百分比/固定金额与免邮仍按原有整单语义执行，不借此改变算法或增加条件 DSL。
 
 `metafields` 继续写 owner_type / owner_id / type / value，未知类型拒绝；任意 JSON 使用 `type:"json"`。响应中的 `owner_*_id` 是不可直写的生成 FK 路由；商品、变体、分类删除会级联清理其 metafields。Customer/Order 不可删除及匿名化的既有合同不变。
+
+`metafield_definitions.access` 默认 `admin`：
+
+- `admin`：仅管理员/service 可读定义及其值。未建立定义的值也只在管理端可见。
+- `public`：仅适用于 product/variant/category/shop；产品、变体、分类仍须满足原发布/启用条件。
+- `customer`：仅适用于 customer/order；有活跃 Customer 的账号可读定义，值仍仅归属客户及管理员/service 可读，不向其他客户公开。
+
+`metaobject_definitions.access` 为 `admin`（默认）或 `public`。公开条目还要求自身 active、定义 is_active；修改/删除定义的可见性会在后续查询中立即生效。公开/客户可见的类型化 Metaobject 引用仅在全部目标条目及定义均可公开读取时返回；任一目标私有、停用、草稿或不存在，整个引用字段隐藏，管理员仍可读取修复。任意 JSON/文本不是权限语言，不自动发现或删除其中的敏感内容。
+
+这些规则同时约束底表 RLS 与新 Storefront DTO，不能用旧接口绕过；字段可见性仅管理员/service 可配置。seed 的洗护/材质/尺码表/重量显式公开，礼品留言显式为 customer；其他新增定义不得依赖旧的默认公开行为。
 
 `order_number` 在数据库保证唯一，创建后不可 PATCH（包括 service role）。库存预占和每条新增履约事实都会写共享资源版本；直接 SQL / Worker 遇到 `40001` 应重试整笔事务，不假设仅取行锁就能刷新 REPEATABLE READ 快照。
 

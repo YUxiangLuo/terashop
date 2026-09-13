@@ -779,4 +779,103 @@ begin
 end;
 $$;
 
+-- A typed reference is public only while every referenced object and its
+-- definition are public. Unstructured JSON is content, never an access rule.
+CREATE FUNCTION private.metaobject_references_public(p_type text, p_value jsonb) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select case when p_type not in ('metaobject_reference','list_metaobject_reference') then true
+    else not exists (
+      select 1 from jsonb_array_elements_text(case when p_type = 'metaobject_reference'
+        then jsonb_build_array(p_value) else p_value end) r(id)
+      where not exists (select 1 from public.metaobjects o
+        join public.metaobject_definitions d on d.id = o.definition_id
+        where o.id = r.id::uuid and o.status = 'active' and d.is_active and d.access = 'public')
+    ) end;
+$$;
+
+CREATE FUNCTION private.catalog_metafields_json(p_owner_type text, p_owner_id uuid, p_admin boolean) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select coalesce(jsonb_agg(jsonb_build_object('namespace', m.namespace, 'key', m.key, 'type', m.type, 'value', m.value)
+    order by m.namespace, m.key), '[]'::jsonb)
+  from public.metafields m where m.owner_type = p_owner_type and m.owner_id = p_owner_id
+    and (p_admin or (exists (select 1 from public.metafield_definitions d
+      where (d.owner_type,d.namespace,d.key) = (m.owner_type,m.namespace,m.key) and d.access = 'public')
+      and private.metaobject_references_public(m.type,m.value)));
+$$;
+
+-- Explicit catalog DTO: even an admin calling Storefront sees only public data.
+CREATE FUNCTION private.catalog_product_json(p_product public.products, p_admin boolean) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select jsonb_build_object('id', p_product.id, 'slug', p_product.slug, 'name', p_product.name,
+    'description', p_product.description, 'vendor', p_product.vendor, 'product_type', p_product.product_type,
+    'tags', p_product.tags, 'seo_title', p_product.seo_title, 'seo_description', p_product.seo_description,
+    'currency', 'USD', 'metafields', private.catalog_metafields_json('product',p_product.id,p_admin),
+    'variants', coalesce((select jsonb_agg(jsonb_build_object('id',v.id,'sku',v.sku,'barcode',v.barcode,
+      'price',v.price,'compare_at_price',v.compare_at_price,'position',v.position,
+      'in_stock', not v.track_inventory or exists (select 1 from public.inventory_levels il
+        join public.locations l on l.id = il.location_id and l.is_active and l.is_default
+        where il.variant_id = v.id and il.on_hand > private.active_reserved_quantity(v.id,l.id,null)),
+      'option_value_ids', coalesce((select jsonb_agg(x.option_value_id order by x.option_value_id)
+        from public.variant_option_values x where x.variant_id = v.id),'[]'::jsonb),
+      'metafields', private.catalog_metafields_json('variant',v.id,p_admin))
+      || case when p_admin then jsonb_build_object('cost',v.cost,'is_active',v.is_active,'track_inventory',v.track_inventory)
+        else '{}'::jsonb end order by v.position,v.id)
+      from public.product_variants v where v.product_id = p_product.id and (p_admin or v.is_active)),'[]'::jsonb),
+    'options', coalesce((select jsonb_agg(jsonb_build_object('id',o.id,'name',o.name,'position',o.position,
+      'values',coalesce((select jsonb_agg(jsonb_build_object('id',v.id,'value',v.value,'position',v.position) order by v.position,v.id)
+        from public.product_option_values v where v.option_id = o.id),'[]'::jsonb)) order by o.position,o.id)
+      from public.product_options o where o.product_id = p_product.id),'[]'::jsonb),
+    'images', coalesce((select jsonb_agg(jsonb_build_object('id',i.id,'url',i.url,'alt',i.alt,'position',i.position,'variant_id',i.variant_id)
+      order by i.position,i.id) from public.product_images i where i.product_id = p_product.id and
+      (p_admin or i.variant_id is null or exists (select 1 from public.product_variants v where v.id = i.variant_id and v.is_active))),'[]'::jsonb),
+    'categories', coalesce((select jsonb_agg(jsonb_build_object('id',c.id,'slug',c.slug,'name',c.name) order by c.slug,c.id)
+      from public.product_categories pc join public.categories c on c.id = pc.category_id
+      where pc.product_id = p_product.id and (p_admin or c.is_active)),'[]'::jsonb))
+    || case when p_admin then jsonb_build_object('status',p_product.status,'created_at',p_product.created_at,'updated_at',p_product.updated_at)
+      else '{}'::jsonb end;
+$$;
+
+CREATE FUNCTION public.get_storefront_product(product_id uuid) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+  select private.catalog_product_json(p,false) from public.products p
+  where p.id = product_id and p.status = 'active';
+$$;
+
+CREATE FUNCTION public.get_admin_product(product_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'admin only';
+  end if;
+  return (select private.catalog_product_json(p,true) from public.products p where p.id = product_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_storefront_products(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL, category_id uuid DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if page_size is null or page_size not between 1 and 100 then
+    raise exception using errcode = '22023', message = 'page_size must be between 1 and 100';
+  end if;
+  with candidates as materialized (
+    select p.id,p.slug,p.name from public.products p where p.status = 'active' and (after_id is null or p.id > after_id)
+      and (category_id is null or exists (select 1 from public.product_categories pc join public.categories c on c.id = pc.category_id
+        where pc.product_id = p.id and c.id = list_storefront_products.category_id and c.is_active))
+    order by p.id limit page_size + 1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'slug',p.slug,'name',p.name,'currency','USD',
+    'price_from',(select min(v.price) from public.product_variants v where v.product_id = p.id and v.is_active),
+    'in_stock',exists (select 1 from public.product_variants v where v.product_id = p.id and v.is_active and
+      (not v.track_inventory or exists (select 1 from public.inventory_levels il join public.locations l on l.id = il.location_id
+        where il.variant_id = v.id and l.is_default and l.is_active and il.on_hand > private.active_reserved_quantity(v.id,l.id,null)))),
+    'primary_image',(select i.url from public.product_images i where i.product_id = p.id
+      and (i.variant_id is null or exists (select 1 from public.product_variants v where v.id = i.variant_id and v.is_active))
+      order by i.position,i.id limit 1)) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates) > page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;
