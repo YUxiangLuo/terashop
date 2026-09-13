@@ -173,6 +173,134 @@ test('子行被其他事务锁定时保存快速失败并回滚，不反向等�
   });
 });
 
+test('分类与商品/新变体扩展原子保存，省略保留、显式清空及删除，继续过滤公开 DTO', async () => {
+  const p = await stockedProduct(admin, { cleanup, trackInventory: false });
+  await withRollback(db, async sql => {
+    const category = crypto.randomUUID(), variant = crypto.randomUUID();
+    await sql`insert into public.categories(id,slug,name,is_active) values (${category}::uuid,${category},'Private category',false)`;
+    await sql`insert into public.metafield_definitions(owner_type,namespace,key,name,type,access)
+      values ('product',${p.productId},'public','Public text','text','public')`;
+    const result = await sqlSave(sql, p.productId, (await read(p.productId)).revision, {
+      product: { name: 'Complete edit' }, category_ids: [category],
+      variants: [{ id: variant, price: 23, is_active: false }],
+      metafields: [
+        { namespace: p.productId, key: 'public', type: 'text', value: 'visible' },
+        { namespace: p.productId, key: 'private', type: 'json', value: { supplier: 7 } },
+        { variant_id: variant, namespace: p.productId, key: 'private', type: 'number', value: 9 },
+      ],
+    });
+    expect(result).toMatchObject({ name: 'Complete edit', categories: [{ id: category }],
+      metafields: [{ key: 'private', value: { supplier: 7 } }, { key: 'public', value: 'visible' }] });
+    expect(result.variants.find(v => v.id === variant)).toMatchObject({ metafields: [{ value: 9 }] });
+    const publicDto = (await sql`select public.get_storefront_product(${p.productId}::uuid) dto`)[0].dto;
+    expect(publicDto.categories).toEqual([]);
+    expect(publicDto.metafields).toEqual([{ namespace: p.productId, key: 'public', type: 'text', value: 'visible' }]);
+    expect(await sqlSave(sql, p.productId, result.revision, { category_ids: [category], metafields: [] })).toEqual(result);
+    const updated = await sqlSave(sql, p.productId, result.revision, {
+      metafields: [{ namespace: p.productId, key: 'public', type: 'text', value: 'changed' }],
+    });
+    expect(updated).toMatchObject({ categories: [{ id: category }], metafields: [{ key: 'private' }, { value: 'changed' }] });
+    const cleared = await sqlSave(sql, p.productId, updated.revision, { category_ids: [], metafields: [
+      { namespace: p.productId, key: 'private', delete: true },
+      { variant_id: variant, namespace: p.productId, key: 'private', delete: true },
+    ] });
+    expect(cleared).toMatchObject({ categories: [], metafields: [{ key: 'public', value: 'changed' }] });
+    expect(cleared.variants.find(v => v.id === variant)).toMatchObject({ metafields: [] });
+  });
+});
+
+test('扩展与分类非法输入或末项校验失败会回滚前面的商品修改', async () => {
+  const p = await stockedProduct(admin, { cleanup, trackInventory: false });
+  const other = await stockedProduct(admin, { cleanup, trackInventory: false });
+  const before = await read(p.productId);
+  const field = { namespace: 'custom', key: 'test', type: 'text', value: 'valid' };
+  const missingCategory = await save(p.productId, before.revision, {
+    product: { name: 'must rollback' }, category_ids: [crypto.randomUUID()],
+  });
+  expect(missingCategory.status).toBe(409);
+  expect(missingCategory.data).toMatchObject({ code: '23503' });
+  expect(await read(p.productId)).toEqual(before);
+  for (const changes of [
+    { category_ids: null }, { category_ids: [null] },
+    { category_ids: [p.productId, p.productId.toUpperCase()] },
+    { metafields: null }, { metafields: [{ ...field, owner_id: other.productId }] },
+    { metafields: [{ ...field, variant_id: other.variantId }] },
+    { metafields: [field, { ...field }] }, { metafields: [{ ...field, access: 'public' }] },
+    { metafields: [field, { ...field, key: 'bad', type: 'number', value: 'not a number' }] },
+    { metafields: [{ ...field, type: 'metaobject_reference', value: crypto.randomUUID() }] },
+    { metafields: [{ namespace: 'custom', key: 'missing', delete: true }] },
+  ]) {
+    const result = await save(p.productId, before.revision, { product: { name: 'must rollback' }, ...changes });
+    expect(result.status).toBe(400);
+    expect(await read(p.productId)).toEqual(before);
+  }
+});
+
+test('直接关联/扩展写入推进商品版本；扩展迁移同时使两边旧表单失效', async () => {
+  const p = await stockedProduct(admin, { cleanup, trackInventory: false });
+  const other = await stockedProduct(admin, { cleanup, trackInventory: false });
+  await withRollback(db, async sql => {
+    const category = crypto.randomUUID(), field = crypto.randomUUID();
+    await sql`insert into public.categories(id,slug,name) values (${category}::uuid,${category},'Category')`;
+    let revision = (await read(p.productId)).revision;
+    for (const write of [
+      () => sql`insert into public.product_categories(product_id,category_id) values (${p.productId}::uuid,${category}::uuid)`,
+      () => sql`delete from public.product_categories where product_id=${p.productId}::uuid`,
+      () => sql`insert into public.metafields(id,owner_type,owner_id,namespace,key,type,value)
+        values (${field}::uuid,'variant',${p.variantId}::uuid,'custom','test','text','"first"')`,
+      () => sql`update public.metafields set value='"second"' where id=${field}::uuid`,
+      () => sql`update public.metafields set owner_type='product',owner_id=${other.productId}::uuid where id=${field}::uuid`,
+    ]) {
+      await write();
+      const current = (await sql`select revision from public.products where id=${p.productId}::uuid`)[0].revision;
+      expect(Number(current)).toBeGreaterThan(revision); revision = Number(current);
+    }
+    const otherRevision = (await sql`select revision from public.products where id=${other.productId}::uuid`)[0].revision;
+    expect(Number(otherRevision)).toBeGreaterThan((await read(other.productId)).revision);
+    await sql`delete from public.metafields where id=${field}::uuid`;
+    expect(Number((await sql`select revision from public.products where id=${other.productId}::uuid`)[0].revision)).toBeGreaterThan(Number(otherRevision));
+  });
+});
+
+test('分类/扩展并发保存拒绝旧版本，直接扩展写入也拒绝 RR 旧快照', async () => {
+  const p = await stockedProduct(admin, { cleanup, trackInventory: false });
+  const [category] = await db`select id from public.categories order by id limit 1`;
+  const before = await read(p.productId);
+  const winner = { category_ids: [category.id], metafields: [{ namespace: 'custom', key: 'concurrent', type: 'text', value: 'winner' }] };
+  const race = await heldTransactionRace(db,
+    sql => sqlSave(sql, p.productId, before.revision, winner),
+    () => save(p.productId, before.revision, { category_ids: [], metafields: [] }, editor.token));
+  expect(race.status).toBe(409);
+  const after = await read(p.productId);
+  expect(after).toMatchObject({ categories: [{ id: category.id }], metafields: [{ value: 'winner' }] });
+  const stale = await staleAfterCommit(db,
+    sql => sqlSave(sql, p.productId, after.revision, { category_ids: [] }),
+    () => checked(api(`/rest/v1/metafields?owner_id=eq.${p.productId}&key=eq.concurrent`, {
+      service: true, method: 'PATCH', body: { value: 'direct' },
+    })));
+  expect(stale.error).toMatchObject({ errno: '40001' });
+  expect((await save(p.productId, after.revision, {})).status).toBe(409);
+  expect(await read(p.productId)).toMatchObject({ categories: [{ id: category.id }], metafields: [{ value: 'direct' }] });
+});
+
+test('分类关联和 Metafield 子行锁竞争不会留下部分保存', async () => {
+  const p = await stockedProduct(admin, { cleanup, trackInventory: false });
+  const [category] = await db`select id from public.categories order by id limit 1`;
+  const field = { namespace: 'custom', key: 'locked', type: 'text', value: 'before' };
+  const before = await checked<Catalog>(save(p.productId, (await read(p.productId)).revision,
+    { category_ids: [category.id], metafields: [field] }));
+  for (const table of ['product_categories','metafields']) {
+    await withRollback(db, async sql => {
+      if (table === 'product_categories') await sql`select * from public.product_categories where product_id=${p.productId}::uuid for update`;
+      else await sql`select * from public.metafields where owner_id=${p.productId}::uuid for update`;
+      const result = await save(p.productId, before.revision, { product: { name: 'must rollback' }, category_ids: [],
+        metafields: [{ ...field, value: 'after' }] });
+      expect(result.data).toMatchObject({ code: '55P03' });
+      expect(await read(p.productId)).toEqual(before);
+    });
+  }
+});
+
 test('REPEATABLE READ 的旧快照不能绕过已提交的目录编辑', async () => {
   const p = await stockedProduct(admin, { cleanup, trackInventory: false }), before = await read(p.productId);
   const result = await staleAfterCommit(db,

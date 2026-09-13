@@ -56,12 +56,16 @@ POST /rest/v1/rpc/list_admin_products
 | `variants` | 数组：`id/sku/barcode/price/compare_at_price/cost/track_inventory/position/is_active` |
 | `variant_options` | 数组：`{id:变体UUID,option_value_ids:[选项值UUID]}`，完整替换该变体的规格关联 |
 | `images` | 数组：`id/variant_id/url/alt/position` |
+| `category_ids` | 分类 UUID 数组，完整替换商品的分类关联；允许关联停用分类，不修改分类本身 |
+| `metafields` | 数组：`{namespace,key,type,value,variant_id?}`；不传 variant_id 表示当前商品，传入时必须是本商品的变体 |
 
 - 省略分组或字段保持原值；可空字段传 null 才清空。普通资源数组为空不删除任何行；`option_value_ids:[]` 清除该变体全部关联，仍须通过最终发布校验。
 - 子资源必须提供 UUID；已有 ID 更新，不存在的 ID 创建且保留未指定列的数据库默认值。新变体须提供价格，SKU 可空；新选项值须指定本商品的 option_id。删除使用 `{id,delete:true}`，不能带其他字段；仅 options/option_values/variants/images 支持，商品归档使用 status。删除遵守现有级联和交易引用约束。
-- 固定处理顺序为 product → options → option_values → variants → variant_options → images；每组按输入顺序执行。选项组合可原子互换，但 SKU/选项名称等即时唯一约束不会延迟，不能直接互换冲突的唯一值。
-- `changes` 按 PostgreSQL JSONB 文本表示最多 256 KiB，每个资源数组最多 500 条，同组 ID 不可重复（UUID 大小写视为相同）。未知字段拒绝，不可提交 DTO 的身份、库存数量或派生字段。分类关联及 metafield 编辑不在本命令范围。
-- `revision` 是数据库维护的并发令牌，不是“一次保存恰好 +1”的计数；商品、变体（包括价格/SKU）、规格/值/关联和图片的旧写表路径也推进版本。库存、分类关联、metafield 不在该版本范围。`changes:{}` 不推进版本。
+- `category_ids` 省略保留，`[]` 清空；只增删差异，重复保存同一集合不推进版本。不存在的分类由 FK 拒绝（409 / `23503`），不是版本冲突。
+- Metafield 使用 `(商品或变体,namespace,key)` 定位，不接受行 ID、owner_type/owner_id 或 access。每次新增/更新须提供 type 和 value，复用定义、类型和引用校验；删除使用 `{namespace,key,variant_id?,delete:true}`，要求已存在且不得附带 type/value。`metafields:[]` 不清空，JSON null 是字段值而不是删除指令（仅允许接纳该值的类型）。
+- 固定处理顺序为 product → options → option_values → variants → variant_options → images → category_ids → metafields；每组按输入顺序执行。可在同一请求创建变体并写其扩展值，不能写本次已删除变体的扩展。选项组合可原子互换，但 SKU/选项名称等即时唯一约束不会延迟，不能直接互换冲突的唯一值。
+- `changes` 按 PostgreSQL JSONB 文本表示最多 256 KiB，每个资源数组最多 500 条，同组 ID 或 Metafield 定位不可重复（UUID 大小写视为相同）。未知字段拒绝，不可提交 DTO 的身份、库存数量或派生字段。
+- `revision` 是数据库维护的并发令牌，不是“一次保存恰好 +1”的计数；商品、变体（包括价格/SKU）、规格/值/关联、图片、分类关联及商品/变体 Metafield 的旧写表路径也推进版本。库存、分类内容、扩展定义和 Metaobject 内容不在该版本范围。`changes:{}` 不推进版本。
 - 版本过期返回 HTTP 409 / `PT409`，不存在返回 404，非法输入拒绝。收到版本冲突应重新读取并让管理员核对差异，不可自动换新版本覆盖。没有幂等重放缓存；响应丢失先重读确认。锁竞争 `55P03` 或旧快照 `40001` 应重试整笔事务，仍保留原 expected_revision。
 
 ```http
@@ -69,6 +73,8 @@ POST /rest/v1/rpc/update_product
 
 {"product_id":"<商品UUID>","expected_revision":7,"changes":{"product":{"name":"Updated shirt"},"variants":[{"id":"<变体UUID>","price":29.50}],"images":[{"id":"<图片UUID>","delete":true}]}}
 ```
+
+分类和扩展可与上述字段合并保存，例如 `"changes":{"category_ids":["<分类UUID>"],"metafields":[{"namespace":"custom","key":"material","type":"text","value":"Cotton"}]}`。保存值不会建立或公开定义；没有公开定义的值继续仅管理端可读。分类树、Metafield 定义/可见性、Metaobject 内容仍独立管理。
 
 ### 现有底表查询
 

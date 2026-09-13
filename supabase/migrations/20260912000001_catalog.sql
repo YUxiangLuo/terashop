@@ -198,6 +198,31 @@ begin
 end;
 $$;
 
+-- Metafield ownership can change through the legacy API. Invalidate both
+-- aggregates; NOWAIT avoids waiting backwards while already holding a child.
+CREATE FUNCTION private.guard_catalog_metafield() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_row jsonb;
+  v_ids uuid[] := '{}'::uuid[];
+  v_id uuid;
+begin
+  foreach v_row in array array[case when tg_op <> 'INSERT' then to_jsonb(old) end,
+                              case when tg_op <> 'DELETE' then to_jsonb(new) end] loop
+    v_id := case v_row ->> 'owner_type'
+      when 'product' then (v_row ->> 'owner_id')::uuid
+      when 'variant' then (select product_id from public.product_variants where id = (v_row ->> 'owner_id')::uuid) end;
+    if v_id is not null then v_ids := array_append(v_ids,v_id); end if;
+  end loop;
+  for v_id in select distinct unnest(v_ids) order by 1 loop
+    perform 1 from public.products where id = v_id for no key update nowait;
+    update public.products set updated_at = now() where id = v_id;
+  end loop;
+  if tg_op = 'DELETE' then return old; end if;
+  return new;
+end;
+$$;
+
 CREATE FUNCTION private.assert_catalog_product() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 begin
@@ -945,6 +970,9 @@ declare
   v_change jsonb;
   v_id uuid;
   v_owner uuid;
+  v_categories uuid[];
+  v_owner_type text;
+  v_metafield_id uuid;
 begin
   if not public.is_admin() and auth.role() is distinct from 'service_role' then
     raise exception using errcode = '42501', message = 'admin only';
@@ -954,7 +982,7 @@ begin
     raise exception using errcode = '22023', message = 'expected_revision and a changes object up to 256 KiB are required';
   end if;
   if exists (select 1 from jsonb_object_keys(changes) k
-    where k not in ('product','options','option_values','variants','variant_options','images')) then
+    where k not in ('product','options','option_values','variants','variant_options','images','category_ids','metafields')) then
     raise exception using errcode = '22023', message = 'unknown changes field';
   end if;
   select * into v_product from public.products p where p.id = update_product.product_id for no key update;
@@ -998,6 +1026,71 @@ begin
       end if;
     end loop;
   end loop;
+  if changes ? 'category_ids' then
+    if jsonb_typeof(changes -> 'category_ids') is distinct from 'array' then
+      raise exception using errcode = '22023', message = 'category_ids must be an array';
+    end if;
+    if jsonb_array_length(changes -> 'category_ids') > 500
+      or exists (select 1 from jsonb_array_elements(changes -> 'category_ids') e where jsonb_typeof(e) <> 'string') then
+      raise exception using errcode = '22023', message = 'category_ids requires at most 500 UUID strings';
+    end if;
+    select coalesce(array_agg(value::uuid),'{}') into v_categories from jsonb_array_elements_text(changes -> 'category_ids');
+    if cardinality(v_categories) <> (select count(distinct x) from unnest(v_categories) x) then
+      raise exception using errcode = '22023', message = 'duplicate category id';
+    end if;
+    perform 1 from public.product_categories pc where pc.product_id = update_product.product_id for update nowait;
+    delete from public.product_categories pc where pc.product_id = update_product.product_id and not pc.category_id = any(v_categories);
+    insert into public.product_categories(product_id,category_id)
+      select product_id,x from unnest(v_categories) x where not exists
+        (select 1 from public.product_categories pc where pc.product_id = update_product.product_id and pc.category_id = x);
+  end if;
+  if changes ? 'metafields' then
+    if jsonb_typeof(changes -> 'metafields') is distinct from 'array' then
+      raise exception using errcode = '22023', message = 'metafields must be an array';
+    end if;
+    if jsonb_array_length(changes -> 'metafields') > 500 then
+      raise exception using errcode = '22023', message = 'metafields limited to 500 entries';
+    end if;
+    if exists (select 1 from jsonb_array_elements(changes -> 'metafields') e
+      group by (e ->> 'variant_id')::uuid,e ->> 'namespace',e ->> 'key' having count(*) > 1) then
+      raise exception using errcode = '22023', message = 'duplicate metafield identity';
+    end if;
+    for v_change in select value from jsonb_array_elements(changes -> 'metafields') loop
+      if jsonb_typeof(v_change) is distinct from 'object'
+        or v_change - array['variant_id','namespace','key','type','value','delete'] <> '{}'::jsonb
+        or jsonb_typeof(v_change -> 'namespace') is distinct from 'string'
+        or jsonb_typeof(v_change -> 'key') is distinct from 'string'
+        or (v_change ? 'variant_id' and jsonb_typeof(v_change -> 'variant_id') is distinct from 'string')
+        or (v_change ? 'delete' and jsonb_typeof(v_change -> 'delete') is distinct from 'boolean') then
+        raise exception using errcode = '22023', message = 'invalid metafield edit';
+      end if;
+      v_owner_type := case when v_change ? 'variant_id' then 'variant' else 'product' end;
+      v_owner := product_id;
+      if v_owner_type = 'variant' then
+        v_owner := (v_change ->> 'variant_id')::uuid;
+        perform 1 from public.product_variants v where v.id = v_owner and v.product_id = update_product.product_id for no key update nowait;
+        if not found then raise exception 'variant must belong to this product'; end if;
+      end if;
+      select m.id into v_metafield_id from public.metafields m where m.owner_type = v_owner_type
+        and m.owner_id = v_owner and m.namespace = v_change ->> 'namespace' and m.key = v_change ->> 'key' for update nowait;
+      if coalesce((v_change ->> 'delete')::boolean,false) then
+        if v_metafield_id is null or v_change ?| array['type','value'] then
+          raise exception using errcode = '22023', message = 'delete requires an existing metafield and no type/value';
+        end if;
+        delete from public.metafields where id = v_metafield_id;
+      else
+        if jsonb_typeof(v_change -> 'type') is distinct from 'string' or not v_change ? 'value' then
+          raise exception using errcode = '22023', message = 'metafield edit requires type and value';
+        end if;
+        if v_metafield_id is null then
+          insert into public.metafields(owner_type,owner_id,namespace,key,type,value)
+            values (v_owner_type,v_owner,v_change ->> 'namespace',v_change ->> 'key',v_change ->> 'type',v_change -> 'value');
+        else
+          update public.metafields set type = v_change ->> 'type', value = v_change -> 'value' where id = v_metafield_id;
+        end if;
+      end if;
+    end loop;
+  end if;
   -- No trigger is disabled and no transaction-wide constraint mode is changed.
   perform private.validate_catalog_product(product_id);
   return (select private.catalog_product_json(p,true) from public.products p where p.id = update_product.product_id);

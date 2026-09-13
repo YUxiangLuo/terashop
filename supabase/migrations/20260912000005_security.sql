@@ -173,6 +173,7 @@ CREATE TRIGGER inventory_movements_append_only BEFORE DELETE OR UPDATE ON public
 CREATE TRIGGER inventory_movements_no_truncate BEFORE TRUNCATE ON public.inventory_movements FOR EACH STATEMENT EXECUTE FUNCTION private.protect_audit_row();
 CREATE TRIGGER metafield_definitions_existing_values_compatible BEFORE INSERT OR UPDATE OF owner_type, namespace, key, type ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_definition_compatibility();
 CREATE TRIGGER metafield_definitions_updated_at BEFORE UPDATE ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER metafields_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_metafield();
 CREATE TRIGGER metafields_definition_integrity BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_integrity();
 CREATE TRIGGER metafields_updated_at BEFORE UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER metafields_validate BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION public.validate_metafield_value();
@@ -221,6 +222,7 @@ CREATE TRIGGER categories_tree_write BEFORE INSERT OR UPDATE OR DELETE ON public
 CREATE CONSTRAINT TRIGGER categories_tree_check AFTER INSERT OR UPDATE ON public.categories DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_category_tree();
 CREATE TRIGGER products_identity BEFORE UPDATE OF id ON public.products FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
 CREATE TRIGGER products_revision BEFORE INSERT OR UPDATE ON public.products FOR EACH ROW EXECUTE FUNCTION private.advance_catalog_revision();
+CREATE TRIGGER product_categories_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.product_categories FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
 CREATE CONSTRAINT TRIGGER products_catalog_check AFTER INSERT OR UPDATE OF status ON public.products DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
 CREATE TRIGGER product_variants_catalog_write BEFORE INSERT OR DELETE OR UPDATE ON public.product_variants FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
 CREATE CONSTRAINT TRIGGER product_variants_catalog_check AFTER INSERT OR DELETE OR UPDATE OF id, product_id, is_active ON public.product_variants DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
