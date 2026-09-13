@@ -1232,6 +1232,7 @@ export type Database = {
           id: string
           name: string
           product_type: string
+          revision: number
           seo_description: string | null
           seo_title: string | null
           slug: string
@@ -1246,6 +1247,7 @@ export type Database = {
           id?: string
           name: string
           product_type?: string
+          revision?: number
           seo_description?: string | null
           seo_title?: string | null
           slug: string
@@ -1260,6 +1262,7 @@ export type Database = {
           id?: string
           name?: string
           product_type?: string
+          revision?: number
           seo_description?: string | null
           seo_title?: string | null
           slug?: string
@@ -2067,6 +2070,10 @@ export type Database = {
       }
       update_order_address: {
         Args: { address?: Json; address_id?: string; order_id: string }
+        Returns: Json
+      }
+      update_product: {
+        Args: { changes: Json; expected_revision: number; product_id: string }
         Returns: Json
       }
     }

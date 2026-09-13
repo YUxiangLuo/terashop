@@ -45,9 +45,11 @@ afterAll(async () => {
   });
 });
 async function prices(cents: number[]): Promise<void> {
-  await Promise.all(cents.map((value, index) => checked(api(`/rest/v1/product_variants?id=eq.${variants[index]}`, {
-    service: true, method: 'PATCH', body: { price: decimal(value) },
-  }))));
+  const product = await checked<{ revision: number }>(rpc('get_admin_product', { product_id: productId }, admin.token));
+  await checked(rpc('update_product', {
+    product_id: productId, expected_revision: product.revision,
+    changes: { variants: cents.map((value, index) => ({ id: variants[index], price: decimal(value) })) },
+  }, admin.token));
 }
 function cart(quantities: number[]) {
   return quantities.map((quantity, index) => ({ variant_id: variants[index], quantity }));

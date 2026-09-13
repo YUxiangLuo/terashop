@@ -818,6 +818,7 @@ CREATE TABLE public.product_variants (
 
 CREATE TABLE public.products (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL CHECK (revision > 0),
     slug text NOT NULL,
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,

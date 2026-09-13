@@ -220,8 +220,9 @@ CREATE TRIGGER payments_updated_at BEFORE UPDATE ON public.payments FOR EACH ROW
 CREATE TRIGGER categories_tree_write BEFORE INSERT OR UPDATE OR DELETE ON public.categories FOR EACH STATEMENT EXECUTE FUNCTION private.guard_category_tree();
 CREATE CONSTRAINT TRIGGER categories_tree_check AFTER INSERT OR UPDATE ON public.categories DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_category_tree();
 CREATE TRIGGER products_identity BEFORE UPDATE OF id ON public.products FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
+CREATE TRIGGER products_revision BEFORE INSERT OR UPDATE ON public.products FOR EACH ROW EXECUTE FUNCTION private.advance_catalog_revision();
 CREATE CONSTRAINT TRIGGER products_catalog_check AFTER INSERT OR UPDATE OF status ON public.products DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
-CREATE TRIGGER product_variants_catalog_write BEFORE INSERT OR DELETE OR UPDATE OF id, product_id, is_active ON public.product_variants FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
+CREATE TRIGGER product_variants_catalog_write BEFORE INSERT OR DELETE OR UPDATE ON public.product_variants FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
 CREATE CONSTRAINT TRIGGER product_variants_catalog_check AFTER INSERT OR DELETE OR UPDATE OF id, product_id, is_active ON public.product_variants DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
 CREATE TRIGGER product_options_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.product_options FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
 CREATE CONSTRAINT TRIGGER product_options_catalog_check AFTER INSERT OR UPDATE OR DELETE ON public.product_options DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
@@ -518,6 +519,7 @@ GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION private.metaobject_references_public(text,jsonb) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.list_storefront_products(integer,uuid,uuid), public.get_storefront_product(uuid) TO anon, authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_admin_product(uuid) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.update_product(uuid,bigint,jsonb) TO authenticated, service_role;
 GRANT ALL ON FUNCTION private.cancel_order(order_id uuid, reason text) TO service_role;
 GRANT ALL ON FUNCTION private.create_fulfillment(order_id uuid, items jsonb, carrier text, tracking_number text, tracking_url text) TO service_role;
 GRANT ALL ON FUNCTION private.create_order(items jsonb, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) TO service_role;

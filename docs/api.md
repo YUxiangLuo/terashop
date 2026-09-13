@@ -19,9 +19,37 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 
 详情包含基本商品/SEO 字段、`variants`、`options`、`images`、`categories` 和 `metafields`。变体通过 `option_value_ids` 对应选项值；商品/变体扩展值使用 `{namespace,key,type,value}`。Storefront 隐藏停用变体及其专属图片、停用分类、内部扩展字段和成本；**管理员调用 Storefront 也不会扩大输出范围**。库存仍只看默认仓可用量及有效 Quote 预占，不承诺后续结账成功。
 
-Admin 详情增加商品状态/时间戳及变体 `cost/is_active/track_inventory`；精确库存继续使用管理员 `get_inventory_availability`，不是将 Storefront 切换为“管理员模式”。公共扩展引用不会自动递归展开，需按 Metaobject ID 读取其受保护资源。
+Admin 详情增加商品状态/时间戳、编辑版本 `revision` 及变体 `cost/is_active/track_inventory`；精确库存继续使用管理员 `get_inventory_availability`，不是将 Storefront 切换为“管理员模式”。公共扩展引用不会自动递归展开，需按 Metaobject ID 读取其受保护资源。
 
-现有底表/视图读取保留原授权，用于逐步迁移已有调用与测试；本阶段没有完成全部订单/客户管理查询分层，也未增加搜索、运营排序或写入命令。底表的扩展字段读取同样执行下文的新可见性规则。
+现有底表/视图读取保留原授权，用于逐步迁移已有调用与测试；本阶段没有完成全部订单/客户管理查询分层，也未增加搜索或运营排序。底表的扩展字段读取同样执行下文的新可见性规则。
+
+### 原子商品编辑
+
+`update_product(product_id, expected_revision, changes)` 仅 admin/service 可用，返回与 `get_admin_product` 相同的管理 DTO。先读取管理详情，将其 `revision` 原样作为 `expected_revision`。在售商品可以直接保存，全部修改在一个事务提交，其他请求不会读到半成品；任何字段、归属或发布校验失败均回滚全部修改及版本。
+
+`changes` 是 PATCH 对象，不是完整详情替换；仅接受以下字段：
+
+| 分组 | 可编辑内容 |
+| --- | --- |
+| `product` | 对象：`slug/name/description/status/vendor/product_type/tags/seo_title/seo_description` |
+| `options` | 数组：`id/name/position` |
+| `option_values` | 数组：`id/option_id/value/position`；已有值不可改所属 option |
+| `variants` | 数组：`id/sku/barcode/price/compare_at_price/cost/track_inventory/position/is_active` |
+| `variant_options` | 数组：`{id:变体UUID,option_value_ids:[选项值UUID]}`，完整替换该变体的规格关联 |
+| `images` | 数组：`id/variant_id/url/alt/position` |
+
+- 省略分组或字段保持原值；可空字段传 null 才清空。普通资源数组为空不删除任何行；`option_value_ids:[]` 清除该变体全部关联，仍须通过最终发布校验。
+- 子资源必须提供 UUID；已有 ID 更新，不存在的 ID 创建且保留未指定列的数据库默认值。新变体须提供价格，SKU 可空；新选项值须指定本商品的 option_id。删除使用 `{id,delete:true}`，不能带其他字段；仅 options/option_values/variants/images 支持，商品归档使用 status。删除遵守现有级联和交易引用约束。
+- 固定处理顺序为 product → options → option_values → variants → variant_options → images；每组按输入顺序执行。选项组合可原子互换，但 SKU/选项名称等即时唯一约束不会延迟，不能直接互换冲突的唯一值。
+- `changes` 按 PostgreSQL JSONB 文本表示最多 256 KiB，每个资源数组最多 500 条，同组 ID 不可重复（UUID 大小写视为相同）。未知字段拒绝，不可提交 DTO 的身份、库存数量或派生字段。分类关联及 metafield 编辑不在本命令范围。
+- `revision` 是数据库维护的并发令牌，不是“一次保存恰好 +1”的计数；商品、变体（包括价格/SKU）、规格/值/关联和图片的旧写表路径也推进版本。库存、分类关联、metafield 不在该版本范围。`changes:{}` 不推进版本。
+- 版本过期返回 HTTP 409 / `PT409`，不存在返回 404，非法输入拒绝。收到版本冲突应重新读取并让管理员核对差异，不可自动换新版本覆盖。没有幂等重放缓存；响应丢失先重读确认。锁竞争 `55P03` 或旧快照 `40001` 应重试整笔事务，仍保留原 expected_revision。
+
+```http
+POST /rest/v1/rpc/update_product
+
+{"product_id":"<商品UUID>","expected_revision":7,"changes":{"product":{"name":"Updated shirt"},"variants":[{"id":"<变体UUID>","price":29.50}],"images":[{"id":"<图片UUID>","delete":true}]}}
+```
 
 ### 现有底表查询
 
@@ -35,7 +63,7 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 
 管理员创建商品应先用 `status:"draft"`，依次建立变体、选项/值、规格关联、图片，最后 PATCH 为 `active`。
 草稿也禁止跨商品选项/图片和同一选项多值；发布商品必须有变体，启用变体必须选全规格且组合唯一（无选项时最多一个启用默认变体）。停用变体可暂存未完成配置。
-约束在事务提交时检查；增加规格或替换整个组合可先转草稿分步编辑，或在同一可信事务中完成全部修改。
+约束在事务提交时检查；增加规格或替换整个组合优先使用 `update_product` 原子保存，不必下架。若使用多个底表请求，则必须先转草稿再分步编辑。
 子资源 ID 和所属商品/选项/变体不可迁移，关联需删除重建。分类禁止任意长度的环。
 并发目录修改遇到 SQLSTATE `55P03` / `40001` 时重试整笔事务，不绕过约束。
 

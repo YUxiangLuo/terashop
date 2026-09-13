@@ -91,6 +91,19 @@ end;
 $$;
 
 -- Child ownership is immutable. This also keeps the deferred validator's routing stable.
+CREATE FUNCTION private.advance_catalog_revision() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO '' AS $$
+begin
+  if tg_op = 'INSERT' then
+    if new.revision <> 1 then raise exception 'catalog revision is assigned by the database'; end if;
+  else
+    if new.revision is distinct from old.revision then raise exception 'catalog revision is assigned by the database'; end if;
+    new.revision := old.revision + 1;
+  end if;
+  return new;
+end;
+$$;
+
 CREATE FUNCTION private.catalog_product_id(p_table text, p_row jsonb) RETURNS uuid
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
@@ -137,17 +150,15 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.assert_catalog_product() RETURNS trigger
+CREATE FUNCTION private.validate_catalog_product(v_product_id uuid) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
 declare
-  v_product_id uuid := private.catalog_product_id(tg_table_name,
-    case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end);
   v_status text;
 begin
   select status into v_status from public.products where id = v_product_id;
-  if not found then return null; end if; -- deleted parent / cascading children
+  if not found then return; end if; -- deleted parent / cascading children
   if exists (
     select 1 from public.variant_option_values vo
     join public.product_variants v on v.id = vo.variant_id
@@ -184,6 +195,14 @@ begin
       having count(*) > 1
     ) then raise exception 'published variants must have unique option combinations'; end if;
   end if;
+end;
+$$;
+
+CREATE FUNCTION private.assert_catalog_product() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  perform private.validate_catalog_product(private.catalog_product_id(tg_table_name,
+    case when tg_op = 'DELETE' then to_jsonb(old) else to_jsonb(new) end));
   return null;
 end;
 $$;
@@ -831,7 +850,7 @@ CREATE FUNCTION private.catalog_product_json(p_product public.products, p_admin 
     'categories', coalesce((select jsonb_agg(jsonb_build_object('id',c.id,'slug',c.slug,'name',c.name) order by c.slug,c.id)
       from public.product_categories pc join public.categories c on c.id = pc.category_id
       where pc.product_id = p_product.id and (p_admin or c.is_active)),'[]'::jsonb))
-    || case when p_admin then jsonb_build_object('status',p_product.status,'created_at',p_product.created_at,'updated_at',p_product.updated_at)
+    || case when p_admin then jsonb_build_object('revision',p_product.revision,'status',p_product.status,'created_at',p_product.created_at,'updated_at',p_product.updated_at)
       else '{}'::jsonb end;
 $$;
 
@@ -848,6 +867,140 @@ begin
     raise exception using errcode = '42501', message = 'admin only';
   end if;
   return (select private.catalog_product_json(p,true) from public.products p where p.id = product_id);
+end;
+$$;
+
+-- Whitelisted patch writer for the five editable catalog row types. No caller
+-- controls a table/column identifier; omitted fields retain values/defaults.
+CREATE FUNCTION private.apply_catalog_edit(p_product_id uuid, p_table text, p_change jsonb) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_allowed text[];
+  v_id uuid;
+  v_old jsonb;
+  v_patch jsonb;
+  v_columns text;
+  v_assignments text;
+  v_owner uuid;
+begin
+  v_allowed := case p_table
+    when 'products' then array['slug','name','description','status','vendor','product_type','tags','seo_title','seo_description']
+    when 'product_variants' then array['sku','barcode','price','compare_at_price','cost','track_inventory','position','is_active']
+    when 'product_options' then array['name','position']
+    when 'product_option_values' then array['option_id','value','position']
+    when 'product_images' then array['variant_id','url','alt','position']
+    else null end;
+  if v_allowed is null or jsonb_typeof(p_change) is distinct from 'object' then
+    raise exception using errcode = '22023', message = 'invalid catalog edit';
+  end if;
+  if exists (select 1 from jsonb_object_keys(p_change) k where not k = any(v_allowed || array['id','delete']))
+    or jsonb_typeof(p_change -> 'id') is distinct from 'string'
+    or (p_change ? 'delete' and jsonb_typeof(p_change -> 'delete') is distinct from 'boolean') then
+    raise exception using errcode = '22023', message = 'unknown or invalid catalog edit field';
+  end if;
+  v_id := (p_change ->> 'id')::uuid;
+  execute format('select to_jsonb(t) from public.%I t where id=$1 for no key update nowait',p_table) into v_old using v_id;
+  if v_old is not null then
+    v_owner := private.catalog_product_id(p_table,v_old);
+    if v_owner is distinct from p_product_id then raise exception 'catalog resource belongs to another product'; end if;
+    if p_table = 'product_option_values' and p_change ? 'option_id'
+      and (p_change ->> 'option_id')::uuid is distinct from (v_old ->> 'option_id')::uuid then
+      raise exception 'catalog option ownership is immutable';
+    end if;
+  end if;
+  if coalesce((p_change ->> 'delete')::boolean,false) then
+    if p_table = 'products' or p_change - array['id','delete'] <> '{}'::jsonb or v_old is null then
+      raise exception using errcode = '22023', message = 'delete requires an existing child id and no other fields';
+    end if;
+    execute format('delete from public.%I where id=$1',p_table) using v_id;
+    return;
+  end if;
+  v_patch := p_change - 'delete';
+  if v_old is null then
+    if p_table = 'products' then raise exception 'product not found'; end if;
+    if p_table = 'product_option_values' then
+      select product_id into v_owner from public.product_options where id = (p_change ->> 'option_id')::uuid;
+      if v_owner is distinct from p_product_id then raise exception 'option must belong to this product'; end if;
+    else
+      v_patch := v_patch || jsonb_build_object('product_id',p_product_id);
+    end if;
+    select string_agg(format('%I',k),',' order by k) into v_columns from jsonb_object_keys(v_patch) k;
+    execute format('insert into public.%I (%s) select %s from jsonb_populate_record(null::public.%I,$1)',
+      p_table,v_columns,v_columns,p_table) using v_patch;
+  else
+    v_patch := v_patch - array['id','option_id'];
+    if v_patch = '{}'::jsonb then return; end if;
+    select string_agg(format('%I=x.%I',k,k),',' order by k) into v_assignments from jsonb_object_keys(v_patch) k;
+    execute format('update public.%I t set %s from jsonb_populate_record(null::public.%I,$1) x where t.id=$2',
+      p_table,v_assignments,p_table) using v_patch,v_id;
+  end if;
+end;
+$$;
+
+CREATE FUNCTION public.update_product(product_id uuid, expected_revision bigint, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_product public.products;
+  v_group text;
+  v_change jsonb;
+  v_id uuid;
+  v_owner uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'admin only';
+  end if;
+  if expected_revision is null or expected_revision < 1 or jsonb_typeof(changes) is distinct from 'object'
+    or octet_length(changes::text) > 262144 then
+    raise exception using errcode = '22023', message = 'expected_revision and a changes object up to 256 KiB are required';
+  end if;
+  if exists (select 1 from jsonb_object_keys(changes) k
+    where k not in ('product','options','option_values','variants','variant_options','images')) then
+    raise exception using errcode = '22023', message = 'unknown changes field';
+  end if;
+  select * into v_product from public.products p where p.id = update_product.product_id for no key update;
+  if not found then raise exception using errcode = 'PT404', message = 'product not found'; end if;
+  if v_product.revision <> expected_revision then
+    raise exception using errcode = 'PT409', message = 'product revision conflict; reload before saving';
+  end if;
+  if changes ? 'product' then
+    if jsonb_typeof(changes -> 'product') is distinct from 'object' or changes -> 'product' ?| array['id','delete'] then
+      raise exception using errcode = '22023', message = 'product patch cannot specify identity or delete';
+    end if;
+    perform private.apply_catalog_edit(product_id,'products',changes -> 'product' || jsonb_build_object('id',product_id));
+  end if;
+  foreach v_group in array array['options','option_values','variants','variant_options','images'] loop
+    if not changes ? v_group then continue; end if;
+    if jsonb_typeof(changes -> v_group) is distinct from 'array' then
+      raise exception using errcode = '22023', message = 'catalog changes collections must be arrays';
+    end if;
+    if jsonb_array_length(changes -> v_group) > 500 then
+      raise exception using errcode = '22023', message = 'catalog changes limited to 500 entries per collection';
+    end if;
+    if exists (select 1 from jsonb_array_elements(changes -> v_group) e group by (e ->> 'id')::uuid having count(*) > 1) then
+      raise exception using errcode = '22023', message = 'duplicate catalog resource id';
+    end if;
+    for v_change in select value from jsonb_array_elements(changes -> v_group) loop
+      if v_group <> 'variant_options' then
+        perform private.apply_catalog_edit(product_id,case v_group when 'options' then 'product_options'
+          when 'option_values' then 'product_option_values' when 'variants' then 'product_variants' else 'product_images' end,v_change);
+      else
+        if jsonb_typeof(v_change) is distinct from 'object' or v_change - array['id','option_value_ids'] <> '{}'::jsonb
+          or jsonb_typeof(v_change -> 'id') is distinct from 'string'
+          or jsonb_typeof(v_change -> 'option_value_ids') is distinct from 'array' then
+          raise exception using errcode = '22023', message = 'variant_options requires id and option_value_ids';
+        end if;
+        v_id := (v_change ->> 'id')::uuid;
+        select v.product_id into v_owner from public.product_variants v where v.id = v_id for no key update nowait;
+        if v_owner is distinct from product_id then raise exception 'variant must belong to this product'; end if;
+        delete from public.variant_option_values where variant_id = v_id;
+        insert into public.variant_option_values(variant_id,option_value_id)
+          select v_id,value::uuid from jsonb_array_elements_text(v_change -> 'option_value_ids');
+      end if;
+    end loop;
+  end loop;
+  -- No trigger is disabled and no transaction-wide constraint mode is changed.
+  perform private.validate_catalog_product(product_id);
+  return (select private.catalog_product_json(p,true) from public.products p where p.id = update_product.product_id);
 end;
 $$;
 
