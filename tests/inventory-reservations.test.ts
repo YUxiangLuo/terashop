@@ -2,6 +2,7 @@ import { afterAll, beforeAll, afterEach, describe, expect, test } from 'bun:test
 import { stockedProduct, archiveProduct, type CatalogFixture } from './support/catalog';
 import { Cleanup } from './support/cleanup';
 import { promotionFixture } from './support/promotions';
+import { installLegacyCatalogFixture } from './support/legacy-catalog';
 import {
   api, rpc, signup, makeAdmin, stockOf, checked, TEST_ADDRESS,
   type TestUser,
@@ -63,6 +64,7 @@ const createQuote = (
 afterAll(() => cleanup.run());
 
 beforeAll(async () => {
+  await installLegacyCatalogFixture();
   admin = await signup();
   buyerA = await signup();
   buyerB = await signup();

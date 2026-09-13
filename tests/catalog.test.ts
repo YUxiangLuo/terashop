@@ -1,6 +1,9 @@
-import { describe, test, expect } from 'bun:test';
+import { beforeAll, describe, test, expect } from 'bun:test';
 import { api, checked, onlyRow } from './helpers';
 import { Cleanup } from './support/cleanup';
+import { installLegacyCatalogFixture } from './support/legacy-catalog';
+
+beforeAll(() => installLegacyCatalogFixture());
 
 describe('商品目录', () => {
   test('product_listing：演示目录的在售商品含价格区间与是否有货', async () => {
@@ -65,11 +68,12 @@ describe('商品目录', () => {
   });
 
   test('metafield 可按 key 过滤商品（店铺端筛选基础）', async () => {
+    const product = await onlyRow<{ id: string }>(api('/rest/v1/products?slug=eq.essential-tee&select=id'));
     const { status, data } = await api(
-      "/rest/v1/metafields?owner_type=eq.product&namespace=eq.custom&key=eq.care_instructions&select=owner_id,value"
+      `/rest/v1/metafields?owner_type=eq.product&owner_id=eq.${product.id}&namespace=eq.custom&key=eq.care_instructions&select=owner_id,value`
     );
     expect(status).toBe(200);
-    expect((data as unknown[]).length).toBe(1);
+    expect(data).toEqual([{ owner_id: product.id, value: 'Machine wash cold' }]);
   });
 
   test('不存在的 SKU 查询返回空', async () => {

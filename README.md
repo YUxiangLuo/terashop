@@ -1,6 +1,6 @@
 # tera-headless
 
-基于 Supabase 的 Headless 电商后端。PostgreSQL 承担交易逻辑与权限控制，TypeScript Edge Functions 适配 PayPal；不包含商城前台和管理后台。
+基于 Supabase 的 Headless 电商项目。PostgreSQL 承担通用交易逻辑与权限控制，TypeScript Edge Functions 适配 PayPal；`storefront/` 提供女装 SvelteKit SSG 示例，不包含管理后台。
 
 面向全球客户的单店后端，统一使用 **USD** 定价和结账，不做多币种或自动换汇。美元不代表美国地址：收货国家必须显式提供，不预设任何国家或税率。当前税务仅支持可配置的国家级比例规则，复杂税务及自动争议/结算对账不在范围内。
 
@@ -17,10 +17,12 @@ bun run test:current      # 使用已准备的本地数据库，测试会写入�
 
 使用 `bun run start` 而非直接调用 Supabase CLI：项目网络将发布端口限制到 `127.0.0.1`，包括含验证邮件的 Mailpit。已有全网卡监听容器须先 `bun run stop` 再启动；不更改系统防火墙。
 
-种子商品、促销和运费均为 USD 演示配置，不代表真实物流报价；不自动安装税率。上线前必须配置配送范围与适用税务规则，未匹配规则时计算为零并不表示免税。
+种子数据为 10 款女装、60 个颜色/尺码变体，不安装默认促销或税率。商品与运费均为 USD 演示配置，图片为 AI 生成示意图，不代表真实商品或物流报价。上线前必须配置配送范围与适用税务规则，未匹配规则时计算为零并不表示免税。
 Google OAuth 默认关闭；启用前必须吊销并轮换历史已暴露的凭据，通过环境变量提供新 Secret。支付配置见 [支付与部署](supabase/functions/README.md)。
 
 ## 功能与结构
+
+运行 `bun run storefront:dev` 查看女装站；`bun run storefront:build` 生成静态页面，`bun run storefront:preview` 预览产物。本地构建自动读取本项目 Supabase 公共凭据，生产构建须显式配置公共 URL/key。前台现阶段支持目录、实时库存、购物袋与库存预占报价，**尚未接入下单或支付 UI**。详见 [Storefront 使用说明](storefront/README.md)。
 
 | 模块 | 能力 |
 | --- | --- |

@@ -1,206 +1,84 @@
--- ============================================================
--- 演示数据（bunx supabase db reset 时自动加载）
--- ============================================================
-
+-- Women's fashion demonstration catalog (loaded by `supabase db reset`).
+-- Prices are USD; illustrative AI images are served by the sample storefront.
 do $$
 declare
-  -- 分类
-  c_apparel uuid; c_home uuid; c_elec uuid; c_acc uuid;
-  -- 商品
-  p_tee uuid; p_kb uuid; p_mug uuid; p_cable uuid;
-  -- 选项
-  o_color uuid; o_size uuid; o_switch uuid;
-  -- 选项值
-  ov_black uuid; ov_white uuid; ov_s uuid; ov_m uuid; ov_l uuid;
-  ov_red uuid; ov_brown uuid;
-  -- 变体
-  v_tee uuid; v_kb uuid; v_mug uuid; v_cable uuid;
-  -- 仓库
-  loc uuid;
-  -- metaobject
-  def_sg uuid; mo_s uuid; mo_m uuid; mo_l uuid;
+  category_id uuid; child_category_id uuid; current_product_id uuid; color_option uuid; size_option uuid;
+  location_id uuid;
+  definition_id uuid; guide_s uuid; guide_m uuid; guide_l uuid; item record;
 begin
+  insert into public.categories (slug,name,position) values ('womens-fashion','Women',1) returning id into category_id;
+  insert into public.categories (slug,name,parent_id,position) values
+    ('dresses','Dresses',category_id,1),
+    ('tops','Tops',category_id,2),
+    ('knitwear','Knitwear',category_id,3),
+    ('skirts','Skirts',category_id,4),
+    ('trousers','Trousers',category_id,5);
 
--- ---------- 分类 ----------
-insert into public.categories (slug, name, parent_id, position) values
-  ('apparel',     '服装',     null, 1) returning id into c_apparel;
-insert into public.categories (slug, name, parent_id, position) values
-  ('home',        '家居生活', null, 2) returning id into c_home;
-insert into public.categories (slug, name, parent_id, position) values
-  ('electronics', '数码电子', null, 3) returning id into c_elec;
-insert into public.categories (slug, name, parent_id, position) values
-  ('accessories', '数码配件', c_elec, 1) returning id into c_acc;
+  insert into public.locations (code,name,is_default) values ('WH-US','Default warehouse',true) returning id into location_id;
 
--- ---------- 商品 1：基础款 T 恤（颜色 × 尺寸 = 6 变体） ----------
-insert into public.products (slug, name, description, status, vendor, product_type, tags) values
-  ('essential-tee', 'Essential Tee', '220g 新疆棉基础款 T 恤，预缩处理，男女同款。',
-   'active', 'ACME', 'T恤', '{基础款,纯棉}') returning id into p_tee;
+  insert into public.metaobject_definitions (type,name,description,access,fields) values
+    ('size_guide','Size guide','Women''s garment measurements','public','[{"key":"size","name":"Size","type":"text","required":true},{"key":"bust_cm","name":"Bust (cm)","type":"number","required":true},{"key":"length_cm","name":"Length (cm)","type":"number","required":true},{"key":"note","name":"Notes","type":"text","required":false}]') returning id into definition_id;
+  insert into public.metaobjects(definition_id,handle,values) values(definition_id,'s','{"size":"S","bust_cm":84,"length_cm":88}') returning id into guide_s;
+  insert into public.metaobjects(definition_id,handle,values) values(definition_id,'m','{"size":"M","bust_cm":90,"length_cm":90}') returning id into guide_m;
+  insert into public.metaobjects(definition_id,handle,values) values(definition_id,'l','{"size":"L","bust_cm":98,"length_cm":92,"note":"Measurements vary slightly by style"}') returning id into guide_l;
 
-insert into public.product_categories (product_id, category_id) values (p_tee, c_apparel);
+  insert into public.metafield_definitions(owner_type,namespace,key,name,type,description,position,access) values
+    ('product','custom','care_instructions','Care instructions','text','Garment care guidance',1,'public'),
+    ('product','custom','material','Material','list_text','Fabric composition',2,'public'),
+    ('product','specs','size_guide','Size guide','list_metaobject_reference','References size_guide entries',3,'public'),
+    ('variant','custom','weight_g','Weight (g)','number','Shipping weight',1,'public'),
+    ('order','custom','gift_message','Gift message','text','Gift card message',1,'customer');
 
-insert into public.product_options (product_id, name, position) values (p_tee, '颜色', 1) returning id into o_color;
-insert into public.product_options (product_id, name, position) values (p_tee, '尺寸', 2) returning id into o_size;
+  for item in select * from (values
+    ('linen-wrap-dress','Linen Wrap Dress','A softly tailored midi wrap dress with a removable waist tie.','Dresses',array['Sage','Navy'],129.00,165.00,array['55% linen','45% viscose'],'Machine wash cold; reshape and line dry.'),
+    ('silk-slip-dress','Silk Slip Dress','Bias-cut midi dress with adjustable straps and a fluid drape.','Dresses',array['Black','Champagne'],168.00,210.00,array['100% silk'],'Dry clean only.'),
+    ('cotton-poplin-shirt','Cotton Poplin Shirt','Relaxed button-front shirt with a crisp collar and curved hem.','Tops',array['White','Sky'],78.00,null,array['100% organic cotton'],'Machine wash cold with like colors.'),
+    ('draped-satin-blouse','Draped Satin Blouse','Elegant long-sleeve blouse with a softly draped neckline.','Tops',array['Ivory','Burgundy'],92.00,115.00,array['58% viscose','42% rayon'],'Hand wash cold; lay flat to dry.'),
+    ('merino-crewneck','Merino Crewneck Sweater','Fine-gauge merino knit with a classic crew neck and ribbed trims.','Knitwear',array['Oatmeal','Charcoal'],110.00,null,array['100% merino wool'],'Hand wash cold with wool detergent.'),
+    ('cashmere-cardigan','Cashmere Cardigan','Lightweight V-neck cardigan finished with tonal shell buttons.','Knitwear',array['Camel','Rose'],185.00,225.00,array['100% cashmere'],'Dry clean or hand wash cold.'),
+    ('pleated-midi-skirt','Pleated Midi Skirt','Fluid permanent-pleat skirt with a comfortable lined waistband.','Skirts',array['Forest','Black'],98.00,null,array['100% recycled polyester'],'Machine wash gentle; do not iron pleats.'),
+    ('denim-a-line-skirt','Denim A-Line Skirt','Structured high-rise denim skirt with front patch pockets.','Skirts',array['Indigo','Ecru'],86.00,null,array['99% cotton','1% elastane'],'Machine wash cold inside out.'),
+    ('tailored-wide-leg-trouser','Tailored Wide-Leg Trouser','High-rise trousers with front pleats and a full-length wide leg.','Trousers',array['Black','Stone'],118.00,148.00,array['64% recycled polyester','34% viscose','2% elastane'],'Dry clean recommended.'),
+    ('relaxed-linen-trouser','Relaxed Linen Trouser','Breathable pull-on trousers with an elastic back waist.','Trousers',array['Natural','Olive'],104.00,null,array['100% linen'],'Machine wash cold; line dry.')
+  ) x(slug,name,description,kind,colors,price,compare_price,materials,care)
+  loop
+    insert into public.products(slug,name,description,status,vendor,product_type,tags)
+      values(item.slug,item.name,item.description,'draft','Atelier Tera',item.kind,array['women',lower(item.kind)]) returning id into current_product_id;
+    select id into child_category_id from public.categories where slug=lower(item.kind);
+    insert into public.product_categories values
+      (current_product_id,category_id),
+      (current_product_id,child_category_id);
+    insert into public.product_options(product_id,name,position) values(current_product_id,'Color',1) returning id into color_option;
+    insert into public.product_options(product_id,name,position) values(current_product_id,'Size',2) returning id into size_option;
+    insert into public.product_option_values(option_id,value,position)
+      select color_option,c,ord from unnest(item.colors) with ordinality u(c,ord);
+    insert into public.product_option_values(option_id,value,position) values
+      (size_option,'S',1),(size_option,'M',2),(size_option,'L',3);
+    -- option values are shared per product; create every color/size combination.
+    insert into public.product_variants(product_id,sku,price,compare_at_price,cost,position)
+      select current_product_id, upper(replace(substr(item.slug,1,12),'-',''))||'-'||c.position||'-'||s.value,
+             item.price,item.compare_price,round(item.price*.42,2),row_number() over(order by c.position,s.position)
+      from public.product_option_values c cross join public.product_option_values s
+      where c.option_id=color_option and s.option_id=size_option;
+    insert into public.variant_option_values(variant_id,option_value_id)
+      select v.id,ov.id from public.product_variants v join public.product_option_values ov on ov.option_id in(color_option,size_option)
+      where v.product_id=current_product_id and
+        ((ov.option_id=color_option and split_part(v.sku,'-',2)=ov.position::text) or
+         (ov.option_id=size_option and split_part(v.sku,'-',3)=ov.value));
+    insert into public.product_images(product_id,url,alt,position) values(current_product_id,'/images/'||item.slug||'.webp',item.name,1);
+    insert into public.inventory_levels(variant_id,location_id,on_hand)
+      select id,location_id,case when position in (4,6) then 0 else 18+position end from public.product_variants where product_variants.product_id=current_product_id;
+    insert into public.metafields(owner_type,owner_id,namespace,key,type,value) values
+      ('product',current_product_id,'custom','care_instructions','text',to_jsonb(item.care)),
+      ('product',current_product_id,'custom','material','list_text',to_jsonb(item.materials)),
+      ('product',current_product_id,'specs','size_guide','list_metaobject_reference',jsonb_build_array(guide_s::text,guide_m::text,guide_l::text));
+    insert into public.metafields(owner_type,owner_id,namespace,key,type,value)
+      select 'variant',id,'custom','weight_g','number','450'::jsonb from public.product_variants where product_variants.product_id=current_product_id;
+    update public.products set status='active' where id=current_product_id;
+  end loop;
 
-insert into public.product_option_values (option_id, value, position) values (o_color, '黑', 1) returning id into ov_black;
-insert into public.product_option_values (option_id, value, position) values (o_color, '白', 2) returning id into ov_white;
-insert into public.product_option_values (option_id, value, position) values (o_size, 'S', 1) returning id into ov_s;
-insert into public.product_option_values (option_id, value, position) values (o_size, 'M', 2) returning id into ov_m;
-insert into public.product_option_values (option_id, value, position) values (o_size, 'L', 3) returning id into ov_l;
-
--- 6 个变体：价格 19.90，划线价 29.90
-for v_tee in
-  with combos as (
-    select c.value as color, s.value as size
-    from (values ('黑', ov_black), ('白', ov_white)) c(value, id)
-    cross join (values ('S', ov_s), ('M', ov_m), ('L', ov_l)) s(value, id)
-  )
-  insert into public.product_variants (product_id, sku, price, compare_at_price, cost, position)
-  select p_tee,
-         'TEE-' || upper(case color when '黑' then 'BLK' else 'WHT' end) || '-' || size,
-         19.90, 29.90, 8.00,
-         row_number() over ()
-  from combos
-  returning id
-loop
-  -- 给变体挂选项值（按 sku 解析颜色和尺寸）
-  insert into public.variant_option_values (variant_id, option_value_id)
-  select v_tee, ov from (values
-    (case when (select sku from public.product_variants where id = v_tee) like 'TEE-BLK%' then ov_black else ov_white end),
-    (case when (select sku from public.product_variants where id = v_tee) like '%-S' then ov_s
-          when (select sku from public.product_variants where id = v_tee) like '%-M' then ov_m
-          else ov_l end)
-  ) t(ov);
-end loop;
-
-insert into public.product_images (product_id, url, alt, position) values
-  (p_tee, 'https://picsum.photos/seed/tee1/800/800', 'T恤主图', 1),
-  (p_tee, 'https://picsum.photos/seed/tee2/800/800', '细节图', 2);
-
--- ---------- 商品 2：机械键盘（轴体 2 变体） ----------
-insert into public.products (slug, name, description, status, vendor, product_type, tags) values
-  ('mechanical-keyboard-87', 'Mechanical Keyboard 87',
-   '87 键热插拔机械键盘，三模连接，PBT 键帽。', 'active', 'KeyPro', '键盘', '{机械键盘,热插拔}')
-returning id into p_kb;
-
-insert into public.product_categories (product_id, category_id) values (p_kb, c_elec);
-
-insert into public.product_options (product_id, name, position) values (p_kb, '轴体', 1) returning id into o_switch;
-insert into public.product_option_values (option_id, value, position) values (o_switch, '红轴', 1) returning id into ov_red;
-insert into public.product_option_values (option_id, value, position) values (o_switch, '茶轴', 2) returning id into ov_brown;
-
-insert into public.product_variants (product_id, sku, price, compare_at_price, cost, position) values
-  (p_kb, 'KB87-RED',   89.00, 109.00, 45.00, 1) returning id into v_kb;
-insert into public.variant_option_values (variant_id, option_value_id) values (v_kb, ov_red);
-
-insert into public.product_variants (product_id, sku, price, compare_at_price, cost, position) values
-  (p_kb, 'KB87-BROWN', 95.00, 119.00, 48.00, 2) returning id into v_tee;  -- 复用变量
-insert into public.variant_option_values (variant_id, option_value_id) values (v_tee, ov_brown);
-
-insert into public.product_images (product_id, url, alt, position) values
-  (p_kb, 'https://picsum.photos/seed/kb1/800/800', '键盘主图', 1);
-
--- ---------- 商品 3：陶瓷马克杯（无选项 → 单个默认变体） ----------
-insert into public.products (slug, name, description, status, vendor, product_type, tags) values
-  ('ceramic-mug-350', 'Ceramic Mug 350ml', '哑光釉面陶瓷马克杯，350ml。', 'active', 'ACME', '杯具', '{马克杯}')
-returning id into p_mug;
-
-insert into public.product_categories (product_id, category_id) values (p_mug, c_home);
-
-insert into public.product_variants (product_id, sku, price, cost) values
-  (p_mug, 'MUG-350', 9.90, 3.50) returning id into v_mug;
-
--- ---------- 商品 4：USB-C 数据线（低库存，用于超卖测试） ----------
-insert into public.products (slug, name, description, status, vendor, product_type, tags) values
-  ('usb-c-cable-1m', 'USB-C Cable 1m', '100W 快充编织数据线，1 米。', 'active', 'ACME', '数据线', '{快充}')
-returning id into p_cable;
-
-insert into public.product_categories (product_id, category_id) values (p_cable, c_acc);
-
-insert into public.product_variants (product_id, sku, price, cost) values
-  (p_cable, 'CABLE-1M', 4.90, 1.20) returning id into v_cable;
-
--- ---------- 仓库与库存 ----------
-insert into public.locations (code, name, is_default) values ('WH-SH', '上海仓', true) returning id into loc;
-
-insert into public.inventory_levels (variant_id, location_id, on_hand)
-select v.id, loc, case
-  when v.sku like 'TEE-%'    then 50
-  when v.sku = 'KB87-RED'    then 20
-  when v.sku = 'KB87-BROWN'  then 15
-  when v.sku = 'MUG-350'     then 200
-  when v.sku = 'CABLE-1M'    then 5
-  else 0 end
-from public.product_variants v;
-
--- ---------- Metaobject：尺码表定义 + 3 条条目 ----------
-insert into public.metaobject_definitions (type, name, description, access, fields) values
-  ('size_guide', '尺码表', '服装尺码测量数据', 'public', '[
-    {"key": "size",      "name": "尺码",     "type": "text",   "required": true},
-    {"key": "bust_cm",   "name": "胸围(cm)", "type": "number", "required": true},
-    {"key": "length_cm", "name": "衣长(cm)", "type": "number", "required": true},
-    {"key": "note",      "name": "备注",     "type": "text",   "required": false}
-  ]') returning id into def_sg;
-
-insert into public.metaobjects (definition_id, handle, values) values
-  (def_sg, 's', '{"size":"S","bust_cm":96,"length_cm":66}')              returning id into mo_s;
-insert into public.metaobjects (definition_id, handle, values) values
-  (def_sg, 'm', '{"size":"M","bust_cm":102,"length_cm":69}')             returning id into mo_m;
-insert into public.metaobjects (definition_id, handle, values) values
-  (def_sg, 'l', '{"size":"L","bust_cm":108,"length_cm":72,"note":"偏宽松"}') returning id into mo_l;
-
--- ---------- Metafield 定义 ----------
-insert into public.metafield_definitions (owner_type, namespace, key, name, type, description, position, access) values
-  ('product', 'custom', 'care_instructions', '洗护说明', 'text',     '洗涤保养说明',      1, 'public'),
-  ('product', 'custom', 'material',          '材质',     'list_text', '面料成分列表',      2, 'public'),
-  ('product', 'specs',  'size_guide',        '尺码表',   'list_metaobject_reference', '引用 size_guide metaobject', 3, 'public'),
-  ('variant', 'custom', 'weight_g',          '重量(g)',  'number',   '用于运费估算',      1, 'public'),
-  ('order',   'custom', 'gift_message',      '礼品留言', 'text',     '礼品卡留言',        1, 'customer');
-
--- ---------- Metafield 值（挂到 T 恤商品） ----------
-insert into public.metafields (owner_type, owner_id, namespace, key, type, value) values
-  ('product', p_tee, 'custom', 'care_instructions', 'text', '"冷水机洗，勿漂白，低温熨烫"'),
-  ('product', p_tee, 'custom', 'material', 'list_text', '["100% 棉"]'),
-  ('product', p_tee, 'specs', 'size_guide', 'list_metaobject_reference',
-    jsonb_build_array(mo_s::text, mo_m::text, mo_l::text));
-
--- 变体重量 metafield（所有 T 恤变体 220g）
-insert into public.metafields (owner_type, owner_id, namespace, key, type, value)
-select 'variant', v.id, 'custom', 'weight_g', 'number', '220'
-from public.product_variants v where v.sku like 'TEE-%';
-
--- ---------- 运费方式 ----------
-insert into public.shipping_methods (name, description, countries, price, free_above, estimated_days, position) values
-  ('Standard shipping', 'Example flat rate; configure your own carrier and destinations', '{}', 8.00, 99.00, '3-5 days', 1),
-  ('Express shipping', 'Example expedited delivery', '{}', 18.00, null, '1-2 days', 2),
-  ('Regional shipping', 'Example destination allowlist', '{CA,JP,SG}', 30.00, null, '7-15 days', 3);
-
--- No tax rules are installed by default. Merchants must configure their own tax
--- policy before selling; a missing rule producing zero is not a tax exemption.
-
--- ---------- 促销 ----------
--- 输码型（半自动）
-insert into public.promotions (name, code, type, params, usage_limit) values
-  ('新客9折',   'WELCOME10', 'order_percentage', '{"percent": 10, "threshold": 50}', null),
-  ('满100减20', 'SAVE20',    'order_fixed',      '{"threshold": 100, "amount": 20}', 100);
-
--- 自动型（预览/下单自动生效）
-declare
-  promo_apparel uuid; promo_mug uuid; promo_bogo uuid;
-begin
-  insert into public.promotions (name, type, params, priority, stackable) values
-    ('服饰分类8折', 'item_percentage', '{"percent": 20}', 100, false)
-  returning id into promo_apparel;
-  insert into public.promotion_targets (promotion_id, category_id) values (promo_apparel, c_apparel);
-
-  insert into public.promotions (name, type, params, priority, stackable) values
-    ('马克杯满3件7折', 'item_percentage', '{"percent": 30, "min_quantity": 3}', 100, true)
-  returning id into promo_mug;
-  insert into public.promotion_targets (promotion_id, product_id) values (promo_mug, p_mug);
-
-  insert into public.promotions (name, type, params, priority, stackable) values
-    ('数据线买一送一', 'buy_x_get_y', '{"buy": 1, "get": 1, "get_percent": 100}', 100, true)
-  returning id into promo_bogo;
-  insert into public.promotion_targets (promotion_id, product_id) values (promo_bogo, p_cable);
-end;
-
+  insert into public.shipping_methods(name,description,countries,price,free_above,estimated_days,position) values
+    ('Standard shipping','Tracked worldwide delivery','{}',8.00,99.00,'3-5 business days',1),
+    ('Express shipping','Expedited delivery within the United States','{US}',18.00,null,'1-2 business days',2),
+    ('Regional shipping','Tracked delivery to selected international destinations','{CA,JP,SG}',30.00,null,'7-15 business days',3);
 end $$;

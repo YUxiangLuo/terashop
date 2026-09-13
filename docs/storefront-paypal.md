@@ -1,6 +1,6 @@
 # SSG Storefront 的 PayPal 结账合同
 
-SSG 只生成公开目录和页面外壳；购物车、地址、报价、订单和支付状态必须在浏览器运行时获取。静态价格不是结账承诺，不能将个人数据写入构建产物或 CDN 共享缓存。本仓库不包含 Storefront；以下是接入合同，不是已验证的浏览器实现。
+SSG 只生成公开目录和页面外壳；购物车、地址、报价、订单和支付状态必须在浏览器运行时获取。静态价格不是结账承诺，不能将个人数据写入构建产物或 CDN 共享缓存。本仓库 `storefront/` 已提供女装静态目录、购物袋和 Quote UI；以下支付流程仍是接入合同，不是已验证的浏览器支付实现。
 
 ## 身份与部署边界
 
@@ -27,7 +27,7 @@ Quote、订单创建、支付尝试是不同幂等范围。每次网络重试复
 
 ## 站内一次性信用卡 / 借记卡支付（SDK v6）
 
-后端已提供接入合同；本仓库没有 Storefront、真实 Sandbox 卡和浏览器验收结果。卡支付默认关闭，不包含保存卡、订阅或平台商户 onboarding。Visa/Mastercard 等卡种是否可用取决于商户 Expanded Checkout 审批、所在国家、币种和 PayPal SDK eligibility；配置一个 client ID 不等于获得卡收单资格。
+后端已提供接入合同；现有 Storefront 未接入卡支付，尚无真实 Sandbox 卡和浏览器支付验收结果。卡支付默认关闭，不包含保存卡、订阅或平台商户 onboarding。Visa/Mastercard 等卡种是否可用取决于商户 Expanded Checkout 审批、所在国家、币种和 PayPal SDK eligibility；配置一个 client ID 不等于获得卡收单资格。
 
 启用前设置 `PAYPAL_CARDS_ENABLED=true` 和 `PAYPAL_STOREFRONT_DOMAIN=shop.example`（实际站点 hostname，不带协议、端口或路径），保留既有 PayPal App 凭据、return/cancel URL、Webhook 和后台对账配置。`PAYMENT_ALLOWED_ORIGINS` 必须包含实际 Storefront origin；domain binding 不替代 CORS 或认证。正式开启前完成下方 Sandbox 清单。仍使用本仓库基线迁移/本地重置流程，不可对已有生产数据直接 reset。
 

@@ -2,6 +2,7 @@
   "name": "tera-headless",
   "type": "module",
   "private": true,
+  "workspaces": ["storefront"],
   "packageManager": "bun@1.4.0",
   "devDependencies": {
     "@types/bun": "1.4.0",
@@ -9,6 +10,10 @@
     "typescript": "7.0.2"
   },
   "scripts": {
+    "storefront:dev": "bun scripts/storefront.ts dev",
+    "storefront:build": "bun scripts/storefront.ts build",
+    "storefront:check": "bun scripts/storefront.ts check",
+    "storefront:preview": "bun run --cwd storefront preview --host 0.0.0.0",
     "setup": "bunx supabase db reset --local --network-id tera-headless-loopback",
     "start": "bun scripts/start.ts",
     "stop": "bunx supabase stop",

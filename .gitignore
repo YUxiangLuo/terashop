@@ -4,6 +4,8 @@ node_modules
 # output
 out
 dist
+.svelte-kit
+storefront/build
 *.tgz
 
 # code coverage

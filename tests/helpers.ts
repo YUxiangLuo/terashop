@@ -1,6 +1,7 @@
 import type { Database } from '../types/database';
 import { createApi, onlyRow, checked } from './support/http';
 import { authMail } from './support/mail';
+import { installLegacyCatalogFixture } from './support/legacy-catalog';
 export { checked, onlyRow } from './support/http';
 export type { ApiOptions, ApiResult } from './support/http';
 
@@ -63,6 +64,7 @@ export async function makeAdmin(userId: string) {
 
 // ---------- 领域快捷方法 ----------
 export async function variantBySku(sku: string): Promise<string> {
+  if (/^(TEE-|KB87-|MUG-350$|CABLE-1M$)/.test(sku)) await installLegacyCatalogFixture();
   return (await onlyRow<{ id: string }>(api(`/rest/v1/product_variants?sku=eq.${encodeURIComponent(sku)}&select=id`))).id;
 }
 

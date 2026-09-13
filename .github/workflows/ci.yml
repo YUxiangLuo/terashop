@@ -18,6 +18,7 @@ jobs:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
+      - run: bun run storefront:check
       - run: bun run test:unit
       - run: bun run docs:check
 
@@ -32,6 +33,8 @@ jobs:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
       - run: bun run start
+      - run: bun run setup
+      - run: bun run storefront:build
       - run: bun run test --integration
       - run: bun run db:lint
       - run: bun run types:check
