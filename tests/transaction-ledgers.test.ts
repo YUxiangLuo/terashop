@@ -119,8 +119,11 @@ describe('关系化订单账本', () => {
     expect(hidden.status).toBe(404);
   });
 
-  test('create_order_v2 对语义相同的重试只建一单、只扣一次库存', async () => {
+  test('create_order_v2 对语义相同的重试只建一单、只预占一次库存', async () => {
     const key = `order-${crypto.randomUUID()}`;
+    const before = await checked<{ on_hand: number; reserved: number; available: number }>(rpc(
+      'get_inventory_availability', { variant_id: mugId }, admin.token,
+    ));
     const [first, replay] = await Promise.all([
       rpc('create_order_v2', {
         items: [
@@ -144,7 +147,9 @@ describe('关系化订单账本', () => {
       `/rest/v1/inventory_movements?order_id=eq.${orderId}&reason=eq.order&select=delta`,
       { service: true },
     );
-    expect(movements).toEqual([{ delta: -2 }]);
+    expect(movements).toEqual([]);
+    expect(await checked(rpc('get_inventory_availability', { variant_id: mugId }, admin.token)))
+      .toMatchObject({ on_hand: before.on_hand, reserved: before.reserved + 2, available: before.available - 2 });
 
     const mismatch = await rpc('create_order_v2', {
       items: [{ variant_id: mugId, quantity: 3 }],
@@ -155,18 +160,20 @@ describe('关系化订单账本', () => {
     expect((mismatch.data as { message: string }).message).toContain('different order parameters');
   });
 
-  test('pending 订单重算税时追加差额，不改写已有 adjustment', async () => {
+  test('pending 订单拒绝重算税且 adjustment 快照不变', async () => {
     const { id: adjustmentOrderId } = await givenPendingOrder();
-    await rpc('update_order_address', {
+    const update = await rpc('update_order_address', {
       order_id: adjustmentOrderId,
       address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Main St' },
     }, buyer.token);
 
     const value = await ledger(adjustmentOrderId);
+    expect(update.status).toBe(400);
+    expect((update.data as { message: string }).message).toContain('immutable');
     const taxes = value.adjustments.filter((row) => row.kind === 'tax');
-    expect(taxes.length).toBe(2);
-    expect(taxes.map((row) => Number(row.amount))).toEqual([1.29, -1.29]);
-    expect(Number(value.balances.adjustment_total)).toBe(0);
+    expect(taxes.length).toBe(1);
+    expect(taxes.map((row) => Number(row.amount))).toEqual([1.29]);
+    expect(Number(value.balances.adjustment_total)).toBeCloseTo(1.29);
     expect(value.balances.is_balanced).toBe(true);
   });
 

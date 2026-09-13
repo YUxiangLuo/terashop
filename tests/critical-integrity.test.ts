@@ -324,7 +324,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
 });
 
 describe('关键完整性：并发、库存和审计', () => {
-  test('取消以原始扣减流水为准，不受当前 track_inventory 影响', async () => {
+  test('未支付订单只预占；取消不受当前 track_inventory 影响且不产生库存流水', async () => {
     const owner = await signup();
     let before = await stockOf('CABLE-1M');
     if (before < 2) {
@@ -336,7 +336,7 @@ describe('关键完整性：并发、库存和审计', () => {
     const { data: created } = await rpc('create_order', {
       items: [{ variant_id: cableId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
-    expect(await stockOf('CABLE-1M')).toBe(before - 1);
+    expect(await stockOf('CABLE-1M')).toBe(before);
 
     await api(`/rest/v1/product_variants?id=eq.${cableId}`, {
       service: true, method: 'PATCH', body: { track_inventory: false },
@@ -344,6 +344,8 @@ describe('关键完整性：并发、库存和审计', () => {
     try {
       await rpc('cancel_order', { order_id: (created as { id: string }).id }, owner.token);
       expect(await stockOf('CABLE-1M')).toBe(before);
+      const { data: movements } = await api(`/rest/v1/inventory_movements?order_id=eq.${(created as { id: string }).id}&select=id`, { service: true });
+      expect(movements).toEqual([]);
     } finally {
       await api(`/rest/v1/product_variants?id=eq.${cableId}`, {
         service: true, method: 'PATCH', body: { track_inventory: true },

@@ -279,7 +279,7 @@ describe('PayPal capture dispatch and cancellation', () => {
     if (prepared.status === 200) await settleIntent(intent);
   });
 
-  test('兼容订单创建意图后即保护地址，捕获登记后保护取消；结算不重复扣库存', async () => {
+  test('订单快照始终不可变，捕获登记后保护取消；结算消费预占且不重复扣库存', async () => {
     const order = await fixtureOrder(fixture, buyer, 1, false);
     const intent = await fixtureIntent(order, buyer, 'paypal');
     const before = await stockOf(fixture.sku);
@@ -294,7 +294,9 @@ describe('PayPal capture dispatch and cancellation', () => {
     expect(change.status).toBe(400);
     expect((await rpc('cancel_order', { order_id: order.id }, buyer.token)).status).toBe(400);
     await settleIntent(intent);
-    expect(await stockOf(fixture.sku)).toBe(before);
+    expect(await stockOf(fixture.sku)).toBe(before - 1);
+    const events = await checked<Array<{ type: string }>>(api(`/rest/v1/order_events?order_id=eq.${order.id}&type=eq.inventory_reservation_consumed&select=type`, { token: buyer.token }));
+    expect(events).toEqual([{ type: 'inventory_reservation_consumed' }]);
   });
 
   test('捕获请求不会无限延长 Quote；过期后拒绝新 POST，但已发生资金仍被记录', async () => {

@@ -121,19 +121,16 @@ describe('下单：金额计算', () => {
     expect(o.discount_code).toBe('WELCOME10');
     expect(o.shipping_method_name).toBe('Standard shipping');
 
-    // 库存扣减（相对断言）
-    expect(await stockOf('CABLE-1M')).toBe(cableBefore - 1);
-    expect(await stockOf('KB87-RED')).toBe(kbBefore - 1);
+    // 未支付订单只预占，不提前改变 on_hand。
+    expect(await stockOf('CABLE-1M')).toBe(cableBefore);
+    expect(await stockOf('KB87-RED')).toBe(kbBefore);
 
     // 库存流水已记录
     const { data: moves } = await api(
       `/rest/v1/inventory_movements?order_id=eq.${o.id}&select=delta,reason&order=id`,
       { service: true }
     );
-    expect(moves).toEqual([
-      { delta: -1, reason: 'order' },
-      { delta: -1, reason: 'order' },
-    ]);
+    expect(moves).toEqual([]);
 
     // 订单明细快照
     const { data: items } = await api(
@@ -161,7 +158,7 @@ describe('下单：金额计算', () => {
     );
     const o = data as Record<string, unknown>;
     expect(Number(o.subtotal)).toBeCloseTo(19.6);
-    expect(await stockOf('CABLE-1M')).toBe(before - 4);
+    expect(await stockOf('CABLE-1M')).toBe(before);
 
     // 明细合并为一行
     const { data: items } = await api(
@@ -185,7 +182,7 @@ describe('下单：金额计算', () => {
       },
       buyer.token
     );
-    expect((data as { message: string }).message).toContain('insufficient stock');
+    expect((data as { message: string }).message).toContain('insufficient available stock');
     expect(await stockOf('CABLE-1M')).toBe(remaining); // 未扣
   });
 
@@ -339,7 +336,7 @@ describe('下单：折扣码', () => {
     );
     expect((cancelled as Record<string, unknown>).status).toBe('cancelled');
 
-    // used_count 回落 + 库存回补（含流水）
+    // used_count 回落；取消只释放 reservation，不产生库存流水。
     const { data: d } = await api(`/rest/v1/promotions?code=eq.${code}&select=used_count`, { service: true });
     expect((d as { used_count: number }[])[0].used_count).toBe(0);
     expect(await stockOf('KB87-RED')).toBe(kbBefore);
@@ -348,7 +345,7 @@ describe('下单：折扣码', () => {
       `/rest/v1/inventory_movements?order_id=eq.${(o as { id: string }).id}&reason=eq.cancel&select=delta`,
       { service: true }
     );
-    expect((moves as { delta: number }[])[0].delta).toBe(1);
+    expect(moves).toEqual([]);
 
     // 再次使用成功
     const { data: o2 } = await rpc(
@@ -385,7 +382,7 @@ describe('取消订单', () => {
 });
 
 describe('修改收货地址', () => {
-  test('未发货前可改；引用别人地址簿会被拒绝', async () => {
+  test('pending 快照不可改；引用别人地址簿仍不会穿透归属', async () => {
     const { data: o } = await rpc(
       'create_order',
       { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
@@ -406,20 +403,23 @@ describe('修改收货地址', () => {
     );
     expect((bad.data as { message: string }).message).toBe('address not found');
 
-    // 直接传新地址成功
+    // 即使没有支付意图，快照也不可变；应取消并重新结账。
     const ok = await rpc(
       'update_order_address',
       { order_id: orderId, address: { ...TEST_ADDRESS, line1: '新地址 666 号' } },
       buyer.token
     );
-    expect((ok.data as { shipping_address: { line1: string } }).shipping_address.line1).toBe('新地址 666 号');
+    expect(ok.status).toBe(400);
+    expect((ok.data as { message: string }).message).toContain('immutable');
 
     // 事件已记录
     const { data: events } = await api(
       `/rest/v1/order_events?order_id=eq.${orderId}&type=eq.address_updated&select=type`,
       { token: buyer.token }
     );
-    expect((events as unknown[]).length).toBe(1);
+    expect((events as unknown[]).length).toBe(0);
+    const [snapshot] = await checked<Array<{ shipping_address: { line1: string } }>>(api(`/rest/v1/orders?id=eq.${orderId}&select=shipping_address`, { token: buyer.token }));
+    expect(snapshot.shipping_address.line1).toBe(TEST_ADDRESS.line1);
   });
 });
 

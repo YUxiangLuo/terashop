@@ -19,7 +19,7 @@
 
 ## ADR-003：订单快照不可变
 
-已支付订单的商品、价格、税、运费和地址快照不可原地重算，trigger 同样约束 service role；退款字段仅由受控流程单向推进。
+所有客户订单均由 Quote 转单，商品、价格、税、运费和地址快照自建单起不可原地重算，trigger 同样约束 service role；退款字段仅由受控流程单向推进。未付款改址须取消后重新结账。
 后续商业变更必须由 Order Edit、Adjustment、补扣或退款事实表达，而不是覆盖原始记录。
 所有订单（包括非 Quote 订单）必须有商品行；行毛额等于单价 × 数量，订单 subtotal / discount_total 等于行汇总。延迟约束在提交时校验，允许同一事务先头后行构建，但不允许分两个 HTTP 请求留下不完整订单；账本 `is_balanced` 也检查头行一致性。
 `order_number` 有 UNIQUE 约束，创建后与订单 ID 一样不可变，identity 不代替唯一性。整单校验通过隐藏的 `private.order_validation_queue` 按待检订单去重；触发时消费标记，强制校验后新改动重新排队，保存点回滚同时回滚标记，不以会话缓存跳过检查。
@@ -32,12 +32,12 @@
 ## ADR-004：库存与履约数量
 
 Quote 流程采用 `on_hand - active reserved = available`：报价预占、转单继续持有，支付成功时在同一事务中转为实际扣减；取消/超时仅释放预占。
-`create_order` / `create_order_v2` 保留下单即扣库存的路径，但不能消耗 Quote 预占；付款窗口固定 15 分钟，到期由 `expire_unpaid_orders` 按原仓释放库存。订单及意图的付款期限不可延长，Quote 转单沿用报价期限。
+`create_order` / `create_order_v2` 在单事务中创建并转换 15 分钟 Quote，不再提前扣库存；所有结账由 `expire_checkout_quotes` 统一过期。订单及意图的付款期限不可延长，转单沿用报价期限。
 `inventory_movements` 只记录真实 on_hand 变化；取消/退款以原始负流水为回补依据，不依赖变体当前的库存配置。所有订单必须先付款再履约，避免未付款却已出库的订单无法安全过期。
 
 每次预占行 INSERT 都更新相应库存行的 `reservation_revision`，但不改 on_hand、不记物理流水。单纯行锁不能防止 REPEATABLE READ 旧快照漏看其他客户的预占；真实版本写冲突要求调用方重试整笔事务。每条新增履约事实也写父订单版本，即使连续部分履约没有改变状态投影，RPC 与受信 INSERT 都不能绕过。
 
-库存统一按 `(variant_id, location_id)` 取锁；退款/取消在分摊前锁全部原库存，过期 Worker 锁整个批次，不能仅对每个订单单独排序。结账的变体锁使用 `NO KEY UPDATE`，避免与库存流水 FK 的 `KEY SHARE` 形成反向等待。Quote 与即时订单过期 Worker 分别调用，不能在同一事务中先锁库存再取得 Quote 锁。
+库存统一按 `(variant_id, location_id)` 取锁；退款在分摊前锁全部原库存。未付款取消/过期不产生库存流水。结账的变体锁使用 `NO KEY UPDATE`，避免与库存流水 FK 的 `KEY SHARE` 形成反向等待；不能先锁库存再取得 Quote 锁。
 
 按行退款优先取消未履约数量，分别在 `refund_request_lines.cancelled_quantity` 预留、`refund_lines.cancelled_quantity` 固化。
 可新履约数量 = 订购数量 − 活跃履约数量 − 已成功取消数量 − 活跃退款请求预留的取消数量。
@@ -88,7 +88,7 @@ Outbox 存储每次领取确定的 `lease_expires_at` 与随机 `lease_token`。
 
 PayPal Capture POST 前必须调用 `prepare_paypal_capture`，按 intent → quote → order 顺序复核归属、金额、订单及预占，并持久化捕获标记。
 普通取消不能穿透该标记，网络错误不清除它；重试先查询渠道，再复用原意图 UUID 作为幂等键。
-Quote 或即时订单到期仍可释放库存并取消订单，不无限延长 hold；这不意味着未知 Capture 已失败，迟到成功资金只入对账，不复活订单或再次扣库存。
+Quote 到期仍可释放预占并取消关联订单，不无限延长 hold；这不意味着未知 Capture 已失败，迟到成功资金只入对账，不复活订单或再次扣库存。
 `mark_order_paid` 不得先取消仍能扣款的线上意图再手工收款；不明 Capture 保留保护，已终结失败的 Capture 才允许新支付尝试。
 
 ## ADR-010：Quote 的价格与预占边界
@@ -184,7 +184,7 @@ Return 按一次有效发货授权商业行数量；open 授权占用可退量�
 
 回库统一校验原始负库存事实和累计恢复上限；取消按原扣减地点分摊，实收 restock 写入明确的收货地点并绑定唯一库存流水。当前 track_inventory、默认仓或商品价格变化不是历史库存证据。库存仍统一按 variant/location 排序锁定，新增收货地点不在锁完原仓后倒序追加；父订单真实写版本保护直接写表及 REPEATABLE READ 旧快照。已持发货/退货子行的更新使用 NOWAIT 防止反向等待。
 
-Receipt 不立即增加可售量，未处置数量只是该退货的待验收余额。现有 on_hand 仍在下单/付款时扣减，不是完整实物在库/不可售库存模型；本阶段不引入全仓实物库存、批次序列号、换货、面单、退货费用或自动退款政策。金额退款可在收货前后独立执行，不能把 Return 数量当作税务冲销或退款到账证明。当前无 Return 关联退款命令，既有商品退款仍优先取消未发货量；需要保留未发货履约量时，纯金额退款保持 unallocated，不猜商品或税归属。
+Receipt 不立即增加可售量，未处置数量只是该退货的待验收余额。on_hand 在付款时扣减，代表未售出的库存余额，不是完整实物在库/不可售库存模型；本阶段不引入全仓实物库存、批次序列号、换货、面单、退货费用或自动退款政策。金额退款可在收货前后独立执行，不能把 Return 数量当作税务冲销或退款到账证明。当前无 Return 关联退款命令，既有商品退款仍优先取消未发货量；需要保留未发货履约量时，纯金额退款保持 unallocated，不猜商品或税归属。
 
 ## ADR-019：Metafield 类型与 owner 引用完整性
 
@@ -234,4 +234,12 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 会话刷新/安全存储属于 Storefront 接入合同；退出、丢失会话或切换已有账号不会自动恢复匿名订单。当前不实现邮件查单、跨设备恢复或客户合并，不能只凭邮箱或订单号授权。CAPTCHA、覆盖直连 API 的限流、匿名身份留存/清理和私有缓存策略是上线前必需部署工作；每身份配额不能防止批量创建新身份。匿名 Auth 清理不得删除商业客户、订单或资金事实，不得清理仍需支付/售后的会话。
 
-参考：[Supabase Anonymous Sign-Ins](https://supabase.com/docs/guides/auth/auth-anonymous)。本阶段不同时移除即时扣库接口/手工支付投影/履约 JSON；这些旧路径的收敛须单独修改调用与交易回归。
+参考：[Supabase Anonymous Sign-Ins](https://supabase.com/docs/guides/auth/auth-anonymous)。手工支付投影/履约 JSON 的收敛仍须单独修改调用与交易回归。
+
+## ADR-024：单一下单管线与简化库存语义
+
+选择简化库存模型：`on_hand` 是未售出的库存余额，`available = on_hand - active reserved`。报价预占、转单继续持有、付款消费预占并扣减，发货不再扣减；不引入实物在库/已售未发货 `committed` 账本。
+
+`create_order` 是创建并转换 Quote 的便捷入口，两步同事务，失败整体回滚；内部随机 Quote key 与调用方显式报价的 key 无关联。`create_order_v2` 保留独立 `order.create` 幂等范围、规范化请求指纹和当前订单 DTO 重放，成功重试不新增 Quote、不延长期限、不重复预占或占用促销。非幂等入口仍不承诺网络重试安全，客户端优先使用 V2 或显式 Quote 流程。
+
+删除即时扣库实现及 `expire_unpaid_orders`；统一调度 `expire_checkout_quotes`。取消或超时仅释放未付款预占，支付结果未知时保留原有捕获保护和迟到资金对账规则。支付账本/履约双表示的收敛不包含在本次改动中。

@@ -154,7 +154,7 @@ describe('Checkout Quote 与库存预占', () => {
       address: TEST_ADDRESS,
     }, other.token);
     expect(blockedLegacy.status).toBe(400);
-    expect((blockedLegacy.data as { message: string }).message).toContain('reserved stock');
+    expect((blockedLegacy.data as { message: string }).message).toContain('insufficient available stock');
 
     const oneAvailable = await rpc('create_order', {
       items: [{ variant_id: contentionStock.variantId, quantity: 1 }],
@@ -162,7 +162,7 @@ describe('Checkout Quote 与库存预占', () => {
     }, other.token);
     expect(oneAvailable.status).toBe(200);
     expect(await availability(contentionStock.variantId)).toMatchObject({
-      on_hand: 4, reserved: 4, available: 0,
+      on_hand: 5, reserved: 5, available: 0,
     });
     await rpc('cancel_order', { order_id: (oneAvailable.data as { id: string }).id }, other.token);
     await rpc('cancel_checkout_quote', { quote_id: winnerQuote.id }, winner.token);
@@ -441,7 +441,7 @@ describe('修复：库存口径与回补仓', () => {
     // Resources are retired in afterEach, even when an assertion fails.
   });
 
-  test('取消订单回补到【原始扣减仓】而非当前默认仓', async () => {
+  test('未支付订单在原始仓预占；切换默认仓后取消只释放预占', async () => {
     const u = await signup();
     const { data: locs } = await api('/rest/v1/locations?select=id,code,is_default', { service: true });
     const whSh = (locs as { id: string; is_default: boolean }[]).find((l) => l.is_default)!;
@@ -469,24 +469,25 @@ describe('修复：库存口径与回补仓', () => {
     };
 
     try {
-      // 切换默认仓到 B 后下单：从 B 扣减
+      // 切换默认仓到 B 后下单：在 B 预占但不提前扣减
       await setDefault(whSh.id, false);
       await setDefault(locBId, true);
       const { data: o } = await rpc('create_order', {
         items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
       }, u.token);
-      expect(await levelAt(locBId)).toBe(8);
+      expect(await levelAt(locBId)).toBe(10);
+      expect(await availability(mugId)).toMatchObject({ on_hand: 10, reserved: 2, available: 8 });
 
-      // 默认仓切回 WH-SH 后取消：库存必须回补到 B 而不是 WH-SH
+      // 默认仓切回 WH-SH 后取消：不产生回补流水。
       await setDefault(locBId, false);
       await setDefault(whSh.id, true);
       await rpc('cancel_order', { order_id: (o as { id: string }).id }, u.token);
       expect(await levelAt(locBId)).toBe(10);
 
       const { data: moves } = await api(
-        `/rest/v1/inventory_movements?order_id=eq.${(o as { id: string }).id}&reason=eq.cancel&select=location_id`,
+        `/rest/v1/inventory_movements?order_id=eq.${(o as { id: string }).id}&select=location_id`,
         { service: true });
-      expect((moves as { location_id: string }[])[0].location_id).toBe(locBId);
+      expect(moves).toEqual([]);
     } finally {
       // 无论成败都恢复默认仓，保护后续测试文件
       await setDefault(locBId, false);

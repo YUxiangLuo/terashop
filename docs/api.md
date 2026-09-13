@@ -236,13 +236,13 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 | `get_order_ledger` | `order_id`；安全交易账本 DTO，退款含金额组成 |
 | `get_order_pricing` | `order_id`；客户本人/admin/service 可读的价格、优惠、税与配送快照 |
 | `get_order_fulfillment_balance` | `order_id`；每行订购/履约/取消/退款预留/可履约数量 |
-| `update_order_address` | `order_id`、`address` 或 `address_id`；仅符合编辑条件的非 Quote 订单 |
+| `update_order_address` | 遗留入口；当前客户订单均有 Quote 快照，拒绝原地改址，须取消后重新结账 |
 
-查询限制订单/Quote 归属，部分接口另允许管理员。Quote、已支付订单及活动支付意图保护下的商业快照不可原地改价或改地址。
+查询限制订单/Quote 归属，部分接口另允许管理员。所有客户订单自建单起冻结商业快照，不可原地改价或改地址，支付失败也不解除快照保护。
 
 ## 商业行身份
 
-所有计价、报价和即时建单入口共用以下 `items` 合同：
+所有计价、报价和便捷建单入口共用以下 `items` 合同：
 
 ```json
 [
@@ -254,7 +254,7 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 - `attributes` 可省略，默认为 `{}`；必须是文本值对象，最多 20 个键、键长 1–64 字符且非空白、值长至多 500 字符，JSON 文本总长至多 8192 UTF-8 字节。
 - 相同变体和完全相同属性才合并数量；属性键顺序、UUID 大小写及输入重排不改变结果。文本大小写、空格仍有意义，不自动改写定制内容。
 - `line_key` 由服务器按变体/属性计算，与数量无关；响应会返回它，重传时必须匹配。其他未声明字段拒绝，不能提交自定价格、目录 `options` 或尚未实现的购买计划。
-- 预览返回 `line_key` / `attributes`；Quote 另返回独立行 `id`，转单沿用为 `order_items.id`。即时订单直接分配行 ID。履约和退款继续传 `order_item_id`，不能用 SKU 代替行 ID。
+- 预览返回 `line_key` / `attributes`；Quote 另返回独立行 `id`，所有建单入口均沿用为 `order_items.id`。履约和退款继续传 `order_item_id`，不能用 SKU 代替行 ID。
 - 库存按变体/仓库汇总；优惠先按变体确定，再按商业行分摊，不能通过添加属性放大促销收益。
 
 订单明细可查询 `/rest/v1/order_items?order_id=eq.<uuid>&select=id,line_key,variant_id,attributes,quantity,line_total`。
@@ -272,7 +272,7 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 - `tax_context`：`not_calculated`（无目的地预览）、`no_rule`（无匹配规则）、`calculated`（包括显式零税率），保存目的地、实际规则与算法 `country_rate_variant_line_v1`。`unrecorded` 仅供无税额的受信订单构建，不是免税证明。
 
 税先按 SKU/配送、再按商业行进行整数分最大余数分配，合计等于折后应税基数乘单一税率的舍入结果。拆属性不能改变 SKU 税额。当前不支持多税种、含税价格、州/邮编税、免税证书或税务发票。
-商品净额 + 净运费 + 税 = 订单总额；促销免邮收益不重复计入商品折扣。被订单明细引用的税率、运法、促销应停用，不可删除；修改配置不会改写已支付快照。仅符合条件的即时未付订单改地址会重建目的地税，不重新计算商品优惠/运费。
+商品净额 + 净运费 + 税 = 订单总额；促销免邮收益不重复计入商品折扣。被订单明细引用的税率、运法、促销应停用，不可删除；修改配置不会改写订单快照。未付款改地址须取消后重新结账，新 Quote 重新计算目的地税、优惠与运费。
 
 ## 支付与退款
 
@@ -379,11 +379,12 @@ POST /rest/v1/rpc/receive_return
 
 `order_number` 在数据库保证唯一，创建后不可 PATCH（包括 service role）。库存预占和每条新增履约事实都会写共享资源版本；直接 SQL / Worker 遇到 `40001` 应重试整笔事务，不假设仅取行锁就能刷新 REPEATABLE READ 快照。
 
-## 即时下单与手工命令
+## 便捷下单与手工命令
 
 以下是当前调用链的一部分，不代表历史兼容承诺；新商城优先采用上面的 Quote 流程。
 
-- `create_order` / `create_order_v2`：下单即扣库存，但不能穿透 Quote 预占；V2 增加请求指纹与幂等键。同样受建单限额约束，15 分钟未付款由专用 Worker 取消并按原仓回库。
+- `create_order` / `create_order_v2`：单事务创建并转换 15 分钟 Quote，只预占、不扣 `on_hand`；支付成功才扣减，发货不再扣减。`on_hand` 表示未售出的库存余额，不是实物在库数。未付款取消/超时仅释放预占，统一由 `expire_checkout_quotes` 处理到期。
+- V2 增加请求指纹与幂等键，重试返回原订单当前状态，不新建 Quote、不延长期限。其幂等范围与显式报价独立；取消/过期后同键重试仍返回原订单，需要重新结账时使用新键。`create_order` 无重试去重保证，新客户端优先使用 V2 或显式 Quote 流程。
 - `create_fulfillment`：无幂等键的基础履约命令，所有订单均须先付款；安全重试使用 `create_fulfillment_v2`。
 - `mark_order_paid`：`order_id`、`provider:"manual"`；仅手工收款，线上意图仍可扣款时禁止使用。
 - `refund_order` / `refund_order_v2`：同步手工/测试退款，不代表真实渠道已退款；不能穿透活跃异步退款请求。

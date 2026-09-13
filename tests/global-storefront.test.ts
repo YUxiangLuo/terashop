@@ -109,7 +109,7 @@ test('无地址只能预估商品价格，选择配送方式必须提供目的�
   expect(missing.data).toMatchObject({ message: expect.stringContaining('destination country') });
 });
 
-test('通用地址行可经地址簿创建和编辑快照，电话/行政区/城市/邮编不强制填写', async () => {
+test('通用地址行可经地址簿创建；订单地址快照不可编辑，改址需新 checkout', async () => {
   const input = { recipient_name: 'Alex Morgan', country: 'hk', line1: '12 Example Road', line2: 'Unit 7' };
   const [address] = await checked<Array<{ id: string; country: string; phone: null; region: null; city: null; postal_code: null }>>(api('/rest/v1/addresses', {
     token: buyer.token, method: 'POST', body: input,
@@ -124,14 +124,22 @@ test('通用地址行可经地址簿创建和编辑快照，电话/行政区/城
     await checked(api(`/rest/v1/addresses?id=eq.${address.id}`, {
       token: buyer.token, method: 'PATCH', body: { line2: 'Unit 8', region: null },
     }));
-    const updated = await checked<{ shipping_address: Record<string, unknown> }>(rpc('update_order_address', {
+    const edit = await rpc('update_order_address', {
       order_id: order.id, address_id: address.id,
-    }, buyer.token));
-    expect(updated.shipping_address.line2).toBe('Unit 8');
-    const missingCountry = await rpc('update_order_address', {
-      order_id: order.id, address: { recipient_name: 'Alex', line1: 'Another street' },
     }, buyer.token);
-    expect(missingCountry.status).toBe(400);
+    expect(edit.status).toBe(400);
+    expect(edit.data).toMatchObject({ message: expect.stringContaining('immutable') });
+    const [unchanged] = await checked<Array<{ shipping_address: Record<string, unknown> }>>(api(
+      `/rest/v1/orders?id=eq.${order.id}&select=shipping_address`, { token: buyer.token },
+    ));
+    expect(unchanged.shipping_address.line2).toBe('Unit 7');
+    await checked(rpc('cancel_order', { order_id: order.id }, buyer.token));
+    orders.pop();
+    const replacement = await checked<{ id: string; shipping_address: Record<string, unknown> }>(rpc('create_order', {
+      items: items(), address_id: address.id,
+    }, buyer.token));
+    orders.push(replacement.id);
+    expect(replacement.shipping_address.line2).toBe('Unit 8');
   } finally {
     await checked(api(`/rest/v1/addresses?id=eq.${address.id}`, { token: buyer.token, method: 'DELETE' }));
   }

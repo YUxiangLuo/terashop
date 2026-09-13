@@ -389,7 +389,6 @@ REVOKE ALL ON FUNCTION private.checkout_quote_to_outbox() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.command_request_hash(p_request jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.consume_order_reservation(p_order_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.create_fulfillment(order_id uuid, items jsonb, carrier text, tracking_number text, tracking_url text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION private.create_order(items jsonb, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.enforce_metafield_definition_compatibility() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.enforce_metafield_integrity() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.enqueue_outbox_event(p_aggregate_type text, p_aggregate_id uuid, p_event_type text, p_payload jsonb, p_idempotency_key text) FROM PUBLIC;
@@ -488,7 +487,6 @@ REVOKE ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text
 REVOKE ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_refund_request(order_id uuid, actor_id uuid, provider text, idempotency_key text, items jsonb, amount numeric, reason text, restock boolean, metadata jsonb, shipping_amount numeric) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.enforce_single_default_address() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.expire_unpaid_orders(max_orders integer, as_of timestamp with time zone) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.expire_checkout_quotes(max_quotes integer, as_of timestamp with time zone) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.get_checkout_quote(quote_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.get_inventory_availability(variant_id uuid, location_id uuid) FROM PUBLIC;
@@ -529,7 +527,6 @@ GRANT EXECUTE ON FUNCTION public.get_admin_order(uuid), public.get_customer_orde
 GRANT EXECUTE ON FUNCTION public.get_admin_customer(uuid), public.list_admin_customers(integer,text,boolean,jsonb) TO authenticated, service_role;
 GRANT ALL ON FUNCTION private.cancel_order(order_id uuid, reason text) TO service_role;
 GRANT ALL ON FUNCTION private.create_fulfillment(order_id uuid, items jsonb, carrier text, tracking_number text, tracking_url text) TO service_role;
-GRANT ALL ON FUNCTION private.create_order(items jsonb, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) TO service_role;
 GRANT ALL ON FUNCTION private.mark_order_paid(order_id uuid, provider text, provider_ref text) TO service_role;
 GRANT ALL ON FUNCTION private.price_checkout(items jsonb, address jsonb, shipping_method_id uuid, discount_code text) TO service_role;
 GRANT ALL ON FUNCTION private.refund_order(order_id uuid, items jsonb, amount numeric, reason text, restock boolean, provider text, shipping_amount numeric) TO service_role;
@@ -559,7 +556,6 @@ GRANT ALL ON FUNCTION public.create_order_v2(items jsonb, idempotency_key text, 
 GRANT ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb) TO service_role;
 GRANT ALL ON FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb) TO service_role;
 GRANT ALL ON FUNCTION public.create_refund_request(order_id uuid, actor_id uuid, provider text, idempotency_key text, items jsonb, amount numeric, reason text, restock boolean, metadata jsonb, shipping_amount numeric) TO service_role;
-GRANT EXECUTE ON FUNCTION public.expire_unpaid_orders(max_orders integer, as_of timestamp with time zone) TO service_role;
 GRANT ALL ON FUNCTION public.expire_checkout_quotes(max_quotes integer, as_of timestamp with time zone) TO service_role;
 GRANT ALL ON FUNCTION public.get_checkout_quote(quote_id uuid) TO authenticated;
 GRANT ALL ON FUNCTION public.get_inventory_availability(variant_id uuid, location_id uuid) TO authenticated;

@@ -59,15 +59,14 @@ Webhook 入箱后处理失败返回 500；已识别的瞬时数据库故障保�
 
 | 任务 | 请求体 | 调度 |
 | --- | --- | --- |
-| RPC `expire_checkout_quotes` | `{"max_quotes":100}` | 每分钟，释放 Quote 预占 |
-| RPC `expire_unpaid_orders` | `{"max_orders":100}` | 每分钟，取消即时扣库路径的过期未付款订单并回库 |
+| RPC `expire_checkout_quotes` | `{"max_quotes":100}` | 每分钟，释放 Quote 预占并取消关联的未付款订单，覆盖所有下单入口 |
 | RPC `purge_expired_carts` | `{"max_carts":100}` | 定时循环清理过期 Cart/行；返回删除数量，上限 500 |
 | RPC `retry_payment_provider_events` | `{"max_events":50}` | 持续定时运行 |
 | Edge `paypal-reconcile-refunds` | `{"max_events":20}` | 每分钟；同一请求最短轮询间隔 5 分钟 |
 | RPC `claim_outbox_events` | `{"worker_id":"worker-1","max_events":50,"lease_seconds":300}` | 循环领取，副作用消费者必须幂等 |
 | RPC `complete_outbox_event` | `{"event_id":"<uuid>","worker_id":"worker-1","lease_token":"<claim 返回的 uuid>","succeeded":true}` | 消费后确认；失败传 false 与 `error_message` |
 
-两个交易过期 RPC（Quote / unpaid orders）都必须调度，各自独立事务调用，不能包装在同一个 SQL 事务内；每次最多处理 500 个对象，并使用 SKIP LOCKED。未付款窗口到期前普通取消仍受不明 Capture 保护，到期 Worker 释放库存不代表渠道资金已失败，迟到成功继续进入对账。
+交易过期只需调度 `expire_checkout_quotes`，每次最多处理 500 个对象，使用 SKIP LOCKED；旧 `expire_unpaid_orders` 已移除。未付款窗口到期前普通取消仍受不明 Capture 保护，到期 Worker 释放预占不代表渠道资金已失败，迟到成功继续进入对账。
 Cart 到期立即拒绝凭据访问，但物理清理依赖 `purge_expired_carts`；独立调用并监控积压，不取消关联 Quote/订单或改库存。终态 Cart 的行属性保留到清理，Quote/订单历史属性不在 Cart 清理范围。
 Outbox claim 返回 `attempt`、`lease_token` 和 `lease_expires_at`；过期、旧 token、错误 owner 的 complete 返回 false。处理时长超过租约需调整下次领取配置；相同 worker_id 不能替代租约 token，消费者仍须按 event_id 幂等。
 

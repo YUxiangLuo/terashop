@@ -140,11 +140,11 @@ test('三个客户入口共享 50 行/100 件限制及 5 个活跃 checkout 配�
   expect((await rpc('create_order', { items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS }, buyer.token)).status).toBe(400);
 });
 
-test('即时订单及意图有不可延长的期限，过期释放库存一次；未知 capture 的迟到成功只对账', async () => {
+test('便捷下单及意图沿用报价期限，过期仅释放预占；未知 capture 的迟到成功只对账', async () => {
   const f = await fixture(); const order = await fixtureOrder(f, buyer, 1, false);
-  expect((await rpc('expire_unpaid_orders', {}, buyer.token)).status).toBe(403);
-  expect((await rpc('expire_unpaid_orders', { max_orders: null }, undefined, true)).status).toBe(400);
-  expect((await rpc('expire_unpaid_orders', { as_of: null }, undefined, true)).status).toBe(400);
+  expect((await rpc('expire_checkout_quotes', {}, buyer.token)).status).toBe(403);
+  expect((await rpc('expire_checkout_quotes', { max_quotes: null }, undefined, true)).status).toBe(400);
+  expect((await rpc('expire_checkout_quotes', { as_of: null }, undefined, true)).status).toBe(400);
   const intent = await fixtureIntent(order, buyer);
   const [before] = await database`select o.payment_expires_at=i.expires_at as same_deadline from public.orders o
     join commerce.payment_intents i on i.order_id=o.id where o.id=${order.id}::uuid`;
@@ -154,11 +154,11 @@ test('即时订单及意图有不可延长的期限，过期释放库存一次�
   await checked(rpc('prepare_paypal_capture', { payment_intent_id: intent.id, actor_id: buyer.userId }, undefined, true));
   await withRollback(database, async tx => {
     await tx`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
-    for (let i = 0; i < 2; i++) await tx`select public.expire_unpaid_orders(500,'2100-01-01'::timestamptz)`;
+    for (let i = 0; i < 2; i++) await tx`select public.expire_checkout_quotes(500,'2100-01-01'::timestamptz)`;
     const [row] = await tx`select status, (select on_hand from public.inventory_levels where variant_id=${f.variantId}::uuid limit 1) as stock,
       (select count(*)::int from public.inventory_movements where order_id=o.id and reason='cancel') as restocks
       from public.orders o where id=${order.id}::uuid`;
-    expect(row).toMatchObject({ status: 'cancelled', stock: 100, restocks: 1 });
+    expect(row).toMatchObject({ status: 'cancelled', stock: 100, restocks: 0 });
     const data = { status: 'completed', amount: '10.00', currency: 'USD', order_reference: intent.provider_reference };
     const [event] = await tx`select public.ingest_payment_provider_event('paypal',${crypto.randomUUID()},'api_response',
       'paypal.capture.api_result',${`CAPTURE${intent.id}`},false,now(),${await sha256Hex(JSON.stringify(data))},${JSON.stringify(data)}::text::jsonb) as result`;
@@ -166,7 +166,79 @@ test('即时订单及意图有不可延长的期限，过期释放库存一次�
     const [money] = await tx`select reconciliation_status from commerce.provider_money_movements where order_id=${order.id}::uuid`;
     expect(money.reconciliation_status).toBe('action_required');
   });
-  expect(await stockOf(f.sku)).toBe(99); // The time-travel experiment rolled back.
+  expect(await stockOf(f.sku)).toBe(100); // The time-travel experiment rolled back; still reserved, never deducted.
+});
+
+for (const terminal of ['paid', 'cancelled', 'expired'] as const) {
+  test(`V2 ${terminal} 后同键重放保留订单、报价和期限，不重新预占；显式 Quote 同键独立`, async () => {
+    const f = await fixture();
+    const command = { items: [{ variant_id: f.variantId, quantity: 3 }], address: TEST_ADDRESS, idempotency_key: crypto.randomUUID() };
+    const explicit = await checked<{ id: string }>(rpc('create_checkout_quote', {
+      ...command, items: [{ variant_id: f.variantId, quantity: 2 }],
+    }, buyer.token));
+    const order = await checked<{ id: string; payment_expires_at: string }>(rpc('create_order_v2', command, buyer.token));
+    const quote = await checked<{ id: string; expires_at: string; lines: Array<{ id: string; quantity: number }> }>(rpc('get_order_checkout_quote', { order_id: order.id }, buyer.token));
+    expect(quote.id).not.toBe(explicit.id);
+    expect(quote.expires_at).toBe(order.payment_expires_at);
+    expect(quote.lines).toHaveLength(1);
+    expect(quote.lines[0].quantity).toBe(3);
+    expect(await checked(rpc('get_inventory_availability', { variant_id: f.variantId }, admin.token)))
+      .toMatchObject({ on_hand: 100, reserved: 5, available: 95 });
+    await checked(rpc('cancel_checkout_quote', { quote_id: explicit.id }, buyer.token));
+    const verifyReplay = async () => {
+      const replay = await checked(rpc('create_order_v2', command, buyer.token));
+      expect(replay).toMatchObject({ id: order.id, payment_expires_at: order.payment_expires_at,
+        status: terminal === 'paid' ? 'open' : 'cancelled', financial_status: terminal === 'paid' ? 'paid' : 'pending' });
+      const [counts] = await database`select count(*)::int quotes,
+        count(*) filter (where order_id=${order.id}::uuid)::int linked
+        from commerce.checkout_quotes where customer_id=${buyer.customerId}::uuid`;
+      expect(counts).toEqual({ quotes: 2, linked: 1 });
+    };
+    if (terminal === 'expired') {
+      // Expire only this owned checkout; the other quotes are protected by SKIP LOCKED.
+      await withRollback(database, async tx => {
+        await tx`select 1 from commerce.checkout_quotes where id<>${quote.id}::uuid order by id for update`;
+        await checked(rpc('expire_checkout_quotes', { as_of: '2100-01-01' }, undefined, true));
+        await verifyReplay();
+      });
+    } else {
+      await checked(rpc(terminal === 'paid' ? 'mark_order_paid' : 'cancel_order', { order_id: order.id }, admin.token));
+      await verifyReplay();
+    }
+    expect(await checked(rpc('get_inventory_availability', { variant_id: f.variantId }, admin.token)))
+      .toMatchObject({ on_hand: terminal === 'paid' ? 97 : 100, reserved: 0, available: terminal === 'paid' ? 97 : 100 });
+    const movements = await checked(api(`/rest/v1/inventory_movements?order_id=eq.${order.id}&select=delta,reason`, { service: true }));
+    expect(movements).toEqual(terminal === 'paid' ? [{ delta: -3, reason: 'order' }] : []);
+  });
+}
+
+test('便捷转单失败回滚已创建的 Quote、预占和幂等记录；原键可重试', async () => {
+  const f = await fixture(), key = crypto.randomUUID();
+  await withRollback(database, async tx => {
+    await tx`select set_config('request.jwt.claims',${claims(buyer.userId)},true)`;
+    // Force failure AFTER the internal Quote exists, at the real order INSERT.
+    await tx.unsafe(`alter table public.orders add constraint review_reject_order
+      check (customer_id <> '${buyer.customerId}'::uuid) not valid`);
+    await tx`savepoint conversion`;
+    const create = () => tx`select public.create_order_v2(
+      ${JSON.stringify([{ variant_id: f.variantId, quantity: 3 }])}::text::jsonb, ${key},
+      ${JSON.stringify(TEST_ADDRESS)}::text::jsonb) as result`;
+    await expect(Promise.resolve(create())).rejects.toThrow('review_reject_order');
+    await tx`rollback to savepoint conversion`;
+    const [counts] = await tx`select
+      (select count(*)::int from commerce.checkout_quotes where customer_id=${buyer.customerId}::uuid) quotes,
+      (select count(*)::int from commerce.command_idempotency where subject_id=${buyer.customerId}::uuid) commands,
+      (select count(*)::int from public.orders where customer_id=${buyer.customerId}::uuid) orders`;
+    expect(counts).toEqual({ quotes: 0, commands: 0, orders: 0 });
+    await tx`alter table public.orders drop constraint review_reject_order`;
+    const [created] = await create();
+    const [replayed] = await create();
+    expect(replayed.result.id).toBe(created.result.id);
+    const [stock] = await tx`select on_hand, private.active_reserved_quantity(variant_id,location_id,null) reserved
+      from public.inventory_levels where variant_id=${f.variantId}::uuid`;
+    expect(stock).toEqual({ on_hand: 100, reserved: 3 });
+    await tx`set constraints all immediate`;
+  });
 });
 
 test('NaN/Infinity 不能写商品或促销；所有业务 numeric 列均有有限值约束', async () => {
@@ -191,7 +263,7 @@ test('NaN/Infinity 不能写商品或促销；所有业务 numeric 列均有有�
   expect(order.total).toBe(10);
 });
 
-test('订单行乘积与头行守恒在提交时兜底；同一事务的完整改价仍可付款且账本平衡', async () => {
+test('便捷下单冻结订单行与头行，即使同一事务完整改价也拒绝；原金额仍可付款', async () => {
   const order = await fixtureOrder(await fixture(), buyer, 1, false);
   expect((await api(`/rest/v1/order_items?id=eq.${order.itemId}`, {
     service: true, method: 'PATCH', body: { quantity: 2 },
@@ -201,17 +273,17 @@ test('订单行乘积与头行守恒在提交时兜底；同一事务的完整�
     ['orders', order.id, { subtotal: 100, total: 100 }],
   ] as const) {
     const result = await api(`/rest/v1/${table}?id=eq.${id}`, { service: true, method: 'PATCH', body });
-    expect(result.status).toBe(400); expect(result.data).toMatchObject({ message: expect.stringContaining('line totals do not match') });
+    expect(result.status).toBe(400); expect(result.data).toMatchObject({ message: expect.stringContaining('immutable') });
   }
-  await database.begin(async tx => {
+  await expect(database.begin(async tx => {
     await tx`select 1 from public.orders where id=${order.id}::uuid for update`;
     await tx`update public.order_items set unit_price=20,total=20 where id=${order.itemId}::uuid`;
     await tx`update public.orders set subtotal=20,total=20 where id=${order.id}::uuid`;
-  });
+  })).rejects.toThrow('immutable');
   await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
   const ledger = await checked<{ balances: { is_balanced: boolean; captured: number } }>(rpc('get_order_ledger', { order_id: order.id }, buyer.token));
   expect(ledger.balances.is_balanced).toBe(true);
-  expect(ledger.balances.captured).toBe(20);
+  expect(ledger.balances.captured).toBe(10);
 });
 
 test('Outbox 重领使用原租约期限；同 worker 的旧 token、错误 owner、过期确认均不能提交', async () => {

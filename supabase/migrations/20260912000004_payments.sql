@@ -666,7 +666,6 @@ begin
       and i.status in ('requires_action', 'processing')
   ) then
     if new.status = 'cancelled' and old.status <> 'cancelled'
-       and current_setting('commerce.expiring_order', true) is distinct from old.id::text
        and not exists (
          -- Expiry must remain bounded even when the provider outcome is unknown.
          -- expire_checkout_quotes transitions the quote before cancelling its order.

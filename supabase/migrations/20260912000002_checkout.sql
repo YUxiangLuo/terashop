@@ -369,8 +369,6 @@ CREATE FUNCTION private.cancel_order(order_id uuid, reason text DEFAULT NULL::te
     AS $$
 declare
   v_order public.orders;
-  v_stock record;
-  v_on_hand integer;
 begin
   select * into v_order
   from public.orders o
@@ -394,31 +392,7 @@ begin
     raise exception 'order already has fulfillments';
   end if;
 
-  perform private.lock_order_inventory(array[v_order.id]);
-  for v_stock in
-    select im.variant_id, im.location_id, (-sum(im.delta))::integer as quantity
-    from public.inventory_movements im
-    where im.order_id = v_order.id
-      and im.reason = 'order'
-      and im.delta < 0
-    group by im.variant_id, im.location_id order by im.variant_id, im.location_id
-  loop
-    insert into public.inventory_levels (variant_id, location_id, on_hand)
-    values (v_stock.variant_id, v_stock.location_id, 0)
-    on conflict on constraint inventory_levels_pkey do nothing;
-
-    update public.inventory_levels il
-    set on_hand = il.on_hand + v_stock.quantity
-    where il.variant_id = v_stock.variant_id
-      and il.location_id = v_stock.location_id
-    returning il.on_hand into v_on_hand;
-
-    insert into public.inventory_movements
-      (variant_id, location_id, delta, on_hand_after, reason, order_id, actor_id)
-    values (v_stock.variant_id, v_stock.location_id, v_stock.quantity, v_on_hand,
-            'cancel', v_order.id, auth.uid());
-  end loop;
-
+  -- Unpaid orders have only a Quote reservation; the status trigger releases it.
   delete from public.discount_redemptions dr where dr.order_id = v_order.id;
   update public.promotions p
   set used_count = greatest(p.used_count - 1, 0)
@@ -966,188 +940,6 @@ begin
   values (p_order_id, auth.uid(), 'inventory_reservation_consumed',
           jsonb_build_object('checkout_quote_id', v_quote.id));
   return true;
-end;
-$$;
-
-CREATE FUNCTION private.create_order(items jsonb, address jsonb DEFAULT NULL::jsonb, address_id uuid DEFAULT NULL::uuid, shipping_method_id uuid DEFAULT NULL::uuid, discount_code text DEFAULT NULL::text, note text DEFAULT NULL::text) RETURNS public.orders
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_uid uuid := private.require_customer(); -- customer identity; audit actors remain auth.uid()
-  v_item jsonb;
-  v_variant record;
-  v_qty integer;
-  v_location_id uuid;
-  v_on_hand integer;
-  v_address jsonb;
-  v_price jsonb;
-  v_line jsonb;
-  v_promo jsonb;
-  v_code_used text;
-  v_order public.orders;
-begin
-  if v_uid is null then
-    raise exception 'not authenticated';
-  end if;
-  if items is null or jsonb_typeof(items) <> 'array' or jsonb_array_length(items) = 0 then
-    raise exception 'items must be a non-empty array';
-  end if;
-
-  items := private.canonical_checkout_lines(items);
-  if jsonb_array_length(items) > 50 or (select sum((e->>'quantity')::integer) from jsonb_array_elements(items) e) > 100 then
-    raise exception 'checkout is limited to 50 lines and 100 units';
-  end if;
-  perform private.assert_checkout_capacity(v_uid);
-  v_address := private.resolve_checkout_address(v_uid, address, address_id);
-
-  select id into v_location_id from public.locations where is_default and is_active limit 1;
-
-  -- ----- 第 1 阶段：按 variant_id 排序后锁变体 + 库存行（固定顺序防死锁） -----
-  for v_item in
-    select jsonb_build_object(
-      'variant_id', e.value ->> 'variant_id',
-      'quantity', sum((e.value ->> 'quantity')::int)) as line
-    from jsonb_array_elements(items) e
-    group by e.value ->> 'variant_id'
-    order by e.value ->> 'variant_id'
-  loop
-    v_qty := coalesce((v_item ->> 'quantity')::int, 0);
-    if v_qty <= 0 then
-      raise exception 'quantity must be positive';
-    end if;
-
-    select v.*, p.status as product_status
-    into v_variant
-    from public.product_variants v
-    join public.products p on p.id = v.product_id
-    where v.id = (v_item ->> 'variant_id')::uuid
-    -- Stabilize pricing without conflicting with inventory-movement FK KEY SHARE locks.
-    for no key update of v;
-
-    if not found or not v_variant.is_active or v_variant.product_status <> 'active' then
-      raise exception 'variant not available: %', v_item ->> 'variant_id';
-    end if;
-
-    if v_variant.track_inventory then
-      if v_location_id is null then
-        raise exception 'no default location configured';
-      end if;
-      insert into public.inventory_levels (variant_id, location_id, on_hand)
-      values (v_variant.id, v_location_id, 0)
-      on conflict on constraint inventory_levels_pkey do nothing;
-
-      select il.on_hand into v_on_hand
-      from public.inventory_levels il
-      where il.variant_id = v_variant.id and il.location_id = v_location_id
-      for update;
-
-      if v_on_hand < v_qty then
-        raise exception 'insufficient stock for "%" (have %, need %)',
-          (select name from public.products where id = v_variant.product_id), v_on_hand, v_qty;
-      end if;
-    end if;
-  end loop;
-
-  -- ----- 第 1.5 阶段：锁定本次涉及的促销行，串行化用量校验与计数 -----
-  -- 输码促销按码锁；自动促销只锁有 usage_limit 的（无上限的自动促销无需串行）
-  perform 1
-  from public.promotions p
-  where p.is_active
-    and (p.starts_at is null or now() >= p.starts_at)
-    and (p.ends_at is null or now() <= p.ends_at)
-    and (
-      (discount_code is not null and p.code = upper(discount_code))
-      or (p.code is null and p.usage_limit is not null)
-    )
-  order by p.id
-  for update of p;
-
-  -- ----- 第 2 阶段：计价（与预览完全同一引擎；此时已在锁内，用量校验可靠） -----
-  v_price := public.price_checkout(items, v_address, shipping_method_id, discount_code);
-
-  v_code_used := (select p ->> 'code'
-                  from jsonb_array_elements(v_price -> 'promotions') p
-                  where p ->> 'code' is not null
-                  limit 1);
-
-  -- ----- 第 3 阶段：落账 -----
-  insert into public.orders (
-    customer_id, email, tax_context,
-    subtotal, discount_total, shipping_total, tax_total, total,
-    shipping_address, shipping_method_id, shipping_method_name,
-    discount_code, customer_note
-  ) values (
-    v_uid,
-    private.checkout_contact_email(v_uid),
-    v_price -> 'tax_context',
-    (v_price ->> 'subtotal')::numeric,
-    (v_price ->> 'discount_total')::numeric,
-    (v_price ->> 'shipping_total')::numeric,
-    (v_price ->> 'tax_total')::numeric,
-    (v_price ->> 'total')::numeric,
-    v_address,
-    (v_price ->> 'shipping_method_id')::uuid,
-    v_price ->> 'shipping_method_name',
-    v_code_used, note
-  )
-  returning * into v_order;
-
-  for v_line in select * from jsonb_array_elements(v_price -> 'lines') loop
-    insert into public.order_items (
-      order_id, variant_id, product_id, sku, name, variant_title,
-      options, attributes, unit_price, quantity, discount_total, total
-    ) values (
-      v_order.id,
-      (v_line ->> 'variant_id')::uuid,
-      (v_line ->> 'product_id')::uuid,
-      v_line ->> 'sku',
-      v_line ->> 'name',
-      v_line ->> 'variant_title',
-      v_line -> 'options',
-      v_line -> 'attributes',
-      (v_line ->> 'unit_price')::numeric,
-      (v_line ->> 'quantity')::int,
-      (v_line ->> 'discount_total')::numeric,
-      round((v_line ->> 'unit_price')::numeric * (v_line ->> 'quantity')::int, 2)
-    );
-
-  end loop;
-
-  -- One inventory mutation per resource, regardless of commercial line count.
-  for v_item in select value from jsonb_array_elements(private.canonical_variant_quantities(items)) loop
-    if (select track_inventory from public.product_variants where id = (v_item ->> 'variant_id')::uuid) then
-      update public.inventory_levels set on_hand = on_hand - (v_item ->> 'quantity')::integer
-      where variant_id = (v_item ->> 'variant_id')::uuid and location_id = v_location_id
-      returning on_hand into v_on_hand;
-      insert into public.inventory_movements
-        (variant_id, location_id, delta, on_hand_after, reason, order_id, actor_id)
-      values ((v_item ->> 'variant_id')::uuid, v_location_id,
-        -(v_item ->> 'quantity')::integer, v_on_hand, 'order', v_order.id, auth.uid());
-    end if;
-  end loop;
-
-  -- 促销落账 + 用量 + 输码核销
-  for v_promo in select * from jsonb_array_elements(v_price -> 'promotions') loop
-    insert into public.order_promotions (order_id, promotion_id, name, code, amount, snapshot)
-    values (v_order.id, (v_promo ->> 'promotion_id')::uuid,
-            v_promo ->> 'name', v_promo ->> 'code', (v_promo ->> 'amount')::numeric, v_promo -> 'snapshot');
-
-    update public.promotions set used_count = used_count + 1
-    where id = (v_promo ->> 'promotion_id')::uuid;
-
-    if v_promo ->> 'code' is not null then
-      insert into public.discount_redemptions (promotion_id, customer_id, order_id)
-      values ((v_promo ->> 'promotion_id')::uuid, v_uid, v_order.id);
-    end if;
-  end loop;
-
-  perform private.store_order_pricing(v_order.id, v_price);
-  insert into public.order_events (order_id, actor_id, type, data)
-  values (v_order.id, auth.uid(), 'order_created',
-          jsonb_build_object('total', v_order.total, 'promotions', v_price -> 'promotions'));
-
-  return v_order;
 end;
 $$;
 
@@ -2019,17 +1811,20 @@ CREATE FUNCTION public.create_order(items jsonb, address jsonb DEFAULT NULL::jso
     SET search_path TO ''
     AS $$
 declare
-  v_order public.orders;
+  v_quote jsonb;
 begin
-  v_order := private.create_order(
+  -- This convenience command creates and converts a Quote in one transaction.
+  -- v2 owns order-command idempotency; its retries never reach this random key.
+  v_quote := public.create_checkout_quote(
     create_order.items,
+    gen_random_uuid()::text,
     private.normalize_checkout_address(create_order.address),
     create_order.address_id,
     create_order.shipping_method_id,
     create_order.discount_code,
     create_order.note
   );
-  return private.storefront_order_json(v_order);
+  return public.create_order_from_quote((v_quote ->> 'id')::uuid);
 end;
 $$;
 
@@ -2317,33 +2112,6 @@ begin
     v_count := v_count + 1;
   end loop;
   return jsonb_build_object('expired_count', v_count, 'quote_ids', to_jsonb(v_ids));
-end;
-$$;
-
--- Separate transaction from Quote expiry: never acquire Quote locks after inventory.
-CREATE FUNCTION public.expire_unpaid_orders(max_orders integer DEFAULT 100, as_of timestamptz DEFAULT now()) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare
-  v_id uuid;
-  v_ids uuid[];
-begin
-  if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
-  if max_orders is null or max_orders not between 1 and 500 then raise exception 'max_orders must be between 1 and 500'; end if;
-  if as_of is null then raise exception 'as_of is required'; end if;
-  select coalesce(array_agg(locked.id order by locked.payment_expires_at, locked.id), '{}'::uuid[]) into v_ids
-  from (select o.id, o.payment_expires_at from public.orders o
-    where o.status = 'open' and o.financial_status = 'pending' and o.payment_expires_at <= as_of
-      and not exists (select 1 from commerce.checkout_quotes q where q.order_id = o.id)
-    order by o.payment_expires_at, o.id for update skip locked limit max_orders) locked;
-  -- Prelock the ENTIRE batch, not each order separately (which can reverse variant order).
-  perform private.lock_order_inventory(v_ids);
-  foreach v_id in array v_ids loop
-    -- Late provider success is retained for reconciliation, never settled on a cancelled order.
-    perform set_config('commerce.expiring_order', v_id::text, true);
-    perform private.cancel_order(v_id, 'order payment window expired');
-    perform set_config('commerce.expiring_order', '', true);
-  end loop;
-  return jsonb_build_object('expired_count', cardinality(v_ids), 'order_ids', to_jsonb(v_ids));
 end;
 $$;
 

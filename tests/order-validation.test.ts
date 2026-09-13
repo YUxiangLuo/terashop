@@ -44,7 +44,7 @@ for (const n of [1, 10, 50]) test(`${n} 行订单仅执行一次完整延迟校�
   });
 }, 15000);
 
-test('同事务两张订单分别校验；强制校验后再次改坏仍被拒绝', async () => {
+test('同事务两张订单分别校验；强制校验后再次修改仍重新校验', async () => {
   await withRollback(database, async sql => {
     const create = await fixture(sql); await sql`set local track_functions='all'`;
     const before = await calls(sql), first = await create(), second = await create();
@@ -52,31 +52,29 @@ test('同事务两张订单分别校验；强制校验后再次改坏仍被拒�
     expect(await calls(sql) - before).toBe(2);
     for (const id of [first.id, second.id]) {
       await sql`set constraints all deferred`;
-      await sql`savepoint invalid_edit`;
-      await sql`update public.orders set subtotal=subtotal+1,total=total+1 where id=${id}::uuid`;
-      await expect(Promise.resolve(sql`set constraints all immediate`)).rejects.toThrow('order line totals');
-      await sql`rollback to savepoint invalid_edit`;
-      await sql`release savepoint invalid_edit`;
+      const checkedBefore = await calls(sql);
+      await sql`update public.orders set admin_note='revalidate' where id=${id}::uuid`;
+      await sql`set constraints all immediate`;
+      expect(await calls(sql) - checkedBefore).toBe(1);
     }
     await sql`set constraints all immediate`;
   });
 });
 
-test('保存点回滚不能留下去重标记而吞掉后续非法改动', async () => {
+test('保存点回滚不能留下去重标记而吞掉后续校验', async () => {
   await withRollback(database, async sql => {
     const create = await fixture(sql), order = await create();
+    await sql`set local track_functions='all'`;
     await sql`set constraints all immediate`;
     await sql`set constraints all deferred`;
     await sql`savepoint first_edit`;
     await sql`update public.orders set admin_note='rolled back' where id=${order.id}::uuid`;
     await sql`rollback to savepoint first_edit`;
     await sql`release savepoint first_edit`;
-    await sql`savepoint invalid_edit`;
-    await sql`update public.orders set subtotal=subtotal+1,total=total+1 where id=${order.id}::uuid`;
-    await expect(Promise.resolve(sql`set constraints all immediate`)).rejects.toThrow('order line totals');
-    await sql`rollback to savepoint invalid_edit`;
-    await sql`release savepoint invalid_edit`;
+    const before = await calls(sql);
+    await sql`update public.orders set admin_note='persisted' where id=${order.id}::uuid`;
     await sql`set constraints all immediate`;
+    expect(await calls(sql) - before).toBe(1);
   });
 });
 

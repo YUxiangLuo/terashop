@@ -80,7 +80,15 @@ test('拒绝未声明商业字段、伪造 line_key 及无界/非文本属性；
     service: true, method: 'PATCH', body: { attributes: { engraving: false } },
   });
   expect(invalid.status).toBe(400);
-  expect(invalid.data).toMatchObject({ code: '23514' });
+  expect(invalid.data).toMatchObject({ code: 'P0001', message: 'quoted order items are immutable until payment' });
+  // Exercise the table CHECK at initial construction too; immutability must not
+  // mask a missing attributes constraint on a newly inserted line.
+  await expect(withRollback(database, async sql => {
+    const [header] = await sql`insert into public.orders(customer_id,email,subtotal,total,shipping_address)
+      values (${buyer.customerId}::uuid,'check@example.invalid',10,10,${JSON.stringify(TEST_ADDRESS)}::text::jsonb) returning id`;
+    await sql`insert into public.order_items(order_id,variant_id,name,unit_price,quantity,total,attributes)
+      values (${header.id}::uuid,${f.variantId}::uuid,'Invalid attributes',10,1,10,'{"engraving":false}')`;
+  })).rejects.toMatchObject({ errno: '23514' });
   const generated = await api(`/rest/v1/order_items?order_id=eq.${order.id}`, {
     service: true, method: 'PATCH', body: { line_key: '0'.repeat(64) },
   });
@@ -171,10 +179,12 @@ test('不同商业行不能各自绕过库存总量与 50 行上限，取消只�
     items, address: TEST_ADDRESS, idempotency_key: crypto.randomUUID(),
   }, buyer.token)).status).toBe(400);
   const order = await checked<{ id: string }>(rpc('create_order', { items: cart(f.variantId), address: TEST_ADDRESS }, buyer.token));
-  expect(await stockOf(f.sku)).toBe(98);
+  expect(await stockOf(f.sku)).toBe(100);
+  expect((await checked<{ reserved: number }>(rpc('get_inventory_availability', { variant_id: f.variantId }, admin.token))).reserved).toBe(2);
   await checked(rpc('cancel_order', { order_id: order.id }, buyer.token));
   await rpc('cancel_order', { order_id: order.id }, buyer.token);
   expect(await stockOf(f.sku)).toBe(100);
+  expect((await checked<{ reserved: number }>(rpc('get_inventory_availability', { variant_id: f.variantId }, admin.token))).reserved).toBe(0);
 });
 
 for (const quoted of [true, false]) {
@@ -190,16 +200,13 @@ for (const quoted of [true, false]) {
     try {
       await withRollback(database, async sql => {
         await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
-        for (let i = 0; i < 2; i++) {
-          if (quoted) await sql`select public.expire_checkout_quotes(500,'2100-01-01'::timestamptz)`;
-          else await sql`select public.expire_unpaid_orders(500,'2100-01-01'::timestamptz)`;
-        }
+        for (let i = 0; i < 2; i++) await sql`select public.expire_checkout_quotes(500,'2100-01-01'::timestamptz)`;
         const [row] = await sql`select o.status, il.on_hand,
           (select sum(delta)::int from public.inventory_movements where order_id=o.id and reason='cancel') returned
           from public.orders o join public.inventory_levels il on il.variant_id=${f.variantId}::uuid where o.id=${order.id}::uuid`;
-        expect(row).toEqual({ status: 'cancelled', on_hand: 100, returned: quoted ? null : 2 });
+        expect(row).toEqual({ status: 'cancelled', on_hand: 100, returned: null });
       });
-      expect(await stockOf(f.sku)).toBe(quoted ? 100 : 98);
+      expect(await stockOf(f.sku)).toBe(100);
     } finally { await checked(rpc('cancel_order', { order_id: order.id }, buyer.token)); }
   });
 }

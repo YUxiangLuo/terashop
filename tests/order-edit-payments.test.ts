@@ -44,19 +44,29 @@ for (const [provider, bound] of [['paypal', false], ['paypal', true]] as const) 
   });
 }
 
-test('无意图时仍可改价；V2 兼容订单创建意图后也受同样约束', async () => {
-  const order = await checked<{ id: string }>(rpc('create_order_v2', {
+test('V2 订单创建时即冻结快照；改价需取消并创建新 checkout', async () => {
+  const order = await checked<{ id: string; total: number; shipping_address: { country: string } }>(rpc('create_order_v2', {
     idempotency_key: crypto.randomUUID(), items: [{ variant_id: fixture.variantId, quantity: 1 }], address: TEST_ADDRESS,
   }, buyer.token));
-  const changed = await checked<{ total: number }>(rpc('update_order_address', {
+  const changed = await rpc('update_order_address', {
     order_id: order.id, address: OTHER_ADDRESS,
+  }, buyer.token);
+  expect(changed.status).toBe(400);
+  expect(changed.data).toMatchObject({ message: expect.stringContaining('immutable') });
+  const [unchanged] = await checked<Array<{ total: number; shipping_address: { country: string } }>>(api(
+    `/rest/v1/orders?id=eq.${order.id}&select=total,shipping_address`, { token: buyer.token },
+  ));
+  expect(unchanged).toEqual({ total: order.total, shipping_address: order.shipping_address });
+  await checked(rpc('cancel_order', { order_id: order.id }, buyer.token));
+  const replacement = await checked<{ id: string; total: number; shipping_address: { country: string } }>(rpc('create_order_v2', {
+    idempotency_key: crypto.randomUUID(), items: [{ variant_id: fixture.variantId, quantity: 1 }], address: OTHER_ADDRESS,
   }, buyer.token));
-  expect(changed.total).toBe(10);
+  expect(replacement.id).not.toBe(order.id);
+  expect(replacement.shipping_address.country).toBe('CA');
   const intent = await checked<{ amount: number }>(rpc('create_payment_intent_for_customer', {
-    order_id: order.id, actor_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
+    order_id: replacement.id, actor_id: buyer.userId, provider: 'paypal', idempotency_key: crypto.randomUUID(),
   }, undefined, true));
-  expect(intent.amount).toBe(10);
-  expect((await rpc('update_order_address', { order_id: order.id, address: TEST_ADDRESS }, buyer.token)).status).toBe(400);
+  expect(intent.amount).toBe(replacement.total);
 });
 
 test('地址簿引用不能穿透锁；service role 也不能直接改商业快照或商品行', async () => {
@@ -78,7 +88,7 @@ test('地址簿引用不能穿透锁；service role 也不能直接改商业快�
   expect(item.data).toMatchObject({ message: expect.stringContaining('payment intent') });
 });
 
-test('PayPal declined 后可改价并创建新金额意图', async () => {
+test('PayPal declined 后原订单仍冻结，取消后新 checkout 使用新地址和新意图', async () => {
   const order = await fixtureOrder(fixture, buyer, 1, false);
   const intent = await fixtureIntent(order, buyer);
   const result = await paymentEvent('paypal', 'PAYMENT.CAPTURE.DECLINED', `CAPTURE${intent.id}`, {
@@ -86,13 +96,19 @@ test('PayPal declined 后可改价并创建新金额意图', async () => {
     order_reference: intent.provider_reference, metadata: { tera_payment_intent_id: intent.id },
   });
   expect(result.outcome).toBe('failed');
-  expect((await rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, buyer.token)).status).toBe(200);
-  const next = await fixtureIntent(order, buyer);
+  const edit = await rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, buyer.token);
+  expect(edit.status).toBe(400);
+  expect(edit.data).toMatchObject({ message: expect.stringContaining('immutable') });
+  await checked(rpc('cancel_order', { order_id: order.id }, buyer.token));
+  const replacement = await checked<{ id: string; total: number; currency: string }>(rpc('create_order_v2', {
+    idempotency_key: crypto.randomUUID(), items: [{ variant_id: fixture.variantId, quantity: 1 }], address: OTHER_ADDRESS,
+  }, buyer.token));
+  const next = await fixtureIntent({ ...replacement, itemId: '', quoteId: null }, buyer);
   expect(next.id).not.toBe(intent.id);
-  expect(next.amount).toBe(10);
+  expect(next.amount).toBe(replacement.total);
 });
 
-for (const first of ['intent', 'edit']) {
+for (const first of ['intent', 'admin_note']) {
   test(`受控并发：${first} 先取得订单锁，不会生成旧金额意图与新金额订单`, async () => {
     const order = await fixtureOrder(fixture, buyer, 1, false);
     const key = crypto.randomUUID();
@@ -104,25 +120,20 @@ for (const first of ['intent', 'edit']) {
         await transaction`select public.create_payment_intent_for_customer(
           order_id => ${order.id}::uuid, actor_id => ${buyer.userId}::uuid,
           provider => 'paypal', idempotency_key => ${key})`;
-      } else {
-        await transaction`select public.update_order_address(
-          order_id => ${order.id}::uuid, address => ${JSON.stringify(OTHER_ADDRESS)}::text::jsonb)`;
-      }
-    }, () => first === 'intent'
-      ? rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, buyer.token)
-      : rpc('create_payment_intent_for_customer', {
-          order_id: order.id, actor_id: buyer.userId, provider: 'paypal', idempotency_key: key,
-        }, undefined, true));
-    expect(result.status).toBe(first === 'intent' ? 400 : 200);
-    const [row] = await database`
-      select o.total, i.amount from public.orders o join commerce.payment_intents i on i.order_id = o.id
-      where o.id = ${order.id}::uuid
-    `;
-    expect(String(row.total)).toBe(String(row.amount));
+      } else await transaction`update public.orders set admin_note='lock holder' where id=${order.id}::uuid`;
+    }, () => rpc('update_order_address', { order_id: order.id, address: OTHER_ADDRESS }, buyer.token));
+    expect(result.status).toBe(400);
+    const [row] = await database`select total, shipping_address, admin_note from public.orders where id=${order.id}::uuid`;
+    expect(row.shipping_address.country).toBe('US');
+    expect(row.admin_note).toBe(first === 'admin_note' ? 'lock holder' : null);
+    if (first === 'intent') {
+      const [payment] = await database`select amount from commerce.payment_intents where order_id=${order.id}::uuid`;
+      expect(String(row.total)).toBe(String(payment.amount));
+    }
   });
 }
 
-test('直接商品行写入在订单锁竞争时快速失败，不引入 order/item 锁反转', async () => {
+test('受支持的 admin_note 持有订单锁时，受保护商品行写入快速失败且事实不变', async () => {
   const order = await fixtureOrder(fixture, buyer, 1, false);
   await database.begin(async transaction => {
     await transaction`select 1 from public.orders where id = ${order.id}::uuid for update`;
@@ -131,7 +142,8 @@ test('直接商品行写入在订单锁竞争时快速失败，不引入 order/i
     });
     expect(result.status).toBe(409);
     expect(result.data).toMatchObject({ message: expect.stringContaining('order is busy') });
-    // The failed writer must have released its item lock, so the command can proceed.
-    await transaction`update public.order_items set name = 'serialized command' where id = ${order.itemId}::uuid`;
+    await transaction`update public.orders set admin_note = 'serialized command' where id = ${order.id}::uuid`;
   });
+  const [item] = await database`select name from public.order_items where id=${order.itemId}::uuid`;
+  expect(item.name).not.toBe('concurrent direct write');
 });

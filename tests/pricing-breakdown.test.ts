@@ -201,7 +201,7 @@ test('已支付快照不随税率、运费或优惠改名/改价变化；保留�
   }
 });
 
-test('报价税务依据变化即拒绝转单，即时未付订单改国家只重建税快照', async () => {
+test('报价税务依据变化即拒绝转单，即时未付订单也冻结税务快照', async () => {
   const quote = await checked<Price>(rpc('create_checkout_quote', { ...input(), idempotency_key: crypto.randomUUID() }, buyer.token));
   try {
     await patch('tax_rates', taxId, { rate: 0.2 });
@@ -213,13 +213,15 @@ test('报价税务依据变化即拒绝转单，即时未付订单改国家只�
   }
   const order = await create(false); const before = await pricing(order.id);
   try {
-    await checked(rpc('update_order_address', { order_id: order.id, address: { ...address, country: 'GB' } }, buyer.token));
-    const after = await pricing(order.id); conserved(after);
-    expect(after.tax_context.status).toBe('no_rule'); expect(after.tax_total).toBe(0);
-    expect(after.shipping_line!.id).toBe(before.shipping_line!.id);
-    expect(after.promotions).toEqual(before.promotions);
-    expect(after.lines.map(l => [l.id, l.discount_allocations])).toEqual(before.lines.map(l => [l.id, l.discount_allocations]));
+    const edit = await rpc('update_order_address', { order_id: order.id, address: { ...address, country: 'GB' } }, buyer.token);
+    expect(edit.status).toBe(400);
+    expect(edit.data).toMatchObject({ message: expect.stringContaining('immutable') });
+    expect(await pricing(order.id)).toEqual(before);
   } finally { await checked(rpc('cancel_order', { order_id: order.id }, buyer.token)); }
+  const replacement = await create(false, { address: { ...address, country: 'GB' } });
+  const after = await pricing(replacement.id); conserved(after);
+  expect(after.tax_context.status).toBe('no_rule'); expect(after.tax_total).toBe(0);
+  await checked(rpc('cancel_order', { order_id: replacement.id }, buyer.token));
 });
 
 test('关系金额在提交时校验，错税/漏税、配送/优惠头行错配和跨单归属全部回滚', async () => {
@@ -260,18 +262,19 @@ test('定价读取只对所有者/管理员/service 开放；支付意图或已�
   expect(rows).toHaveLength(5); for (const row of rows) expect(row).toEqual({ rls: true, readable: false, writable: false });
 });
 
-for (const first of ['intent', 'pricing']) test(`${first} 提交后旧 REPEATABLE READ 快照不能交错创建意图/改定价明细`, async () => {
+for (const first of ['intent', 'admin_note']) test(`${first} 提交后旧 REPEATABLE READ 快照不能改定价明细`, async () => {
   const order = await create(false);
+  const before = await pricing(order.id);
   try {
     const result = await staleAfterCommit(database, async tx => {
       await tx`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`;
-      if (first === 'intent') await tx`update commerce.order_discount_allocations set label='stale edit' where order_id=${order.id}::uuid`;
-      else await tx`select public.create_payment_intent_for_customer(${order.id}::uuid, ${buyer.userId}::uuid, 'paypal', ${crypto.randomUUID()})`;
+      await tx`update commerce.order_discount_allocations set label='stale edit' where order_id=${order.id}::uuid`;
     }, async () => {
       if (first === 'intent') await fixtureIntent(order, buyer);
-      else await database`update commerce.order_discount_allocations set label='committed edit' where order_id=${order.id}::uuid`;
+      else await database`update public.orders set admin_note='committed lock holder' where id=${order.id}::uuid`;
     });
     expect(result.error).toMatchObject({ errno: '40001' });
+    expect(await pricing(order.id)).toEqual(before);
   } finally { await checked(rpc('cancel_order', { order_id: order.id }, buyer.token)); }
 });
 

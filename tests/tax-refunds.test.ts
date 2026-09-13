@@ -17,23 +17,36 @@ afterAll(() => fixtures.run());
 
 // Retained from the original review; grouped by business domain.
 describe('修复：改地址重算税与运法校验', () => {
-  test('有测试税率的 US → 未配置税率的 CA：税与 total 同步更新', async () => {
+  test('有测试税率的 US → CA 必须取消重下，原税额与地址快照不变', async () => {
     const u = await signup();
     const { data: o } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
     const order = o as { id: string; tax_total: number; total: number };
-    resources.defer(() => checked(rpc('cancel_order', { order_id: order.id }, u.token)));
+    let cleanupOrderId = order.id;
+    resources.defer(() => checked(rpc('cancel_order', { order_id: cleanupOrderId }, u.token)));
     expect(Number(order.tax_total)).toBeCloseTo(1.29);   // 9.9 × 13%
 
-    const { data: after } = await rpc('update_order_address', {
+    const edit = await rpc('update_order_address', {
       order_id: order.id,
       address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Infinite Loop, CA' },
     }, u.token);
-    const updated = after as { shipping_address: { country: string }; tax_total: number; total: number };
-    expect(updated.shipping_address.country).toBe('CA');
-    expect(Number(updated.tax_total)).toBe(0);           // 本测试未配置 CA 税率
-    expect(Number(updated.total)).toBeCloseTo(9.9);      // 9.9 - 0 + 0 + 0
+    expect(edit.status).toBe(400);
+    expect(edit.data).toMatchObject({ message: expect.stringContaining('immutable') });
+    const [unchanged] = await checked<Array<{ shipping_address: { country: string }; tax_total: number; total: number }>>(api(
+      `/rest/v1/orders?id=eq.${order.id}&select=shipping_address,tax_total,total`, { token: u.token },
+    ));
+    expect(unchanged.shipping_address.country).toBe('US');
+    expect(Number(unchanged.tax_total)).toBeCloseTo(1.29);
+    await checked(rpc('cancel_order', { order_id: order.id }, u.token));
+    const replacement = await checked<{ id: string; shipping_address: { country: string }; tax_total: number; total: number }>(rpc('create_order', {
+      items: [{ variant_id: mugId, quantity: 1 }],
+      address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Infinite Loop, CA' },
+    }, u.token));
+    cleanupOrderId = replacement.id;
+    expect(replacement.shipping_address.country).toBe('CA');
+    expect(Number(replacement.tax_total)).toBe(0);
+    expect(Number(replacement.total)).toBeCloseTo(9.9);
   });
 
   test('改地址后原运法不支持新国家 → 拒绝', async () => {

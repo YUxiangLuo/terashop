@@ -136,7 +136,7 @@ describe('支付标记与订单完成', () => {
     const rows = await checked<Array<{ type: string }>>(api(
       `/rest/v1/order_events?order_id=eq.${order.id}&select=type&order=id`, { token: customer.token },
     ));
-    expect(rows.map(row => row.type)).toEqual(['order_created', 'payment_received', 'fulfillment_created', 'fulfillment_created']);
+    expect(rows.map(row => row.type)).toEqual(['order_created', 'inventory_reservation_consumed', 'payment_received', 'fulfillment_created', 'fulfillment_created']);
   });
 });
 

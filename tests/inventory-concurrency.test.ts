@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, fixtureIntent, paymentFixture, settleIntent } from './payment-fixtures';
-import { testDatabase, waitForBlockedCommand } from './database-concurrency';
+import { heldTransactionRace, testDatabase, waitForBlockedCommand } from './database-concurrency';
 
 const database = testDatabase();
 let admin: TestUser;
@@ -20,21 +20,30 @@ async function fixture() {
   const f = await paymentFixture(admin); products.push(f.productId); return f;
 }
 
-  for (const mode of ['manual', 'paypal', 'cancel', 'expiry'] as const)
+  for (const mode of ['manual', 'paypal'] as const)
   test(`${mode}: 逆序商品行回库与 Quote 受控交错均提交，不产生死锁或人工对账`, async () => {
     const variants = [await fixture(), await fixture()].sort((a, b) => a.variantId.localeCompare(b.variantId));
     const [a, b] = variants;
-    // The expiry batch encounters B's older order before A's: per-order locking is not enough.
-    const older = mode === 'expiry' ? await checked<{ id: string }>(rpc('create_order', {
-      items: [{ variant_id: b.variantId, quantity: 1 }], address: TEST_ADDRESS,
-    }, buyer.token)) : null;
-    const order = await checked<{ id: string }>(rpc('create_order', {
-      items: (older ? [a] : variants).map(v => ({ variant_id: v.variantId, quantity: 1 })), address: TEST_ADDRESS,
-    }, buyer.token));
-    // Give the B line the lower item UUID: refunds sort item IDs, quotes sort variant IDs.
+    // Assign adversarial IDs at INSERT, not by rewriting immutable order snapshots.
+    // Refunds sort item IDs, quotes sort variant IDs. Only our two variants are affected.
     const low = `00000000-0000-4000-8000-${crypto.randomUUID().slice(-12)}`;
     const high = `ffffffff-ffff-4fff-bfff-${crypto.randomUUID().slice(-12)}`;
-    await database`update public.order_items set id=case when variant_id=${b.variantId}::uuid then ${low}::uuid else ${high}::uuid end where order_id=${order.id}::uuid`;
+    let order: { id: string };
+    await database.unsafe(`create function private.review_quote_line_ids() returns trigger language plpgsql as $$
+      begin
+        if new.variant_id='${a.variantId}'::uuid then new.id:='${high}'::uuid;
+        elsif new.variant_id='${b.variantId}'::uuid then new.id:='${low}'::uuid; end if;
+        return new;
+      end $$`);
+    try {
+      await database.unsafe('create trigger review_quote_line_ids before insert on commerce.checkout_quote_lines for each row execute function private.review_quote_line_ids()');
+      order = await checked<{ id: string }>(rpc('create_order', {
+        items: variants.map(v => ({ variant_id: v.variantId, quantity: 1 })), address: TEST_ADDRESS,
+      }, buyer.token));
+    } finally {
+      await database.unsafe('drop trigger if exists review_quote_line_ids on commerce.checkout_quote_lines');
+      await database.unsafe('drop function private.review_quote_line_ids()');
+    }
     const refundItems = [{ order_item_id: low, quantity: 1 }, { order_item_id: high, quantity: 1 }];
     let refundEvent: { id: string; reference: string; hash: string; data: Record<string, unknown> } | null = null;
     if (mode === 'manual') {
@@ -75,10 +84,6 @@ async function fixture() {
       hookCreated = true;
       await database.unsafe(`create trigger inventory_levels_review_pause after update on public.inventory_levels for each row execute function private.review_pause_inventory()`);
       gateTransaction = database.begin(async tx => {
-        // Isolate the future-time worker from other test files. Its real SKIP LOCKED
-        // selection can only claim our two orders; no production filter is mocked.
-        if (older) await tx`select 1 from public.orders where status='open' and financial_status='pending'
-          and id<>${order.id}::uuid and id<>${older.id}::uuid order by id for update`;
         await tx`select pg_advisory_xact_lock(${gate}::bigint)`;
         const [row] = await tx`select pg_backend_pid() as pid`; gateReady.resolve(row.pid);
         await release.promise;
@@ -97,15 +102,6 @@ async function fixture() {
             'paypal.refund.api_result',${refundEvent.reference},false,clock_timestamp(),${refundEvent.hash},
             ${JSON.stringify(refundEvent.data)}::text::jsonb) as result`;
           return { completed: true, event: event.result };
-        }
-        if (mode === 'expiry') {
-          await tx`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
-          const [row] = await tx`select public.expire_unpaid_orders(500,'2100-01-01'::timestamptz) as result`;
-          return { completed: true, expiry: row.result };
-        }
-        if (mode === 'cancel') {
-          await tx`select public.cancel_order(${order.id}::uuid)`;
-          return { completed: true };
         }
         await tx`select public.refund_order(order_id=>${order.id}::uuid,
           items=>${JSON.stringify(refundItems)}::text::jsonb,restock=>true)`;
@@ -131,11 +127,8 @@ async function fixture() {
       expect(refundResult).toMatchObject({ completed: true });
       expect(quoteResult.status).toBe(200);
       expect((quoteResult.data as { lines: unknown[] }).lines).toHaveLength(4);
-      const unpaid = mode === 'cancel' || mode === 'expiry';
-      expect(row.financial_status).toBe(unpaid ? 'pending' : 'refunded');
-      expect(Number(row.refunded)).toBe(unpaid ? 0 : 20);
-      if (unpaid) expect(row.status).toBe('cancelled');
-      if (mode === 'expiry') expect(refundResult).toMatchObject({ expiry: { expired_count: 2 } });
+      expect(row.financial_status).toBe('refunded');
+      expect(Number(row.refunded)).toBe(20);
       expect([await stockOf(a.sku), await stockOf(b.sku)]).toEqual([100,100]);
       if (mode === 'paypal') {
         expect(refundResult).toMatchObject({ event: { status: 'processed', outcome: 'refunded' } });
@@ -151,3 +144,33 @@ async function fixture() {
       }
     }
   });
+
+for (const mode of ['cancel', 'expiry'] as const) {
+  test(`${mode}: 释放预占等待订单锁时，新 Quote 仍可预占剩余库存且无回库流水`, async () => {
+    const f = await fixture();
+    const order = await checked<{ id: string }>(rpc('create_order', {
+      items: [{ variant_id: f.variantId, quantity: 3 }], address: TEST_ADDRESS,
+    }, buyer.token));
+    const result = await heldTransactionRace(database, async tx => {
+      // Isolate the real SKIP LOCKED worker without expiring other test fixtures.
+      if (mode === 'expiry') await tx`select 1 from commerce.checkout_quotes
+        where order_id is distinct from ${order.id}::uuid order by id for update`;
+      await tx`select 1 from public.orders where id=${order.id}::uuid for update`;
+    }, () => mode === 'cancel'
+      ? rpc('cancel_order', { order_id: order.id }, buyer.token)
+      : rpc('expire_checkout_quotes', { as_of: '2100-01-01', max_quotes: 500 }, undefined, true),
+    async () => {
+      const quote = await checked<{ id: string }>(rpc('create_checkout_quote', {
+        items: [{ variant_id: f.variantId, quantity: 2 }], address: TEST_ADDRESS,
+        idempotency_key: crypto.randomUUID(),
+      }, buyer.token));
+      expect(quote.id).toBeString();
+    });
+    expect(result.status).toBe(200);
+    const [row] = await database`select o.status,
+      (select count(*)::int from public.inventory_movements where order_id=o.id) movements
+      from public.orders o where id=${order.id}::uuid`;
+    expect(row).toEqual({ status: 'cancelled', movements: 0 });
+    expect(await stockOf(f.sku)).toBe(100);
+  });
+}

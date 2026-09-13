@@ -1843,10 +1843,6 @@ export type Database = {
         Args: { as_of?: string; max_quotes?: number }
         Returns: Json
       }
-      expire_unpaid_orders: {
-        Args: { as_of?: string; max_orders?: number }
-        Returns: Json
-      }
       get_admin_customer: { Args: { customer_id: string }; Returns: Json }
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
