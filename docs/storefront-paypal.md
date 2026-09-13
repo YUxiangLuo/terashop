@@ -29,7 +29,7 @@ Quote、订单创建、支付尝试是不同幂等范围。每次网络重试复
 
 后端已提供接入合同；现有 Storefront 未接入卡支付，尚无真实 Sandbox 卡和浏览器支付验收结果。卡支付默认关闭，不包含保存卡、订阅或平台商户 onboarding。Visa/Mastercard 等卡种是否可用取决于商户 Expanded Checkout 审批、所在国家、币种和 PayPal SDK eligibility；配置一个 client ID 不等于获得卡收单资格。
 
-启用前设置 `PAYPAL_CARDS_ENABLED=true` 和 `PAYPAL_STOREFRONT_DOMAIN=shop.example`（实际站点 hostname，不带协议、端口或路径），保留既有 PayPal App 凭据、return/cancel URL、Webhook 和后台对账配置。`PAYMENT_ALLOWED_ORIGINS` 必须包含实际 Storefront origin；domain binding 不替代 CORS 或认证。正式开启前完成下方 Sandbox 清单。仍使用本仓库基线迁移/本地重置流程，不可对已有生产数据直接 reset。
+服务端开关、商户域名和 CORS 配置见 [支付与部署](../supabase/functions/README.md#paypal-orders-v2--payments-v2)。domain binding 不替代 CORS 或认证；正式开启前完成下方 Sandbox 清单。
 
 1. 在运行时加载 PayPal JS SDK v6，恢复 Supabase 用户会话（含匿名 Auth），不要在 SSG 构建时获取 token。
 2. `POST /functions/v1/paypal-client-token`，带用户 Bearer JWT，body 可为 `{}`。响应仅含 `{client_token, expires_in}`，带 `Cache-Control: no-store`。这个 token 来自 OAuth `response_type=client_token&intent=sdk_init`，不是支付 REST API 的服务器 access token。仅在内存中保留，过期重新获取，不写静态文件、日志或共享 CDN 缓存。页面初始化合并并发请求；部署网关必须对 token 和支付接口按 IP/用户限流，当前 handler 不提供分布式限流。
@@ -47,26 +47,17 @@ Quote、订单创建、支付尝试是不同幂等范围。每次网络重试复
 
 ### 服务端卡认证策略
 
-新 Capture 必须符合原有归属、金额、有效期及 `APPROVED` 检查，并且真实 `payment_source` 只有 `card`。钱包意图不能使用直接卡来源绕过卡开关。采用 `SCA_WHEN_REQUIRED`，不是每笔付款都必须挑战或发生责任转移：
+后端使用真实 PayPal Order 校验 `SCA_WHEN_REQUIRED`，不信任浏览器的认证结果；拒绝时可能返回 `paypal_card_authentication_required`，不能通过客户端跳过验证。完整允许／拒绝规则及已发生资金的处理见 [ADR-011 卡认证策略](architecture-decisions.md#服务端卡认证策略)。
 
-| PayPal 服务端 Order 的认证结果 | 本次策略 |
-| --- | --- |
-| 已 `APPROVED`、卡来源存在、没有 `authentication_result` | 允许 Capture（没有被要求 SCA 的情况） |
-| `liability_shift=YES/POSSIBLE`，若有 `authentication_status` 则为 `Y/A` | 允许 Capture |
-| `NO/UNKNOWN`、空认证对象、未知值，或显式认证失败/未完成 | 拒绝新 Capture，返回 `paypal_card_authentication_required` |
-
-这是偏保守的策略：存在认证结果但无法确认责任转移时可能拒绝 PayPal 本可受理的付款。上线前须用实际商户 Sandbox 的免挑战、豁免和未参与 3DS 卡测试校准，不应为了让测试通过而全局跳过校验。与 WooCommerce 直接放行所有 `APPROVED` Order 的实现不同，这里不忽略显式失败结果。
-
-认证拒绝发生在写 Capture 发送标记之前，不伪造失败资金事件。已经 GET 到 Capture 时则优先幂等入账；即使卡功能随后关闭、认证结果异常，也不能丢弃已经发生的资金事实。退款、Webhook、Capture 超时对账沿用已有实现。
-
-支付方式是数据库不可变字段，不是 metadata。相同幂等键变更方式会拒绝；用新键也不能绕过一个订单一个活跃意图。当前未提供同订单自动换钱包/卡的操作：选定方式后保持原尝试；明确放弃且订单允许取消时可取消订单并重新结账，否则保留订单等待恢复/对账。SDK 取消、失败和 HTTP 超时都不授权清 Capture 标记或另发扣款。
+当前未提供同订单自动换钱包/卡的操作：选定方式后保持原尝试；明确放弃且订单允许取消时可取消订单并重新结账，否则等待恢复/对账。SDK 取消、失败或 HTTP 超时均不授权另发扣款。
 
 ### Sandbox / 上线验收仍待完成
 
 - 确认商户 Expanded Checkout 资格；验证 token 的域绑定、实际 SDK v6 加载及 eligibility。
-- Visa/Mastercard 成功、免挑战、3DS 成功/失败/取消/超时；确认实际认证字段与上面的策略相符。
-- 测试移动端、返回页恢复、双击、多标签页、会话刷新/过期及浏览器 CSP。
-- Capture 响应丢失、Webhook 先到、重复通知、后台对账、退款及拒付运营流程。
+- Visa/Mastercard 成功、免挑战、豁免、未参与 3DS，以及 3DS 成功/失败/取消/超时；确认实际认证字段与 ADR 策略相符。
+- 钱包真实批准跳转、JS SDK 参数兼容性、资金来源失败恢复、Pending 到终态与商户资金记录。
+- 测试移动端/App Switch、返回页恢复、双击、多标签页、会话刷新/过期/丢失及浏览器 CSP。
+- 真实 Webhook postback、Capture 响应丢失、Webhook 先到、重复通知、后台对账、退款及拒付运营流程。
 - 部署网关限流、监控、日志脱敏和 PCI 合规检查；hosted fields 不等于无需商户合规责任。
 
 参考：[PayPal v6 3DS](https://developer.paypal.com/expanded/3d-secure)、[商户资格](https://developer.paypal.com/expanded/eligibility)、[WooCommerce v6 token](https://github.com/woocommerce/woocommerce-paypal-payments/blob/trunk/modules/ppcp-api-client/src/Authentication/SdkClientToken.php)、[WooCommerce Capture 验证](https://github.com/woocommerce/woocommerce-paypal-payments/blob/trunk/modules/ppcp-card-fields/src/Service/CardCaptureValidator.php)。
@@ -106,10 +97,6 @@ Quote、订单创建、支付尝试是不同幂等范围。每次网络重试复
 
 ## 后台恢复与上线验收
 
-`paypal-reconcile-captures` 只 GET 已绑定且曾发起 Capture 的 Order；没有浏览器重试和 Webhook 也能发现渠道资金。查询发现的结果复用 Inbox，订单过期的迟到资金只进入对账。它不为仅批准的 Order 扣款、不延长库存预占，也不自动退款。调度与监控见[支付与部署](../supabase/functions/README.md)。
-
-本地测试使用真实 Auth/PostgreSQL 与生产 handlers，仅 mock PayPal HTTP；覆盖响应丢失、数据库暂时失败、重复资金、领取隔离/冷却、错误资源、Pending、金额错配及迟到资金。
-
-获得 Sandbox 后仍必须验证：真实批准跳转、Webhook postback、JS SDK 创建参数兼容性、资金来源失败恢复、Pending 到终态、移动端/App Switch、刷新/多标签页/会话丢失和商户资金记录。Mock 不证明这些外部行为，也不代表已部署调度或生产支付可用。
+浏览器退出后由 Worker/Webhook 收尾；后台查询不会替仅批准的 Order 扣款，也不自动退款。调度与人工恢复见 [支付与部署](../supabase/functions/README.md#必需-worker-与告警)。本地 handler 测试仅 mock PayPal HTTP，不能替代上述 Sandbox 清单，也不证明生产调度已部署。
 
 参考：[PayPal 标准接入](https://developer.paypal.com/studio/checkout/standard/integrate)、[资金来源失败](https://developer.paypal.com/platforms/checkout/standard/customize/handle-funding-failures)、[API 合同](api.md)。

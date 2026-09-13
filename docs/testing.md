@@ -2,7 +2,14 @@
 
 ## 运行
 
-无数据库的快速门禁：`bun run typecheck && bun run test:unit && bun run docs:check`。
+无数据库的快速门禁：
+
+```bash
+bun run typecheck
+bun run storefront:check
+bun run test:unit
+bun run docs:check
+```
 `docs:check` 仅检查本地 Markdown 文件引用，不验证锚点或远程链接。
 
 **集成测试会写入数据；`test` / `setup` 还会清空本项目本地库，只能使用可丢弃的 Supabase。**
@@ -15,15 +22,23 @@ bun run test:current tests/admin.test.ts -t '重复标记支付被拒绝'
 bun run test:current tests/admin.test.ts --rerun-each=2 --randomize --seed=6149
 ```
 
-运行器从本项目 Supabase CLI JSON 读取连接/凭据，失败或非回环地址则拒绝启动，不 eval 输出，也不使用 shell 遗留的连接覆盖本项目目标。CI 先运行快速门禁，再通过 `bun run test --integration` 重建并运行全部非 unit 测试，随后 SQL lint 和类型漂移检查；该全量模式不与文件筛选混用。
+运行器从本项目 Supabase CLI JSON 读取连接/凭据，失败或非回环地址则拒绝启动，不 eval 输出，也不使用 shell 遗留的连接覆盖本项目目标。`bun run test:current` 不重建；`bun run test --integration` 重建并运行全部非 unit 测试，该全量模式不与文件筛选混用。
+
+[CI](../.github/workflows/ci.yml) 先运行快速门禁；数据库任务依次启动、初始化、执行 `storefront:build`，再重建并运行集成测试、SQL lint 和类型漂移检查。静态构建放在测试写入额外目录数据之前。
 
 保持 `--parallel=1`。默认仓、税率、管理员集合、全局 Worker 队列仍有共享状态；handler 测试还拦截全局 fetch/Deno。局部夹具隔离不等于整个套件可以并行。
 
-## 本地邮件验证与可补充覆盖
+## Storefront 验证与演示数据
+
+`bun run storefront:build` 需要可访问的 Supabase，只读取公开目录；构建和 `storefront:check` 不等于浏览器验收。页面改动应在 `storefront:preview` 中检查桌面与手机布局、图片加载、排序、售罄禁用、购物袋数量和报价金额／到期恢复。当前没有自动化浏览器测试套件，注册回调与支付 UI 尚未实现；真实 PayPal 验收见 [接入合同](storefront-paypal.md#sandbox--上线验收仍待完成)。
+
+默认 seed 仅含女装。历史回归通过 `support/legacy-catalog.ts` 安装旧商品和促销；新交易测试使用自有夹具。测试后的数据库不是纯演示目录，需要时按 [Storefront 说明](../storefront/README.md#当前能力与演示数据) 重置并重建，不要在共享环境执行 reset。
+
+## 本地邮件验证
 
 `local_smtp.enabled=true` 启用 Mailpit，界面为本机 `http://127.0.0.1:54324`；实际 API 地址通过 CLI 的 MAILPIT_URL 注入并验证为回环地址，不继承外部邮箱地址。配置变更须先 `bun run stop && bun run start`，db reset 不重新加载 Auth 配置。Mailpit 捕获邮件，不向真实收件人投递；界面/API 可读取验证凭据，不要暴露到公网、保存为 CI artifact 或记录完整确认链接。
 
-本地和 CI 必须用 `bun run start`：脚本建立项目专用 `tera-headless-loopback` bridge 网络，以 `com.docker.network.bridge.host_binding_ipv4=127.0.0.1` 限制所有发布端口（包括 Mailpit），并在启动前后检查实际绑定。发现旧容器仍监听所有网卡时拒绝沿用，须先 stop 再 start；setup/reset 同样使用该网络。直接 `bunx supabase start` 绕过此保护，CLI 默认会发布到所有网卡；仅把客户端 URL 写成 localhost 不提供访问控制。此设置不修改 Docker 全局配置/防火墙，也不隔离同机有权限的进程。
+本地和 CI 必须用 `bun run start`：它通过项目专用 Docker bridge 将发布端口限制到 `127.0.0.1` 并检查绑定。旧容器若监听所有网卡，先 stop 再 start；直接 `bunx supabase start` 会绕过保护。仅将客户端 URL 写成 localhost 不提供访问控制。实现见 [`scripts/start.ts`](../scripts/start.ts)。
 
 普通注册现在开启邮箱确认；`helpers.signup` 必须收到真实 SMTP 邮件、提取确认 token 并调用 Auth 验证接口后才能返回登录夹具，不用 service role 代确认或 generateLink 替代投递。`support/mail.ts` 按随机唯一收件人筛选，校验链接确属本项目 Auth 和预期类型，最多等待 10 秒。Mailpit 不保证随 db reset 清空，测试不得读取全局最新邮件或清空其他测试邮件；重复注册相同邮箱时取该收件人的最新匹配邮件。
 
@@ -34,12 +49,12 @@ bun run test:current tests/admin.test.ts --rerun-each=2 --randomize --seed=6149
 | 密码找回 | 已覆盖真实 recovery 邮件、一次性验证、重设后旧密码失败、新密码成功 |
 | 注册账户改登录邮箱 | 已覆盖真实新邮箱确认、占用冲突、确认前旧邮箱可登录/新邮箱不可登录、确认后反转；Customer/订单联系邮箱不变。当前只验证新邮箱，不覆盖双邮箱确认或取消 |
 | 重发与过期 | signup/recovery/email_change 均覆盖 429 不投递且保留旧令牌、成功重发废弃未过期旧令牌、3600 秒期限两侧、成功验证后重放拒绝 |
-| Storefront 回调 | 后续在 Storefront 项目补浏览器点击链接、PKCE/code 交换、刷新/跨标签页、错误页面及跳转白名单；当前测试走邮件 token 的 Auth HTTP 验证，不声称覆盖浏览器会话落地 |
+| Storefront 回调 | 后续在 `storefront/` 补浏览器点击链接、PKCE/code 交换、刷新/跨标签页、错误页面及跳转白名单；当前仅验证 Auth HTTP，不覆盖浏览器会话落地 |
 | 交易通知 | 邮件捕获可用于未来订单/发货/退款 Outbox 消费器的收件人、快照内容、幂等投递与失败重试测试；目前没有这些邮件消费者，Mailpit 不会自动发送业务邮件 |
 
 本地捕获不能验证公网 SMTP 凭据/TLS、SPF/DKIM/DMARC、反垃圾/真实收件率、退信/投诉或生产限流。当前 double_confirm_changes/secure_password_change 仍为开发配置，不表示已完成生产账户安全策略；上线另行验证真实邮件服务，不可为解决无 SMTP 而关闭邮箱确认。
 
-限流拒绝测试保留 Auth 的真实发送时间，发信后立即重发；本地 60 秒冷却为 SMTP 和 CI 调度留余量。允许重发与过期测试仅将独立用户的 `confirmation_sent_at` / `recovery_sent_at` / `email_change_sent_at` 调到过去：61 秒允许重发，3540 秒仍有效，3601 秒过期。不修改 token、确认状态或全局时钟，不声称验证精确同一毫秒或全局发信配额。已做配置反例验证：1ms 冷却下新限流测试失败，而旧的未来时间写法仍返回 429；0s 在当前 Auth 中会回退为默认 60 秒，并不关闭限流。重发前记录本收件人的消息 ID，读取新邮件时排除旧 ID，不能将旧邮件误认作重发成功。
+限流拒绝必须使用真实发送时间立即重发；允许重发和过期用例只调整独立用户的邮件发送时间，不改 token、确认状态或全局时钟。验证成功重发时排除旧邮件 ID，不能把旧邮件当新投递；不声称覆盖精确毫秒边界或生产全局发信配额。
 
 ## 夹具与断言
 

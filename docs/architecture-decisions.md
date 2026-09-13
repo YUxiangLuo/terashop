@@ -1,7 +1,9 @@
 # 架构决策
 
 本文维护当前业务不变量；调用示例见 [API](api.md)，schema 组织见 [数据库开发](database.md)，渠道配置与 Worker 见 [支付与部署](../supabase/functions/README.md)。
-项目尚未部署，不维护历史 schema/API 兼容承诺。开发期直接修改基线并重建本地数据库；改变业务规则时同步更新本文与回归测试。
+本文是当前规则，不是按时间追加的变更日志；保留 ADR 编号以稳定引用。迁移策略见 [数据库开发](database.md)，历史实验见其归档入口。改变业务规则时同步更新所属 ADR 与回归测试。
+
+按主题阅读：部署与权限（001、006）、金额与定价（002、005、007、015）、订单与库存（003、004、010、014、024）、支付与账本（008、009、011、025）、客户与 Cart（012、016、017、023）、目录与管理（013、019–022）、退货（018）。
 
 ## ADR-001：部署模型
 
@@ -31,8 +33,7 @@
 
 ## ADR-004：库存与履约数量
 
-Quote 流程采用 `on_hand - active reserved = available`：报价预占、转单继续持有，支付成功时在同一事务中转为实际扣减；取消/超时仅释放预占。
-`create_order` 在单事务中创建并转换 15 分钟 Quote，不再提前扣库存；所有结账由 `expire_checkout_quotes` 统一过期。订单及意图的付款期限不可延长，转单沿用报价期限。
+库存生命周期见 [ADR-024](#adr-024单一下单管线与简化库存语义)。订单及意图的付款期限不可延长，转单沿用报价期限；本节维护工作集、并发与履约数量规则。
 `inventory_movements` 只记录真实 on_hand 变化；取消/退款以原始负流水为回补依据，不依赖变体当前的库存配置。所有订单必须先付款再履约，避免未付款却已出库的订单无法安全过期。
 
 有效预占从内部 `commerce.inventory_reservations` 工作集读取，不再扫描历史 Quote 行。报价行 AFTER INSERT 在取得 Quote/库存锁、校验额度后写入工作集；转单保留，completed/cancelled/expired 的 AFTER trigger 删除，保存点/事务回滚同时恢复。工作行必须匹配不可变报价行，禁止修改、提前删除或 TRUNCATE，不向 API 角色授权。查询仍检查 expires_at，Worker 延迟不延长预占；Worker 负责清理过期工作行，数据库 autovacuum 负责回收死元组，二者均须监控。历史快照和物理流水保持原义，工作集不是第二套可编辑库存账本。
@@ -96,14 +97,14 @@ PayPal Capture declined 后终结当前意图并允许新建 Order。客户端 P
 
 Outbox 存储每次领取确定的 `lease_expires_at` 与随机 `lease_token`。重领不能用新调用者的 lease_seconds 缩短旧期限；complete 必须同时匹配 event、worker、token 且未过期。消费者仍须幂等，租约 fencing 不提供外部副作用的 exactly-once。
 
-Outbox 每个自动重试窗口最多领取 25 次；最后一次失败立即进入 exhausted，最后一次租约过期由 claim 的有界清理进入 exhausted。仅 service 可调用 `redrive_outbox_event(event_id,expected_attempt,worker_id,reason)`，在匹配的耗尽点开启新窗口并追加不可变审计；保留 event_id 和累计 attempts，退避从新窗口重新计算。相同耗尽点与操作者/原因的重放是无副作用成功，不能重置后续处理；内容不同或非耗尽状态拒绝。详见[恢复流程](../supabase/functions/README.md)。
+Outbox 自动重试有界，耗尽后仅允许受信人工重投。重投必须保留事件身份、累计次数和不可变审计；同一耗尽点的幂等重放不能重置后续处理。次数、请求参数与恢复步骤统一见 [Outbox 恢复](../supabase/functions/README.md#outbox-与-inbox-恢复)。
 
 PayPal Capture POST 前必须调用 `prepare_paypal_capture`，按 intent → quote → order 顺序复核归属、金额、订单及预占，并持久化捕获标记。
 普通取消不能穿透该标记，网络错误不清除它；重试先查询渠道，再复用原意图 UUID 作为幂等键。
 Quote 到期仍可释放预占并取消关联订单，不无限延长 hold；这不意味着未知 Capture 已失败，迟到成功资金只入对账，不复活订单或再次扣库存。
 `mark_order_paid` 不得先取消仍能扣款的线上意图再手工收款；不明 Capture 保留保护，已终结失败的 Capture 才允许新支付尝试。
 
-Capture 查询恢复由 service-only `list_pending_paypal_captures` / `paypal-reconcile-captures` 承担，不能依赖浏览器返回或 Webhook 已成功入箱。仅领取已绑定且有发送标记的未解决意图，包含 cancelled/过期对象；SKIP LOCKED 和持久化查询时间实现五分钟最短间隔。只 GET 已知 Order 并复用 Inbox，不代扣已批准订单、不清发送标记。出现关联 capture 资金事实后停止渠道轮询，由 Inbox 重试/人工对账接手；单次未查到 Capture 不证明失败。长期未知必须监控并人工核实，不以查询次数猜测资金终态。Storefront 状态与错误恢复见 [接入合同](storefront-paypal.md)。
+Capture 恢复不能依赖浏览器返回或 Webhook 到达：后台只查询已发起的付款并复用 Inbox，不代扣已批准订单、不清发送标记，单次未查到 Capture 不证明失败。候选条件、查询间隔和告警见 [Capture 查询恢复](../supabase/functions/README.md#capture-查询恢复)，浏览器动作见 [接入合同](storefront-paypal.md)。
 
 ## ADR-010：Quote 的价格与预占边界
 
@@ -118,7 +119,7 @@ Inbox 只保存原始事件的 SHA-256 与 allowlist 归一化字段，不保存
 超出 USD 结账能力的成功资金仍按 PayPal 返回的十进制金额保存并对账，不能推进 USD 订单。
 `40P01` / `40001` / `55P03` 等瞬时数据库错误不等同商业冲突：保留资金事实，将 Inbox 留在 received / transient_database_error，按 `next_attempt_at` 指数退避重试本地入账（2–256 秒，Worker 自动重试最多处理 25 次），不重复发出渠道收退款；重试耗尽必须告警。
 
-Inbox 的 25 次限制仅约束自动 Worker，不封死可信事件再次入箱。排除故障后可重投原 provider/event_id、hash 和完整归一化 envelope，再次运行本地处理；累计次数与原事件身份保留，金额流水仍幂等。不能更换事件 ID、伪造 hash 或重发渠道扣款来恢复本地账本。
+自动重试耗尽不封死可信事件再次入箱；重投保留原事件身份、hash、归一化 envelope 和累计次数，不重新发出渠道收退款。具体操作见 [Inbox 恢复](../supabase/functions/README.md#outbox-与-inbox-恢复)。
 
 ### PayPal
 
@@ -130,6 +131,20 @@ Order ID 是批准对象，Capture ID 才是资金引用；只有 COMPLETED 消�
 REVERSED 记录外部退款方向异常、阻止继续退款并触发对账；即使先于 completed 到达，也不消费库存、标记已支付或伪造本地退款。
 pending Refund 由 Worker 查询具体资源，`PAYMENT.CAPTURE.REFUNDED` 仅作聚合唤醒信号；候选用 `SKIP LOCKED` 公平领取并设置最短重查间隔。
 
+### 服务端卡认证策略
+
+卡支付默认关闭。新 Capture 必须符合归属、金额、有效期及 `APPROVED` 检查，真实 `payment_source` 只有 `card`；钱包意图不能用直接卡来源绕过开关。采用 `SCA_WHEN_REQUIRED`：
+
+| PayPal 服务端 Order 的认证结果 | 策略 |
+| --- | --- |
+| 已 `APPROVED`、卡来源存在、没有 `authentication_result` | 允许 Capture（未被要求 SCA） |
+| `liability_shift=YES/POSSIBLE`，若有 `authentication_status` 则为 `Y/A` | 允许 Capture |
+| `NO/UNKNOWN`、空认证对象、未知值或显式失败/未完成 | 拒绝新 Capture，返回 `paypal_card_authentication_required` |
+
+这是保守策略：存在认证结果但无法确认责任转移时可能拒绝渠道本可受理的付款，须用实际商户 Sandbox 的免挑战、豁免和未参与 3DS 卡校准，不能全局跳过校验。认证拒绝发生在 Capture 发送标记之前，不伪造失败资金事件；已发现的 Capture 仍优先幂等入账，即使卡开关关闭或认证异常也不能丢弃资金事实。
+
+支付方式是数据库不可变字段，相同幂等键不能变更；新键也不能绕过一个订单一个活跃意图。SDK 取消、失败或超时不授权清标记或重新扣款。浏览器接入与验收见 [卡支付流程](storefront-paypal.md#站内一次性信用卡--借记卡支付sdk-v6)。
+
 ### 退款与未自动化范围
 
 退款请求先预留金额/数量，渠道成功后才在单事务写成功账本、更新订单；`restock` 仅按原扣减仓释放预留的未发货取消量，已发货退款不回库。failed/cancelled 释放退款预留。
@@ -139,7 +154,7 @@ PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard
 
 ## ADR-012：客户写入与默认地址
 
-收货地址使用 `recipient_name`、`line1`、`line2`、`city`、`region`、`postal_code`、`country`、`phone`；仅姓名、第一地址行和国家在订单中必填，其余字段按地区/渠道需要填写。地址簿与直接地址快照使用同一解析入口，不默认为 CN 或 US。
+地址簿与直接地址快照使用同一解析入口，不推断国家；字段及必填规则见 [地址合同](api.md#地址合同)。
 订单表的收货/账单地址国家 CHECK 必须明确为 TRUE，不能让 JSON `country: null` 经 SQL 三值逻辑通过；受信 INSERT/UPDATE 同样受限。账单地址整体仍可为 SQL NULL，提供时则必须含两位大写国家码。
 普通客户只能创建 pending 评价，管理员审核后公开；作者修改内容自动回落待审，管理员受权写入不受客户 policy 限制。
 默认地址命令先锁活跃 Customer 行，再锁目标地址并清理旧默认；所有新建地址都先取客户锁，`is_default=true` 沿用该顺序。地址/客户 metafield 内容修改与匿名化串行化；已持子行的 UPDATE 用 NOWAIT，竞争时整笔事务重试，不能在擦除后补入旧客户 PII。
@@ -248,13 +263,13 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 匿名会话没有登录邮箱或密码，结账联系邮箱由 Customer 保存。新 Quote 和新订单校验联系邮箱的基本格式，首次建单保存去空格快照；邮箱不是 Quote 锁价事实，不因客户之后改联系信息重写旧订单，也不影响已创建对象的幂等重放。邮箱格式不是所有权验证，既不认领同邮箱客户，也不因未来登录已有账户迁移游客订单。
 
-已检查现有 RLS 的授权边界：普通客户权限按当前 Customer 限定，管理员权限仍需受保护的 profile role；匿名会话可操作自己的地址/订单等客户资源，不获得后台权限。后台 has_account 根据 Auth 的非匿名状态计算，不把技术会话当作注册账户。删除匿名 Auth 与普通 Auth 一样只解除商业身份关联，保留交易事实。
+匿名会话不获得后台权限。后台 has_account 根据 Auth 的非匿名状态计算，不把技术会话当作注册账户；Auth 删除和商业记录保留遵循 ADR-016。
 
-游客注册使用原匿名 Auth 身份的邮箱绑定：发送确认邮件、完成验证后设置密码，保留 Auth/Customer UUID，不迁移商业记录。仅 Auth 验证改变登录身份，不能从 customers.email 推断邮箱所有权。已占用的注册邮箱拒绝绑定，不提供已有账户合并。验证后登录邮箱同步 profile，联系邮箱与订单快照不变；has_account 不表示密码已设置。生产必须提供真实邮件发送能力，不能关确认或管理员代确认作为降级。
+游客升级注册保留原 Auth/Customer UUID，由 Auth 验证邮箱所有权，不迁移商业记录或合并已有账户。联系邮箱和订单快照不变，has_account 不表示密码已设置。操作步骤见 [游客验证邮箱后注册](api.md#游客验证邮箱后注册)。
 
-会话刷新/安全存储属于 Storefront 接入合同；退出、丢失会话或切换已有账号不会自动恢复匿名订单。当前不实现邮件查单、跨设备恢复或客户合并，不能只凭邮箱或订单号授权。CAPTCHA、覆盖直连 API 的限流、匿名身份留存/清理和私有缓存策略是上线前必需部署工作；每身份配额不能防止批量创建新身份。匿名 Auth 清理不得删除商业客户、订单或资金事实，不得清理仍需支付/售后的会话。
+退出、丢失会话或切换已有账号不会自动恢复匿名订单，不能只凭邮箱或订单号授权。每身份配额不是防滥用方案；会话存储见 [前台接入](storefront-paypal.md#身份与部署边界)，CAPTCHA、限流与清理要求见 [部署安全](../supabase/functions/README.md#环境与认证)。
 
-参考：[Supabase Anonymous Sign-Ins](https://supabase.com/docs/guides/auth/auth-anonymous)。履约 JSON 的收敛仍须单独修改调用与交易回归。
+参考：[Supabase Anonymous Sign-Ins](https://supabase.com/docs/guides/auth/auth-anonymous)。
 
 ## ADR-024：单一下单管线与简化库存语义
 
@@ -264,7 +279,7 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 完整转单校验后若 total=0，客户命令在同一事务消费预占并将 financial_status 设为 paid、填写 paid_at，Quote 变为 completed。无需管理员或支付渠道，不创建 PaymentIntent 或虚构 capture；促销用量、库存、事件和幂等身份只落一次。零价格与全额优惠同样适用，过期/改价报价仍拒绝。
 
-删除即时扣库实现及 `expire_unpaid_orders`；统一调度 `expire_checkout_quotes`。取消或超时仅释放未付款预占，支付结果未知时保留原有捕获保护和迟到资金对账规则。支付账本/履约双表示的收敛不包含在本次改动中。
+所有客户下单统一使用 Quote，过期统一由 `expire_checkout_quotes` 处理。取消或超时仅释放未付款预占，未知 Capture 与迟到资金遵循 ADR-009。唯一支付账本见 ADR-025；履约 JSON/关系表仍有调用与回归，尚未收敛。
 
 ## ADR-025：唯一支付账本
 

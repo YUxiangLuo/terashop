@@ -2,7 +2,7 @@
 
 基于 Supabase 的 Headless 电商项目。PostgreSQL 承担通用交易逻辑与权限控制，TypeScript Edge Functions 适配 PayPal；`storefront/` 提供女装 SvelteKit SSG 示例，不包含管理后台。
 
-面向全球客户的单店后端，统一使用 **USD** 定价和结账，不做多币种或自动换汇。美元不代表美国地址：收货国家必须显式提供，不预设任何国家或税率。当前税务仅支持可配置的国家级比例规则，复杂税务及自动争议/结算对账不在范围内。
+一个 Supabase 项目承载一个店铺，统一使用 **USD**，结账使用默认仓。后端支持游客线上交易；前台目前只实现目录、实时库存、购物袋和库存预占报价，**没有下单或支付 UI，尚未完成真实 PayPal Sandbox 验收**。
 
 ## 快速开始
 
@@ -12,17 +12,14 @@
 bun install
 bun run start             # API :54321 / Studio :54323 / DB :54322
 bun run setup             # 重放迁移 + 演示数据，会清空本地数据库
-bun run test:current      # 使用已准备的本地数据库，测试会写入数据
+bun run storefront:dev   # 打开终端显示的前台地址
 ```
 
 使用 `bun run start` 而非直接调用 Supabase CLI：项目网络将发布端口限制到 `127.0.0.1`，包括含验证邮件的 Mailpit。已有全网卡监听容器须先 `bun run stop` 再启动；不更改系统防火墙。
 
-种子数据为 10 款女装、60 个颜色/尺码变体，不安装默认促销或税率。商品与运费均为 USD 演示配置，图片为 AI 生成示意图，不代表真实商品或物流报价。上线前必须配置配送范围与适用税务规则，未匹配规则时计算为零并不表示免税。
-Google OAuth 默认关闭；启用前必须吊销并轮换历史已暴露的凭据，通过环境变量提供新 Secret。支付配置见 [支付与部署](supabase/functions/README.md)。
+种子数据为 10 款女装、60 个颜色/尺码变体，不安装默认促销或税率；价格、运费和 AI 图片均为演示内容。测试会写入额外商品，勿将测试后的目录当作纯女装 seed。构建、配置与恢复演示目录见 [Storefront 使用说明](storefront/README.md)。
 
 ## 功能与结构
-
-运行 `bun run storefront:dev` 查看女装站；`bun run storefront:build` 生成静态页面，`bun run storefront:preview` 预览产物。本地构建自动读取本项目 Supabase 公共凭据，生产构建须显式配置公共 URL/key。前台现阶段支持目录、实时库存、购物袋与库存预占报价，**尚未接入下单或支付 UI**。详见 [Storefront 使用说明](storefront/README.md)。
 
 | 模块 | 能力 |
 | --- | --- |
@@ -34,6 +31,7 @@ Google OAuth 默认关闭；启用前必须吊销并轮换历史已暴露的凭�
 | 客户与内容 | 独立 Customer / 可选 Auth 关联、地址簿、匿名化、评价审核、Metafields / Metaobjects |
 
 ```text
+storefront/             SvelteKit 静态女装站
 supabase/migrations/   六个初始化基线文件；开发期可直接修改并重建
 supabase/functions/    支付入口与共享适配代码
 supabase/seed.sql      本地演示数据
@@ -41,16 +39,14 @@ tests/                 API、handler、金额和数据库并发回归
 types/database.ts      自动生成的数据库类型，不手改
 ```
 
-只支持客户自行线上下单，游客可通过匿名 Auth 会话完成结账、PayPal 支付及查单，无需注册；不按邮箱自动合并客户或恢复历史订单。Cart 只保存购买意向，不锁价、不占库存；token Cart 必须先由注册或匿名会话认领才能转 Quote。上线前须部署 CAPTCHA、网关限流及过期/匿名身份清理策略；游客丢失会话后暂不支持跨设备找回订单。
-
-`public` 提供业务表/API，`private` 存放内部函数与同步哨兵，`commerce` 保存隐藏的购物车与交易事实。项目尚未部署，不维护历史兼容承诺；`api` / `admin_api` 合同仍在演进。
-
 ## 文档入口
 
-- [API 速查](docs/api.md)：目录查询、结账流程、客户与管理命令。
+- [Storefront](storefront/README.md)：运行、静态部署、当前能力与限制。
+- [API 使用参考](docs/api.md)：参数、权限、返回值与调用重试。
 - [架构决策](docs/architecture-decisions.md)：金额、库存、权限、支付与退款不变量及演进边界。
 - [数据库开发](docs/database.md)：基线文件职责、SQL 检查和历史审阅证据。
 - [测试指南](docs/testing.md)：运行/筛选/重跑、夹具清理与覆盖边界。
+- [PayPal 前台接入](docs/storefront-paypal.md)：SDK、返回页、支付状态与浏览器恢复。
 - [支付与部署](supabase/functions/README.md)：渠道配置、Webhook、必需 Worker 和发布验证。
 - [.env.example](.env.example)：环境变量模板，不包含有效凭据。
 
@@ -58,14 +54,11 @@ types/database.ts      自动生成的数据库类型，不手改
 
 ```bash
 bun run typecheck         # 无数据库的快速检查
+bun run storefront:check  # Svelte / 前台类型检查，无需数据库
 bun run test:unit         # 支付适配、共享逻辑与测试设施单测；不需要 Supabase
 bun run docs:check        # 本地 Markdown 文件链接检查
-bun run test              # 会清空本项目本地数据库，再执行完整测试
-bun run db:lint
-bun run types:check       # 数据库生成类型漂移检查
-bun run stop
 ```
 
-完整测试需要本地 Supabase；handler 回归使用真实 Auth/PostgreSQL，仅 mock 渠道 HTTP，并以事务屏障验证锁竞争。它们不能替代真实渠道 Sandbox 和部署后网关测试。
+数据库重建、完整测试和类型漂移检查见 [测试指南](docs/testing.md) 与 [数据库开发](docs/database.md)。`setup` / `test` 会清空本项目本地库，只用于可丢弃环境。
 
-开发期 schema 变更后直接重建本地数据库，不维护旧迁移升级路径。`setup` / `test` 会清空本地数据，仅用于可丢弃的开发环境。首次上线前再固定迁移历史，并落实 Worker 调度、Outbox 消费和对账告警。
+项目尚未部署。上线前须配置真实商品、配送与税务，完成身份安全、Worker、告警和渠道验收；未匹配税率得到零税额不代表免税。具体要求见 [支付与部署](supabase/functions/README.md)，不要将本地测试通过视为生产可用。

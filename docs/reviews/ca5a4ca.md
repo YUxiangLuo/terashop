@@ -1,4 +1,6 @@
-# 外部 Review 的实验复核与修复
+# 历史外部 Review：基点 ca5a4ca
+
+归档版本：[`0582c88`](https://github.com/vesein/tera-headless/commit/0582c8861a7c750ade7f0c48580ad8a45d207814)。以下证据、计数和运行步骤保留当时状态，不是当前规范或操作手册；当前入口见 [数据库开发](../database.md) 与 [ADR](../architecture-decisions.md)。测试链接固定到归档提交。
 
 基点：[`ca5a4ca`](https://github.com/vesein/tera-headless/commit/ca5a4ca8c5a941e39c8238a7ca996d77ae9843d1)。
 来源：[用户提供的 Review](https://chatgpt.com/share/6aa6b719-4528-83ee-9564-a670f03cbfd6)。
@@ -8,19 +10,19 @@
 
 | 顺序 | 问题与未修复实验 | 修复后的合同与回归 |
 | --- | --- | --- |
-| R1 | selected 买赠的 buy/get 重叠时，同一件商品既满足购买又被赠送；存在 $110 毛额、$100 错误优惠、$10 应付的实际订单，并非只影响预览 | 买赠购买/赠送单位互斥，保留交集购买预算；覆盖相同集合、商品/变体间接交集、部分重叠、1+1 / 2+1 / 1+2 数量边界、属性拆行。见 [promotions](../../tests/promotions.test.ts) |
-| R2 | Outbox 第 25 次领取后进程崩溃，租约过期却既不能 complete 也不能再次 claim | exhausted 状态、有界清理、service-only 人工重投、累计次数与不可变审计；原 token 失效，重投重放不能重置新租约或 published。见 [transaction-ledgers](../../tests/transaction-ledgers.test.ts) |
-| R4 | 先开始的事务后取得退款锁，按 created_at 选“最新退款”会把两个幂等键都绑定到另一笔退款；没有观察到重复退款金额 | 内部函数直接返回本次退款 UUID，包装绑定该资源；受控锁屏障验证 $3/$4 各自关联、重放后合计仍为 $7。见 [payment-concurrency](../../tests/payment-concurrency.test.ts) |
-| R5 | 定义改为 number 与 text 值写入并发，可留下类型冲突；无定义时并发新增定义同样有漏洞，RC/RR 均复现 | 按逻辑字段键串行化，并用持久 guard 的真实版本写冲突拒绝旧 RR 快照；争用要求重试事务。见 [database-design-concurrency](../../tests/database-design-concurrency.test.ts) |
-| R6 | 新 Storefront DTO 隐藏停用变体图片，但旧图片表和 product_listing 仍可公开读取 | 旧表/视图与新 DTO 一致过滤；管理员底表仍可管理图片，Storefront 不升权。见 [catalog-api](../../tests/catalog-api.test.ts) |
-| R3 | 客户零元订单停在 pending，只能由管理员完成 | 转单校验后原子消费预占、标记 paid；不创建支付意图或伪造资金流水。覆盖直接下单/显式 Quote × 零价/全额优惠、重放、过期拒绝。见 [inventory-reservations](../../tests/inventory-reservations.test.ts) |
-| R7 | 旧列表物化全店预占；共享库存函数扫描目标 SKU 的历史 Quote 行 | 增加事务性预占工作集，终态删除；旧列表按目标变体查询，新 DTO/结账共享工作集。覆盖回滚、转单、付款、批量写入超卖、篡改/权限与实际 SQL 计划。见 [inventory-working-set](../../tests/inventory-working-set.test.ts) |
+| R1 | selected 买赠的 buy/get 重叠时，同一件商品既满足购买又被赠送；存在 $110 毛额、$100 错误优惠、$10 应付的实际订单，并非只影响预览 | 买赠购买/赠送单位互斥，保留交集购买预算；覆盖相同集合、商品/变体间接交集、部分重叠、1+1 / 2+1 / 1+2 数量边界、属性拆行。见 [promotions](https://github.com/vesein/tera-headless/blob/0582c8861a7c750ade7f0c48580ad8a45d207814/tests/promotions.test.ts) |
+| R2 | Outbox 第 25 次领取后进程崩溃，租约过期却既不能 complete 也不能再次 claim | exhausted 状态、有界清理、service-only 人工重投、累计次数与不可变审计；原 token 失效，重投重放不能重置新租约或 published。见 [transaction-ledgers](https://github.com/vesein/tera-headless/blob/0582c8861a7c750ade7f0c48580ad8a45d207814/tests/transaction-ledgers.test.ts) |
+| R4 | 先开始的事务后取得退款锁，按 created_at 选“最新退款”会把两个幂等键都绑定到另一笔退款；没有观察到重复退款金额 | 内部函数直接返回本次退款 UUID，包装绑定该资源；受控锁屏障验证 $3/$4 各自关联、重放后合计仍为 $7。见 [payment-concurrency](https://github.com/vesein/tera-headless/blob/0582c8861a7c750ade7f0c48580ad8a45d207814/tests/payment-concurrency.test.ts) |
+| R5 | 定义改为 number 与 text 值写入并发，可留下类型冲突；无定义时并发新增定义同样有漏洞，RC/RR 均复现 | 按逻辑字段键串行化，并用持久 guard 的真实版本写冲突拒绝旧 RR 快照；争用要求重试事务。见 [database-design-concurrency](https://github.com/vesein/tera-headless/blob/0582c8861a7c750ade7f0c48580ad8a45d207814/tests/database-design-concurrency.test.ts) |
+| R6 | 新 Storefront DTO 隐藏停用变体图片，但旧图片表和 product_listing 仍可公开读取 | 旧表/视图与新 DTO 一致过滤；管理员底表仍可管理图片，Storefront 不升权。见 [catalog-api](https://github.com/vesein/tera-headless/blob/0582c8861a7c750ade7f0c48580ad8a45d207814/tests/catalog-api.test.ts) |
+| R3 | 客户零元订单停在 pending，只能由管理员完成 | 转单校验后原子消费预占、标记 paid；不创建支付意图或伪造资金流水。覆盖直接下单/显式 Quote × 零价/全额优惠、重放、过期拒绝。见 [inventory-reservations](https://github.com/vesein/tera-headless/blob/0582c8861a7c750ade7f0c48580ad8a45d207814/tests/inventory-reservations.test.ts) |
+| R7 | 旧列表物化全店预占；共享库存函数扫描目标 SKU 的历史 Quote 行 | 增加事务性预占工作集，终态删除；旧列表按目标变体查询，新 DTO/结账共享工作集。覆盖回滚、转单、付款、批量写入超卖、篡改/权限与实际 SQL 计划。见 [inventory-working-set](https://github.com/vesein/tera-headless/blob/0582c8861a7c750ade7f0c48580ad8a45d207814/tests/inventory-working-set.test.ts) |
 
 ### R2 需要区分 Outbox 与 Inbox
 
 Inbox 自动 Worker 在 25 次后停止，但可信原事件再次入箱仍可处理到第 26 次，并且保持资金幂等。因此没有新增另一套 Inbox 重投接口；保留既有入口，补充精确 envelope 恢复流程。
 
-[provider-retry](../../tests/provider-retry.test.ts) 在捕获/退款路径分别注入真实 PostgreSQL 瞬时错误，运行至 25 次；移除故障后验证 Worker 停止、原 envelope 两次重投成功、交易与库存各只落一次。故障注入不禁用生产完整性触发器。
+[provider-retry](https://github.com/vesein/tera-headless/blob/0582c8861a7c750ade7f0c48580ad8a45d207814/tests/provider-retry.test.ts) 在捕获/退款路径分别注入真实 PostgreSQL 瞬时错误，运行至 25 次；移除故障后验证 Worker 停止、原 envelope 两次重投成功、交易与库存各只落一次。故障注入不禁用生产完整性触发器。
 
 ## R7 的性能证据与限制
 

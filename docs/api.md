@@ -1,9 +1,20 @@
-# API 速查
+# API 使用参考
 
 RPC 路径为 `/rest/v1/rpc/<name>`，Edge Function 路径为 `/functions/v1/<name>`，均使用 POST。
 PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization: Bearer <user-jwt>`。
 参数名与默认值见 [生成类型](../types/database.ts)，业务约束见 [ADR](architecture-decisions.md)。
 所有商品、运费、固定金额优惠、订单、收款和退款均以 **USD** 计价；`product_listing.currency` 显式返回 `USD`，不提供币种切换或自动换汇。
+
+## 阅读导航
+
+| 任务 | 章节 |
+| --- | --- |
+| 商品与目录管理 | [读取](#storefront--admin-商品读取合同)、[原子编辑](#原子商品编辑)、[底表查询](#现有底表查询)、[促销与扩展](#促销范围与扩展字段管理) |
+| 客户与身份 | [Customer](#customer-与登录身份)、[游客结账](#游客自行结账)、[升级注册](#游客验证邮箱后注册)、[邮箱变更](#注册账户改邮箱重发与过期)、[客户管理](#客户管理查询) |
+| 购物袋与结账 | [可选持久 Cart](#持久-cart可选)、[Quote 流程](#推荐结账流程)、[商业行](#商业行身份)、[金额](#价格明细与税务依据)、[地址](#地址合同) |
+| 订单与售后 | [查询](#客户后台订单查询)、[支付退款](#支付与退款)、[退货收货](#return--receipt--disposition)、[管理命令](#客户与管理员命令)、[便捷下单／手工交易](#便捷下单与手工命令) |
+
+本页维护调用合同，不保证示例前台已实现全部功能；前台能力见 [Storefront](../storefront/README.md)，支付 UI 状态和 SDK 流程见 [PayPal 接入](storefront-paypal.md)。
 
 ## Storefront / Admin 商品读取合同
 
@@ -16,13 +27,13 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 | `get_admin_product` | `product_id` | 管理详情或 null；仅 admin/service，包含草稿、停用子资源、成本及内部扩展值 |
 | `list_admin_products` | `page_size` 默认 20，1–100；可选 `status_filter/category_id/search/after_cursor` | `{items,next_cursor}`；仅 admin/service；更新时间倒序的管理摘要 |
 
-Storefront 列表以 UUID 升序分页，将 `next_cursor` 传给下一次 `after_id`；无后续页时为 null。并发新增商品可能落在已翻过的范围，游标不保证跨请求快照。卡片包含 `id/slug/name/currency/price_from/in_stock/primary_image`，不返回精确库存。仅对当前页商品计算库存，不复用全店预占聚合视图。
+Storefront 列表以 UUID 升序分页，将 `next_cursor` 传给下一次 `after_id`；无后续页时为 null。并发新增商品可能落在已翻过的范围，游标不保证跨请求快照。卡片包含 `id/slug/name/currency/price_from/in_stock/primary_image`，不返回精确库存。
 
 详情包含基本商品/SEO 字段、`variants`、`options`、`images`、`categories` 和 `metafields`。变体通过 `option_value_ids` 对应选项值；商品/变体扩展值使用 `{namespace,key,type,value}`。Storefront 隐藏停用变体及其专属图片、停用分类、内部扩展字段和成本；**管理员调用 Storefront 也不会扩大输出范围**。库存仍只看默认仓可用量及有效 Quote 预占，不承诺后续结账成功。
 
 Admin 详情增加商品状态/时间戳、编辑版本 `revision` 及变体 `cost/is_active/track_inventory`；精确库存继续使用管理员 `get_inventory_availability`，不是将 Storefront 切换为“管理员模式”。公共扩展引用不会自动递归展开，需按 Metaobject ID 读取其受保护资源。
 
-现有底表/视图读取保留原授权，用于逐步迁移已有调用与测试；商品、订单和客户管理的基础读合同见本页，不代表全部底表已封闭。尚未增加 Storefront 搜索或运营排序。底表的扩展字段读取同样执行下文的新可见性规则。
+底表/视图仍按原授权开放，扩展字段同样受下文可见性规则约束。Storefront RPC 尚无搜索或运营排序；示例前台的价格／名称排序仅作用于已加载目录。
 
 ### Admin 商品列表
 
@@ -90,11 +101,7 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 使用显式字段选择，不对变体使用 `select=*`：`cost` 有列权限保护。精确库存仅管理员可读，商城使用 `in_stock`。
 商品子资源继承发布状态；分类拉取平铺列表后在客户端组树，列表视图仅包含启用分类。
 
-管理员优先使用 `create_product` 一次创建商品及子资源。若使用多个底表请求，应先用 `status:"draft"`，依次建立变体、选项/值、规格关联、图片，最后 PATCH 为 `active`。
-草稿也禁止跨商品选项/图片和同一选项多值；发布商品必须有变体，启用变体必须选全规格且组合唯一（无选项时最多一个启用默认变体）。停用变体可暂存未完成配置。
-约束在事务提交时检查；增加规格或替换整个组合优先使用 `update_product` 原子保存，不必下架。若使用多个底表请求，则必须先转草稿再分步编辑。
-子资源 ID 和所属商品/选项/变体不可迁移，关联需删除重建。分类禁止任意长度的环。
-并发目录修改遇到 SQLSTATE `55P03` / `40001` 时重试整笔事务，不绕过约束。
+管理员优先使用 `create_product` / `update_product` 原子编辑。多个底表请求须先转 `draft`，完成变体、规格关联和图片后再发布；草稿也不允许跨商品关联。发布完整性见 [ADR-013](architecture-decisions.md#adr-013目录完整性与发布)。并发修改遇到 `55P03` / `40001` 时重试整笔事务，不绕过约束。
 
 ## Customer 与登录身份
 
@@ -338,7 +345,7 @@ POST /rest/v1/rpc/receive_return
 - 原始扣减覆盖的恢复总量是额外上限。退款只释放未发货取消量，实收处置只处理已发货退回量；先退款/先收货、事件重放或并发不能重复回库。退货、收货、处置从不自动调用退款，也不重算原价/税。
 - close 释放未实收授权，保留实收占用；即使尚未验收，也可关闭收货后继续处置已有实收。cancel 只允许无实收时使用。终态不可重开/再收货；新退货仍受剩余可退量限制。
 - 存在 open 授权或任何实收的 fulfillment 不可撤销；退回商品不会把原发货改为 cancelled，也不重新赋予发货额度。
-- 数量/归属/指纹与流水引用由 FK、触发器和提交时校验共同保护；事实不可删除/改写，仅审计 actor 可单向匿名化。SQLSTATE `55P03` / `40001` / `40P01` 重试整笔事务，不关闭保护。新事件 `return.open/closed/cancelled/received/disposed` 经订单审计进入现有 Outbox，消费者仍须幂等。
+- 事实不可删除/改写，仅审计 actor 可单向匿名化。SQLSTATE `55P03` / `40001` / `40P01` 重试整笔事务。事件 `return.open/closed/cancelled/received/disposed` 进入 Outbox，消费者须幂等；数据库保护见 [ADR-018](architecture-decisions.md#adr-018退货授权实际收货处置与资金分离)。
 
 ## 地址合同
 
@@ -347,8 +354,6 @@ POST /rest/v1/rpc/receive_return
 - 必填：`recipient_name`、`line1`、`country`（两位国家码，规范化为大写）。不根据 USD、语言或服务器位置推断国家。
 - 可选：`line2`、`city`、`region`（州/省/其他行政区）、`postal_code`、`phone`。不强制所有国家采用同一行政区、邮编或电话号码格式。
 - 地址簿另有 `label`、`is_default`。配送商和支付渠道可提出额外的地区字段要求。
-
-开发期已直接替换旧地址字段与 CN/CNY 假设，没有兼容别名；按 [数据库开发](database.md) 重建本地库，并使用最新生成类型。
 
 ## 客户与管理员命令
 
@@ -372,7 +377,7 @@ POST /rest/v1/rpc/receive_return
 
 商品百分比及买赠的 `promotions.apply_scope` 为 `all`（默认）或 `selected`；买赠的 `get_scope` 为 `same_as_apply`（默认）或 `selected`。定向活动应以 selected 或 inactive 创建，再配置目标，避免先公开全店优惠。INSERT `promotion_targets` 自动将对应范围收窄为 selected，删除最后一条仍匹配零商品；扩大范围须先删除对应目标，再显式 PATCH scope。规则、范围与目标一起进入交易快照。整单百分比/固定金额与免邮仍按原有整单语义执行，不借此改变算法或增加条件 DSL。
 
-买赠内 buy/get 不得占用同一件商品；selected 集合重叠也需保留购买单位，优先最大可赠数量，再选择最便宜的可行赠品。相同集合的买一赠一，1/2/3 件分别赠 0/1/1 件；属性拆行不改变结果。
+买赠购买与赠送单位互斥，属性拆行不改变收益；集合重叠与赠品选择算法见 [ADR-005](architecture-decisions.md#adr-005促销计算)。
 
 `metafields` 继续写 owner_type / owner_id / type / value，未知类型拒绝；任意 JSON 使用 `type:"json"`。响应中的 `owner_*_id` 是不可直写的生成 FK 路由；商品、变体、分类删除会级联清理其 metafields。Customer/Order 不可删除及匿名化的既有合同不变。
 
@@ -388,13 +393,11 @@ POST /rest/v1/rpc/receive_return
 
 这些规则同时约束底表 RLS 与新 Storefront DTO，不能用旧接口绕过；字段可见性仅管理员/service 可配置。seed 的洗护/材质/尺码表/重量显式公开，礼品留言显式为 customer；其他新增定义不得依赖旧的默认公开行为。
 
-`order_number` 在数据库保证唯一，创建后不可 PATCH（包括 service role）。库存预占和每条新增履约事实都会写共享资源版本；直接 SQL / Worker 遇到 `40001` 应重试整笔事务，不假设仅取行锁就能刷新 REPEATABLE READ 快照。
-
 ## 便捷下单与手工命令
 
 以下命令各只有一个公开签名，不保留版本后缀或非幂等重载；需要先展示报价再确认下单时采用上面的 Quote 流程。
 
-- `create_order`：必填 `items`、`idempotency_key`，地址等参数与 Quote 一致。单事务创建并转换 15 分钟 Quote；正金额订单只预占，支付成功才扣 `on_hand`，零元订单直接原子标记 paid 并扣减。发货不再扣减。`on_hand` 表示未售出的库存余额，不是实物在库数。未付款取消/超时仅释放预占，统一由 `expire_checkout_quotes` 处理到期。
+- `create_order`：必填 `items`、`idempotency_key`，地址等参数与 Quote 一致。单事务创建并转换 15 分钟 Quote，返回订单 DTO；付款、零元及过期语义与 [推荐结账流程](#推荐结账流程) 相同，库存定义见 [ADR-024](architecture-decisions.md#adr-024单一下单管线与简化库存语义)。
 - 下单重试返回原订单当前状态，不新建 Quote、不延长期限。其幂等范围与显式报价独立；取消/过期后同键重试仍返回原订单，需要重新结账时使用新键。
 - `create_fulfillment`：必填 `order_id`、`items`、`idempotency_key`；所有订单均须先付款，返回履约 DTO，行明细通过订单详情或账本读取。
 - `mark_order_paid`：`order_id`、`provider:"manual"`；仅手工收款，线上意图仍可扣款时禁止使用。
