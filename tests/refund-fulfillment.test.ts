@@ -33,7 +33,7 @@ interface LineBalance {
 interface Balance { is_fulfillable: boolean; lines: LineBalance[] }
 interface RefundRequest { id: string; amount: number; currency: string }
 const shipmentItems = (order: FixtureOrder, quantity: number) => [{ order_item_id: order.itemId, quantity }];
-const fulfill = (order: FixtureOrder, quantity: number) => rpc('create_fulfillment', {
+const fulfill = (order: FixtureOrder, quantity: number) => rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(),
   order_id: order.id, items: shipmentItems(order, quantity),
 }, admin.token);
 const balance = (order: FixtureOrder): Promise<Balance> => checked(rpc('get_order_fulfillment_balance', {
@@ -46,7 +46,7 @@ async function manualOrder(quantity: number, withShipping = false): Promise<Fixt
   return order;
 }
 async function itemRefund(order: FixtureOrder, quantity: number): Promise<void> {
-  await checked(rpc('refund_order', {
+  await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(),
     order_id: order.id, items: shipmentItems(order, quantity), restock: true,
   }, admin.token));
 }
@@ -74,7 +74,7 @@ describe('Refund cancellation and fulfillment quantities', () => {
     });
     expect(direct.status).toBe(400);
     expect(await stockOf(fixture.sku)).toBe(before + 1);
-    await checked(rpc('refund_order', { order_id: order.id }, admin.token));
+    await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
     expect((await fulfill(order, 1)).status).toBe(400);
     expect((await balance(order)).is_fulfillable).toBe(false);
   });
@@ -94,15 +94,15 @@ describe('Refund cancellation and fulfillment quantities', () => {
     expect(rows[0].fulfillment_status).toBe('fulfilled');
   });
 
-  test('手工退款首次 DTO 与 V2 重试一致，已履约加已取消覆盖订单时立即更新汇总', async () => {
+  test('手工退款首次 DTO 与重试一致，已履约加已取消覆盖订单时立即更新汇总', async () => {
     const order = await manualOrder(2);
     await checked(fulfill(order, 1));
     const command = {
       order_id: order.id, idempotency_key: crypto.randomUUID(),
       items: shipmentItems(order, 1), restock: true,
     };
-    const first = await checked<Record<string, unknown>>(rpc('refund_order_v2', command, admin.token));
-    const retry = await checked<Record<string, unknown>>(rpc('refund_order_v2', command, admin.token));
+    const first = await checked<Record<string, unknown>>(rpc('refund_order', command, admin.token));
+    const retry = await checked<Record<string, unknown>>(rpc('refund_order', command, admin.token));
     expect(first).toMatchObject({ status: 'completed', fulfillment_status: 'fulfilled' });
     expect(retry).toEqual(first);
   });
@@ -125,14 +125,14 @@ describe('Refund cancellation and fulfillment quantities', () => {
   test('纯金额部分退款不猜测商品取消数量，未发货商品仍能履约', async () => {
     const order = await manualOrder(3);
     await checked(fulfill(order, 1));
-    await checked(rpc('refund_order', { order_id: order.id, amount: 1 }, admin.token));
+    await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id, amount: 1 }, admin.token));
     expect((await balance(order)).lines[0]).toMatchObject({ cancelled_quantity: 0, available_quantity: 2 });
     expect((await fulfill(order, 2)).status).toBe(200);
   });
 
   test('无商品行的全额退款也禁止新增履约', async () => {
     const order = await manualOrder(1);
-    await checked(rpc('refund_order', { order_id: order.id }, admin.token));
+    await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
     expect((await balance(order)).lines[0]).toMatchObject({ cancelled_quantity: 0, available_quantity: 0 });
     expect((await fulfill(order, 1)).status).toBe(400);
     const direct = await api('/rest/v1/fulfillments', {

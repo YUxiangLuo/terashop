@@ -34,7 +34,7 @@ async function shipped(quantity = 2, fulfilled = quantity, online = false): Prom
   let intent: FixtureIntent | undefined;
   if (online) { intent = await fixtureIntent(order, buyer); await settleIntent(intent); }
   else await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
-  const shipment = await checked<{ id: string }>(rpc('create_fulfillment', { order_id: order.id, items: lineItems(order.itemId, fulfilled) }, admin.token));
+  const shipment = await checked<{ id: string }>(rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: lineItems(order.itemId, fulfilled) }, admin.token));
   return { buyer, order, id: shipment.id, intent };
 }
 const authorize = (s: Shipment, quantity = 1, key = crypto.randomUUID(), token = admin.token): Promise<Return> => checked(rpc('create_return', { fulfillment_id: s.id, items: lineItems(s.order.itemId, quantity), idempotency_key: key, reason: 'Customer return' }, token));
@@ -78,7 +78,7 @@ test('相同 SKU 的商业行不混用；规范化拆行/重排重试保持同�
   const order = await checked<{ id: string }>(rpc('create_order_from_quote', { quote_id: quote.id }, buyer.token));
   await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
   const lines = await checked<Array<{ id: string; attributes: { name: string } }>>(api(`/rest/v1/order_items?order_id=eq.${order.id}&select=id,attributes`, { token: buyer.token }));
-  const f = await checked<{ id: string }>(rpc('create_fulfillment', { order_id: order.id, items: lines.map(l => ({ order_item_id: l.id, quantity: 2 })) }, admin.token));
+  const f = await checked<{ id: string }>(rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: lines.map(l => ({ order_item_id: l.id, quantity: 2 })) }, admin.token));
   const partial = await checked<Return>(rpc('create_return', { fulfillment_id:f.id,items:lineItems(lines[0].id,1),idempotency_key:crypto.randomUUID() },admin.token));
   await expect(database`insert into commerce.return_lines(return_id,order_id,fulfillment_id,order_item_id,quantity)
     values (${partial.id}::uuid,${order.id}::uuid,${f.id}::uuid,${lines[1].id}::uuid,1)`.execute()).rejects.toThrow('authorization fingerprint');
@@ -155,7 +155,7 @@ for (const beforeRefund of [true,false]) test(`已发货商品${beforeRefund ? '
   const s = await shipped(2); const before = await stockOf(fixture.sku);
   const r = await authorize(s, 2);
   if (beforeRefund) await disposition(await receive(r, 2), 2);
-  await checked(rpc('refund_order_v2', { order_id: s.order.id, items: lineItems(s.order.itemId, 2), restock: true, idempotency_key: crypto.randomUUID() }, admin.token));
+  await checked(rpc('refund_order', { order_id: s.order.id, items: lineItems(s.order.itemId, 2), restock: true, idempotency_key: crypto.randomUUID() }, admin.token));
   expect(await stockOf(fixture.sku)).toBe(before + (beforeRefund ? 2 : 0));
   expect((await ledger(s)).refunds[0].lines[0]).toMatchObject({ quantity: 2, cancelled_quantity: 0, restocked_quantity: 0 });
   if (!beforeRefund) await disposition(await receive(r, 2), 2);
@@ -165,7 +165,7 @@ for (const beforeRefund of [true,false]) test(`已发货商品${beforeRefund ? '
 
 test('混合退款仅释放未发货取消量；实收报废不回库，实收回库量与取消量合计不超过原扣减', async () => {
   const s = await shipped(4, 2); const before = await stockOf(fixture.sku);
-  await checked(rpc('refund_order', { order_id: s.order.id, items: lineItems(s.order.itemId, 4), restock: true }, admin.token));
+  await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: s.order.id, items: lineItems(s.order.itemId, 4), restock: true }, admin.token));
   expect((await ledger(s)).refunds[0].lines[0]).toMatchObject({ quantity: 4, cancelled_quantity: 2, restocked_quantity: 2 });
   expect(await stockOf(fixture.sku)).toBe(before + 2);
   const r = await authorize(s, 2); const receipt = await receive(r, 2);
@@ -180,7 +180,7 @@ test('退回另一仓后再退款，未发货量仍只恢复原扣减仓，不�
   const receipt=await receive(await authorize(s),1,secondary);
   const prior=await otherStock();
   await disposition(receipt);
-  await checked(rpc('refund_order',{order_id:s.order.id,items:lineItems(s.order.itemId,2),restock:true},admin.token));
+  await checked(rpc('refund_order',{ idempotency_key: crypto.randomUUID(),order_id:s.order.id,items:lineItems(s.order.itemId,2),restock:true},admin.token));
   expect(await stockOf(fixture.sku)).toBe(before+1);
   expect(await otherStock()).toBe(prior+1);
   expect((await ledger(s)).refunds[0].lines[0]).toMatchObject({restocked_quantity:1,cancelled_quantity:1});
@@ -188,10 +188,10 @@ test('退回另一仓后再退款，未发货量仍只恢复原扣减仓，不�
 
 test('保留未发货量时可选择纯金额退款；Return 不自动改写既有商品退款的取消语义', async () => {
   const s=await shipped(2,1); await disposition(await receive(await authorize(s)));
-  await checked(rpc('refund_order',{order_id:s.order.id,amount:10},admin.token));
+  await checked(rpc('refund_order',{ idempotency_key: crypto.randomUUID(),order_id:s.order.id,amount:10},admin.token));
   const balance=await checked<{lines:Array<{available_quantity:number;cancelled_quantity:number}>}>(rpc('get_order_fulfillment_balance',{order_id:s.order.id},s.buyer.token));
   expect(balance.lines[0]).toMatchObject({available_quantity:1,cancelled_quantity:0});
-  await checked(rpc('create_fulfillment',{order_id:s.order.id,items:lineItems(s.order.itemId,1)},admin.token));
+  await checked(rpc('create_fulfillment',{idempotency_key:crypto.randomUUID(),order_id:s.order.id,items:lineItems(s.order.itemId,1)},admin.token));
   expect((await ledger(s)).balances).toMatchObject({captured:20,refunded:10,is_balanced:true});
 });
 
@@ -221,7 +221,7 @@ test('退款回库触发器不能凭无资金关联的成功头生成库存，�
 });
 
 test('只退金额也可以稍后收货处置，不猜商品退款数量', async () => {
-  const s = await shipped(2); await checked(rpc('refund_order', { order_id: s.order.id }, admin.token));
+  const s = await shipped(2); await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: s.order.id }, admin.token));
   const r = await authorize(s, 2); await disposition(await receive(r, 2), 2);
   const current = await ledger(s); expect(current.refunds[0].lines).toEqual([]); expect(current.balances.refunded).toBe(20);
   const [item] = await database`select refunded_quantity from public.order_items where id=${s.order.itemId}::uuid`; expect(item.refunded_quantity).toBe(0);
@@ -231,11 +231,11 @@ test('零价商品仍可实际收货和回库，不通过虚构零金额退款�
   const free = await paymentFixture(admin); extraProducts.push(free.productId);
   await checked(api(`/rest/v1/product_variants?id=eq.${free.variantId}`, { service:true, method:'PATCH', body:{price:0} }));
   const buyer=await signup();
-  const order=await checked<{id:string}>(rpc('create_order',{address:TEST_ADDRESS,items:[{variant_id:free.variantId,quantity:1},{variant_id:fixture.variantId,quantity:1}]},buyer.token));
+  const order=await checked<{id:string}>(rpc('create_order',{idempotency_key:crypto.randomUUID(),address:TEST_ADDRESS,items:[{variant_id:free.variantId,quantity:1},{variant_id:fixture.variantId,quantity:1}]},buyer.token));
   await checked(rpc('mark_order_paid',{order_id:order.id},admin.token));
   const [line]=await checked<Array<{id:string}>>(api(`/rest/v1/order_items?order_id=eq.${order.id}&variant_id=eq.${free.variantId}&select=id`,{token:buyer.token}));
-  const f=await checked<{id:string}>(rpc('create_fulfillment',{order_id:order.id,items:lineItems(line.id,1)},admin.token));
-  expect((await rpc('refund_order',{order_id:order.id,items:lineItems(line.id,1),restock:true},admin.token)).status).toBe(400);
+  const f=await checked<{id:string}>(rpc('create_fulfillment',{idempotency_key:crypto.randomUUID(),order_id:order.id,items:lineItems(line.id,1)},admin.token));
+  expect((await rpc('refund_order',{ idempotency_key: crypto.randomUUID(),order_id:order.id,items:lineItems(line.id,1),restock:true},admin.token)).status).toBe(400);
   const r=await checked<Return>(rpc('create_return',{fulfillment_id:f.id,items:lineItems(line.id,1),idempotency_key:crypto.randomUUID()},admin.token));
   await disposition(await receive(r),1);
   expect(await stockOf(free.sku)).toBe(100);

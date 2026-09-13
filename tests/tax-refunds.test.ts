@@ -22,7 +22,7 @@ afterAll(async () => { try { await fixtures.run(); } finally { await database.cl
 describe('修复：改地址重算税与运法校验', () => {
   test('有测试税率的 US → CA 必须取消重下，原税额与地址快照不变', async () => {
     const u = await signup();
-    const { data: o } = await rpc('create_order', {
+    const { data: o } = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
     const order = o as { id: string; tax_total: number; total: number };
@@ -42,7 +42,7 @@ describe('修复：改地址重算税与运法校验', () => {
     expect(unchanged.shipping_address.country).toBe('US');
     expect(Number(unchanged.tax_total)).toBeCloseTo(1.29);
     await checked(rpc('cancel_order', { order_id: order.id }, u.token));
-    const replacement = await checked<{ id: string; shipping_address: { country: string }; tax_total: number; total: number }>(rpc('create_order', {
+    const replacement = await checked<{ id: string; shipping_address: { country: string }; tax_total: number; total: number }>(rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }],
       address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Infinite Loop, CA' },
     }, u.token));
@@ -55,7 +55,7 @@ describe('修复：改地址重算税与运法校验', () => {
   test('改地址后原运法不支持新国家 → 拒绝', async () => {
     const u = await signup();
     const intl = await shippingByName('Regional shipping');       // 仅 CA/JP/SG
-    const { data: o } = await rpc('create_order', {
+    const { data: o } = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }],
       address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Infinite Loop' },
       shipping_method_id: intl,
@@ -117,7 +117,7 @@ describe('修复：退款闭环', () => {
     owner = await signup();
     // Each case starts paid but unrefunded; no preceding test supplies state.
     // 商品净额 20.79、商品税 2.70；另留 8 运费，验证商品退完不自动退配送费。
-    const { data: o } = await rpc('create_order', {
+    const { data: o } = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 3 }], address: TEST_ADDRESS,
       shipping_method_id: await shippingByName('Standard shipping'),
     }, owner.token);
@@ -128,12 +128,12 @@ describe('修复：退款闭环', () => {
   });
 
   test('非 admin 不能退款', async () => {
-    const { data } = await rpc('refund_order', { order_id: orderId }, owner.token);
+    const { data } = await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: orderId }, owner.token);
     expect((data as { message: string }).message).toBe('admin only');
   });
 
   test('按行部分退款：净额与对应税按数量分摊，推进 partially_refunded', async () => {
-    const { data } = await rpc('refund_order', {
+    const { data } = await rpc('refund_order', { idempotency_key: crypto.randomUUID(),
       order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }], reason: '破损一件',
     }, admin.token);
     expect((data as { financial_status: string }).financial_status).toBe('partially_refunded');
@@ -152,16 +152,16 @@ describe('修复：退款闭环', () => {
   });
 
   test('超量退同一行被拒', async () => {
-    await checked(rpc('refund_order', { order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }] }, admin.token));
-    const { data } = await rpc('refund_order', {
+    await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }] }, admin.token));
+    const { data } = await rpc('refund_order', { idempotency_key: crypto.randomUUID(),
       order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 3 }], // 已退1，最多再退2
     }, admin.token);
     expect((data as { message: string }).message).toContain('quantity exceeds available');
   });
 
   test('退完该行取剩余全部（无舍入误差）', async () => {
-    await checked(rpc('refund_order', { order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }] }, admin.token));
-    await rpc('refund_order', {
+    await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 1 }] }, admin.token));
+    await rpc('refund_order', { idempotency_key: crypto.randomUUID(),
       order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 2 }],
     }, admin.token);
     const { data: items } = await api(
@@ -172,16 +172,16 @@ describe('修复：退款闭环', () => {
   });
 
   test('自定义金额超额被拒；退剩余差额 → refunded', async () => {
-    await checked(rpc('refund_order', { order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 3 }] }, admin.token));
-    const over = await rpc('refund_order', { order_id: orderId, amount: 999 }, admin.token);
+    await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: orderId, items: [{ order_item_id: orderItemId, quantity: 3 }] }, admin.token));
+    const over = await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: orderId, amount: 999 }, admin.token);
     expect((over.data as { message: string }).message).toContain('exceeds available refundable balance');
 
     // 商品净额和对应税已退尽；剩余运费以显式未分配金额退款，不猜测组成。
-    const { data } = await rpc('refund_order', { order_id: orderId, reason: '剩余金额退款' }, admin.token);
+    const { data } = await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: orderId, reason: '剩余金额退款' }, admin.token);
     expect((data as { financial_status: string }).financial_status).toBe('refunded');
 
     // 已全额退款的订单不再可退（状态守卫先于余额检查触发）
-    const again = await rpc('refund_order', { order_id: orderId }, admin.token);
+    const again = await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: orderId }, admin.token);
     expect((again.data as { message: string }).message).toContain('not refundable');
   });
 
@@ -189,13 +189,13 @@ describe('修复：退款闭环', () => {
     const before = await stockOf(sku);
     const u = await signup();
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
     }, u.token);
     const oid = (o as { id: string }).id;
     await rpc('mark_order_paid', { order_id: oid }, admin.token);
     const { data: items } = await api(`/rest/v1/order_items?order_id=eq.${oid}&select=id`, { token: u.token });
 
-    await rpc('refund_order', {
+    await rpc('refund_order', { idempotency_key: crypto.randomUUID(),
       order_id: oid, items: [{ order_item_id: (items as { id: string }[])[0].id, quantity: 2 }],
       restock: true, reason: '七天无理由',
     }, admin.token);
@@ -209,9 +209,9 @@ describe('修复：退款闭环', () => {
   test('未支付订单不能退款', async () => {
     const u = await signup();
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
-    const { data } = await rpc('refund_order', { order_id: (o as { id: string }).id }, admin.token);
+    const { data } = await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: (o as { id: string }).id }, admin.token);
     expect((data as { message: string }).message).toContain('not refundable');
   });
 });
@@ -220,7 +220,7 @@ describe('修复：退款闭环', () => {
 test('payment_transactions.amount 不允许负数（方向由 kind 表达）', async () => {
     const u = await signup();
     const { data: o } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
     resources.defer(() => checked(rpc('cancel_order', { order_id: (o as { id: string }).id }, u.token)));
     await expect(withRollback(database, sql => sql`

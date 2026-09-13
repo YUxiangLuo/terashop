@@ -21,7 +21,7 @@ async function fixture(sql: TransactionSQL) {
   await sql`select set_config('request.jwt.claims',${JSON.stringify({ sub: buyer.userId, role: 'authenticated' })},true)`;
   return async (lines = 1) => {
     const items = Array.from({ length: lines }, (_, i) => ({ variant_id: v, quantity: 1, attributes: { label: String(i) } }));
-    const [row] = await sql`select public.create_order(${JSON.stringify(items)}::text::jsonb,address=>${JSON.stringify({ ...TEST_ADDRESS, country: 'NZ' })}::text::jsonb,shipping_method_id=>${shipping}::uuid,discount_code=>${code}) o`;
+    const [row] = await sql`select public.create_order(${JSON.stringify(items)}::text::jsonb,${crypto.randomUUID()},address=>${JSON.stringify({ ...TEST_ADDRESS, country: 'NZ' })}::text::jsonb,shipping_method_id=>${shipping}::uuid,discount_code=>${code}) o`;
     return row.o as { id: string; total: number };
   };
 }

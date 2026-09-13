@@ -32,7 +32,7 @@
 ## ADR-004：库存与履约数量
 
 Quote 流程采用 `on_hand - active reserved = available`：报价预占、转单继续持有，支付成功时在同一事务中转为实际扣减；取消/超时仅释放预占。
-`create_order` / `create_order_v2` 在单事务中创建并转换 15 分钟 Quote，不再提前扣库存；所有结账由 `expire_checkout_quotes` 统一过期。订单及意图的付款期限不可延长，转单沿用报价期限。
+`create_order` 在单事务中创建并转换 15 分钟 Quote，不再提前扣库存；所有结账由 `expire_checkout_quotes` 统一过期。订单及意图的付款期限不可延长，转单沿用报价期限。
 `inventory_movements` 只记录真实 on_hand 变化；取消/退款以原始负流水为回补依据，不依赖变体当前的库存配置。所有订单必须先付款再履约，避免未付款却已出库的订单无法安全过期。
 
 每次预占行 INSERT 都更新相应库存行的 `reservation_revision`，但不改 on_hand、不记物理流水。单纯行锁不能防止 REPEATABLE READ 旧快照漏看其他客户的预占；真实版本写冲突要求调用方重试整笔事务。每条新增履约事实也写父订单版本，即使连续部分履约没有改变状态投影，RPC 与受信 INSERT 都不能绕过。
@@ -74,7 +74,7 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 `order_adjustments`、`payment_intents`、`payment_transactions`、`fulfillment_lines`、`refunds`、`refund_lines` 和退款金额组件在同一事务内保持一致。
 渠道退款先进入状态受限的 `refund_requests`，成功后才写成功账本。
 核心账本 append-only，外键采用 `ON DELETE RESTRICT`；不得把模型/账本同步拆成两个网络请求。
-订单、履约和手工退款的 `*_v2` 命令通过请求指纹与事务内幂等记录支持重试；基础入口仍被命令链使用，不能只删除包装而不调整调用关系。
+订单、履约和手工退款分别只公开 `create_order`、`create_fulfillment`、`refund_order`，通过必填幂等键、请求指纹与事务内幂等记录支持重试。不保留版本后缀、兼容别名或非幂等公开重载；履约和退款的内部写入由 private 函数承载。
 
 ## ADR-009：支付信任边界与 Outbox
 
@@ -240,7 +240,7 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 选择简化库存模型：`on_hand` 是未售出的库存余额，`available = on_hand - active reserved`。报价预占、转单继续持有、付款消费预占并扣减，发货不再扣减；不引入实物在库/已售未发货 `committed` 账本。
 
-`create_order` 是创建并转换 Quote 的便捷入口，两步同事务，失败整体回滚；内部随机 Quote key 与调用方显式报价的 key 无关联。`create_order_v2` 保留独立 `order.create` 幂等范围、规范化请求指纹和当前订单 DTO 重放，成功重试不新增 Quote、不延长期限、不重复预占或占用促销。非幂等入口仍不承诺网络重试安全，客户端优先使用 V2 或显式 Quote 流程。
+`create_order` 是创建并转换 Quote 的幂等便捷入口，两步同事务，失败整体回滚；内部随机 Quote key 与调用方显式报价的 key 无关联。该命令使用独立 `order.create` 幂等范围、规范化请求指纹和当前订单 DTO 重放，成功重试不新增 Quote、不延长期限、不重复预占或占用促销。客户端按业务需要选择便捷下单或显式 Quote 流程，两者都支持安全重试。
 
 删除即时扣库实现及 `expire_unpaid_orders`；统一调度 `expire_checkout_quotes`。取消或超时仅释放未付款预占，支付结果未知时保留原有捕获保护和迟到资金对账规则。支付账本/履约双表示的收敛不包含在本次改动中。
 

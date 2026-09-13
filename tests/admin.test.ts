@@ -15,7 +15,7 @@ beforeAll(async () => {
 beforeEach(async () => { customer = await signup(); });
 afterAll(() => cleanup.run());
 
-const fulfill = (order: FixtureOrder, quantity: number, tracking = 'SF001') => rpc('create_fulfillment', {
+const fulfill = (order: FixtureOrder, quantity: number, tracking = 'SF001') => rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(),
   order_id: order.id, items: [{ order_item_id: order.itemId, quantity }], carrier: 'Example carrier', tracking_number: tracking,
 }, admin.token);
 async function givenOrder({ paid = false, fulfilled = 0 } = {}) {
@@ -43,7 +43,7 @@ describe('权限边界', () => {
     const order = await givenOrder();
     for (const [name, body] of [
       ['mark_order_paid', { order_id: order.id }],
-      ['create_fulfillment', { order_id: order.id, items: [{ order_item_id: order.itemId, quantity: 1 }] }],
+      ['create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: [{ order_item_id: order.itemId, quantity: 1 }] }],
       ['adjust_inventory', { variant_id: product.variantId, delta: 10 }],
     ] as const) expect((await rpc(name, body, customer.token)).data).toMatchObject({ message: 'admin only' });
   });
@@ -83,7 +83,7 @@ describe('发货（履约）', () => {
   });
   test('不能发其他订单的 item', async () => {
     const order = await givenOrder({ paid: true }), other = await givenOrder();
-    const result = await rpc('create_fulfillment', {
+    const result = await rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(),
       order_id: order.id, items: [{ order_item_id: other.itemId, quantity: 1 }],
     }, admin.token);
     expect(result.data).toMatchObject({ message: expect.stringContaining('does not belong to this order') });

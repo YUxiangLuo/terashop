@@ -291,7 +291,7 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 {"order_id":"<uuid>","idempotency_key":"refund-command-id","items":[{"order_item_id":"<uuid>","quantity":1}],"restock":true,"reason":"取消未发货商品"}
 ```
 
-手工 `refund_order` / `refund_order_v2` 与 PayPal 使用同一组成合同：
+手工 `refund_order` 与 PayPal 使用同一组成合同：
 
 - `items` 按独立 `order_item_id` / 数量退**商品净额及对应税**。净额仍在 `refund_lines.amount`，税另列组件，不能把两者重复相加。
 - `shipping_amount` 是明确选退的**折后运费、不含税**，可单独传或与 `items` 同传；系统另退对应配送税。省略不退运费，免邮没有正运费可退。
@@ -354,7 +354,7 @@ POST /rest/v1/rpc/receive_return
 | `create_customer` | admin / service | 可选 `email`、`full_name`、`phone`；不附带登录权限 |
 | `anonymize_customer` | admin / service | `customer_id`；不删除交易历史 |
 | `set_default_address` | 地址归属人 / admin / service | `address_id`、`make_default`（默认 true） |
-| `create_fulfillment_v2` | admin | `order_id`、`items`、`idempotency_key`、可选物流信息 |
+| `create_fulfillment` | admin | `order_id`、`items`、`idempotency_key`、可选物流信息 |
 | `adjust_inventory` | admin | `variant_id`、`delta`、`reason`、可选 `note` |
 | `moderate_review` | admin | `review_id`、`status` |
 | `set_user_role` | admin | `user_id`、`role`；最后一名 admin 不可降级 |
@@ -384,13 +384,15 @@ POST /rest/v1/rpc/receive_return
 
 ## 便捷下单与手工命令
 
-以下是当前调用链的一部分，不代表历史兼容承诺；新商城优先采用上面的 Quote 流程。
+以下命令各只有一个公开签名，不保留版本后缀或非幂等重载；需要先展示报价再确认下单时采用上面的 Quote 流程。
 
-- `create_order` / `create_order_v2`：单事务创建并转换 15 分钟 Quote，只预占、不扣 `on_hand`；支付成功才扣减，发货不再扣减。`on_hand` 表示未售出的库存余额，不是实物在库数。未付款取消/超时仅释放预占，统一由 `expire_checkout_quotes` 处理到期。
-- V2 增加请求指纹与幂等键，重试返回原订单当前状态，不新建 Quote、不延长期限。其幂等范围与显式报价独立；取消/过期后同键重试仍返回原订单，需要重新结账时使用新键。`create_order` 无重试去重保证，新客户端优先使用 V2 或显式 Quote 流程。
-- `create_fulfillment`：无幂等键的基础履约命令，所有订单均须先付款；安全重试使用 `create_fulfillment_v2`。
+- `create_order`：必填 `items`、`idempotency_key`，地址等参数与 Quote 一致。单事务创建并转换 15 分钟 Quote，只预占、不扣 `on_hand`；支付成功才扣减，发货不再扣减。`on_hand` 表示未售出的库存余额，不是实物在库数。未付款取消/超时仅释放预占，统一由 `expire_checkout_quotes` 处理到期。
+- 下单重试返回原订单当前状态，不新建 Quote、不延长期限。其幂等范围与显式报价独立；取消/过期后同键重试仍返回原订单，需要重新结账时使用新键。
+- `create_fulfillment`：必填 `order_id`、`items`、`idempotency_key`；所有订单均须先付款，返回履约 DTO，行明细通过订单详情或账本读取。
 - `mark_order_paid`：`order_id`、`provider:"manual"`；仅手工收款，线上意图仍可扣款时禁止使用。
-- `refund_order` / `refund_order_v2`：同步手工/测试退款，不代表真实渠道已退款；不能穿透活跃异步退款请求。
+- `refund_order`：必填 `order_id`、`idempotency_key`；同步手工/测试退款，不代表真实渠道已退款；不能穿透活跃异步退款请求。
+
+三个命令的 `idempotency_key` 去除首尾空白后必须为 1–200 字符。一次业务操作生成一个键，网络重试复用原键；相同键配不同请求指纹会报错。下单按客户隔离，履约和手工退款各使用店铺级命令范围；不同管理员重试同一操作应复用同一键。不要在每次网络重试时生成新键。
 
 金额口径：`order_items.total` 为毛额，`line_total` 为扣行折扣后的净额；`orders.discount_total` 只含商品折扣。
 免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payment_transactions.amount` 恒正，方向由 `kind` 表达。退款不等于退货收货：退款 `restock` 仅释放未发货取消量，已发货商品由实际收货后的 disposition 驱动回库。

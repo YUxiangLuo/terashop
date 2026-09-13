@@ -80,21 +80,18 @@ test('单一 USD 与配送国家无关，seed 不暗中安装任何税率', asyn
 test('地址簿与两种下单路径均不猜测国家，拒绝缺失/空白国家及非法地址字段', async () => {
   const { country: _country, ...withoutCountry } = TEST_ADDRESS;
   for (const address of [withoutCountry, { ...TEST_ADDRESS, country: '' }, { ...TEST_ADDRESS, country: null }]) {
-    for (const command of ['create_order_v2', 'create_checkout_quote']) {
+    for (const command of ['create_order', 'create_checkout_quote']) {
       const result = await rpc(command, {
         items: items(), address, idempotency_key: crypto.randomUUID(),
       }, buyer.token);
       expect(result.status).toBe(400);
       expect(result.data).toMatchObject({ message: expect.stringContaining('country') });
     }
-    const direct = await rpc('create_order', { items: items(), address }, buyer.token);
-    expect(direct.status).toBe(400);
-    expect(direct.data).toMatchObject({ message: expect.stringContaining('country') });
     const inserted = await api('/rest/v1/addresses', { token: buyer.token, method: 'POST', body: address });
     expect(inserted.status).toBe(400);
   }
   for (const overrides of [{ recipient_name: 123 }, { line1: '   ' }, { line2: [] }, { region: {} }]) {
-    const result = await rpc('create_order', { items: items(), address: { ...TEST_ADDRESS, ...overrides } }, buyer.token);
+    const result = await rpc('create_order', { idempotency_key: crypto.randomUUID(), items: items(), address: { ...TEST_ADDRESS, ...overrides } }, buyer.token);
     expect(result.status).toBe(400);
   }
 });
@@ -116,7 +113,7 @@ test('通用地址行可经地址簿创建；订单地址快照不可编辑，�
   }));
   try {
     expect(address).toMatchObject({ country: 'HK', phone: null, region: null, city: null, postal_code: null });
-    const order = await checked<{ id: string; shipping_address: Record<string, unknown> }>(rpc('create_order', {
+    const order = await checked<{ id: string; shipping_address: Record<string, unknown> }>(rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: items(), address_id: address.id,
     }, buyer.token));
     orders.push(order.id);
@@ -135,7 +132,7 @@ test('通用地址行可经地址簿创建；订单地址快照不可编辑，�
     expect(unchanged.shipping_address.line2).toBe('Unit 7');
     await checked(rpc('cancel_order', { order_id: order.id }, buyer.token));
     orders.pop();
-    const replacement = await checked<{ id: string; shipping_address: Record<string, unknown> }>(rpc('create_order', {
+    const replacement = await checked<{ id: string; shipping_address: Record<string, unknown> }>(rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: items(), address_id: address.id,
     }, buyer.token));
     orders.push(replacement.id);
@@ -154,7 +151,7 @@ test('数据库拒绝非 USD 订单和支付，不能只靠 Edge 校验', async 
   });
   expect(invalid.status).toBe(400);
   expect(invalid.data).toMatchObject({ code: '23514', message: expect.stringContaining('orders_currency_usd_chk') });
-  const order = await checked<{ id: string }>(rpc('create_order', { items: items(), address: TEST_ADDRESS }, buyer.token));
+  const order = await checked<{ id: string }>(rpc('create_order', { idempotency_key: crypto.randomUUID(), items: items(), address: TEST_ADDRESS }, buyer.token));
   orders.push(order.id);
   await expect(withRollback(database, sql => sql`
     insert into commerce.payment_transactions(order_id,provider,kind,status,amount,currency)

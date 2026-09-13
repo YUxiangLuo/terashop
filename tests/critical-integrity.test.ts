@@ -24,7 +24,7 @@ beforeAll(async () => {
 
 describe('关键完整性：输入与 Storefront 可见性', () => {
   test('国家码统一大写，不能通过小写国家码绕过显式配置的测试税率', async () => {
-    const { data } = await rpc('create_order', {
+    const { data } = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }],
       address: { ...TEST_ADDRESS, country: 'us' },
     }, customer.token);
@@ -137,7 +137,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
   });
 
   test('客户订单 RPC 不返回 admin_note', async () => {
-    const { data: created } = await rpc('create_order', {
+    const { data: created } = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, customer.token);
     const orderId = (created as { id: string }).id;
@@ -153,7 +153,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
   });
 
   test('已支付订单不能通过修改地址直接改变总额', async () => {
-    const { data: created } = await rpc('create_order', {
+    const { data: created } = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, customer.token);
     const order = created as { id: string; total: number };
@@ -174,7 +174,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
 
   test('同一履约 payload 的重复订单项先合并，不能超发', async () => {
     const owner = await signup();
-    const { data: created } = await rpc('create_order', {
+    const { data: created } = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const orderId = (created as { id: string }).id;
@@ -183,7 +183,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     });
     const orderItemId = (lines as { id: string }[])[0].id;
 
-    const { data } = await rpc('create_fulfillment', {
+    const { data } = await rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(),
       order_id: orderId,
       items: [
         { order_item_id: orderItemId, quantity: 1 },
@@ -192,7 +192,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     }, admin.token);
     expect((data as { message: string }).message).toContain('exceeds remaining');
 
-    const mixedSign = await rpc('create_fulfillment', {
+    const mixedSign = await rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(),
       order_id: orderId,
       items: [
         { order_item_id: orderItemId, quantity: 2 },
@@ -210,7 +210,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
   test('按行退款也不能突破剩余可退的成功收款额', async () => {
     const owner = await signup();
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: keyboardId, quantity: 1 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: keyboardId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const order = created as { id: string; total: number };
     await rpc('mark_order_paid', { order_id: order.id }, admin.token);
@@ -222,8 +222,8 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     const lineId = (lines as { id: string }[])[0].id;
     const firstRefund = Number((Number(order.total) - 1).toFixed(2));
 
-    await rpc('refund_order', { order_id: order.id, amount: firstRefund }, admin.token);
-    const second = await rpc('refund_order', {
+    await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id, amount: firstRefund }, admin.token);
+    const second = await rpc('refund_order', { idempotency_key: crypto.randomUUID(),
       order_id: order.id,
       items: [{ order_item_id: lineId, quantity: 1 }],
     }, admin.token);
@@ -252,7 +252,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     }
 
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: cableId, quantity: 1 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: cableId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const orderId = (created as { id: string }).id;
     await rpc('mark_order_paid', { order_id: orderId }, admin.token);
@@ -266,7 +266,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
       service: true, method: 'PATCH', body: { track_inventory: false },
     });
     try {
-      const refunded = await rpc('refund_order', {
+      const refunded = await rpc('refund_order', { idempotency_key: crypto.randomUUID(),
         order_id: orderId,
         items: [{ order_item_id: lineId, quantity: 1 }],
         restock: true,
@@ -300,7 +300,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     try {
       const owner = await signup();
       const { data: created } = await rpc('create_order', {
-        items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
+        idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
       }, owner.token);
       const order = created as { id: string; total: number };
       expect(Number(order.total)).toBe(0);
@@ -330,7 +330,7 @@ describe('关键完整性：并发、库存和审计', () => {
       before = await stockOf('CABLE-1M');
     }
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: cableId, quantity: 1 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: cableId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     expect(await stockOf('CABLE-1M')).toBe(before);
 

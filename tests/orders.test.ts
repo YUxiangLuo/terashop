@@ -98,6 +98,7 @@ describe('下单：金额计算', () => {
     const { data } = await rpc(
       'create_order',
       {
+        idempotency_key: crypto.randomUUID(),
         items: [
           { variant_id: kbRedId, quantity: 1 },
           { variant_id: cableId, quantity: 1 },
@@ -148,6 +149,7 @@ describe('下单：金额计算', () => {
     const { data } = await rpc(
       'create_order',
       {
+        idempotency_key: crypto.randomUUID(),
         items: [
           { variant_id: cableId, quantity: 2 },
           { variant_id: cableId, quantity: 2 },
@@ -174,6 +176,7 @@ describe('下单：金额计算', () => {
     const { data } = await rpc(
       'create_order',
       {
+        idempotency_key: crypto.randomUUID(),
         items: [
           { variant_id: cableId, quantity: half },
           { variant_id: cableId, quantity: half },
@@ -194,6 +197,7 @@ describe('下单：金额计算', () => {
     await rpc(
       'create_order',
       {
+        idempotency_key: crypto.randomUUID(),
         items: [
           { variant_id: mugId, quantity: 1 },
           { variant_id: cableId, quantity: 999999 }, // 必失败，整单回滚
@@ -213,7 +217,7 @@ describe('下单：金额计算', () => {
     const ship = await shippingByName('Standard shipping');
     const { data } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 2 }], address: TEST_ADDRESS, shipping_method_id: ship },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: kbRedId, quantity: 2 }], address: TEST_ADDRESS, shipping_method_id: ship },
       buyer.token
     );
     const o = data as Record<string, unknown>;
@@ -226,7 +230,7 @@ describe('下单：金额计算', () => {
     const intl = await shippingByName('Regional shipping');
     const bad = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, shipping_method_id: intl },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, shipping_method_id: intl },
       buyer.token
     );
     expect((bad.data as { message: string }).message).toContain('not available for this country');
@@ -235,6 +239,7 @@ describe('下单：金额计算', () => {
     const ok = await rpc(
       'create_order',
       {
+        idempotency_key: crypto.randomUUID(),
         items: [{ variant_id: mugId, quantity: 1 }],
         address: { recipient_name: 'John', phone: '123', country: 'CA', line1: '1 Infinite Loop' },
         shipping_method_id: intl,
@@ -247,16 +252,16 @@ describe('下单：金额计算', () => {
   });
 
   test('无效变体 / 空 items / 缺地址都被拒绝', async () => {
-    const bad1 = await rpc('create_order', {
+    const bad1 = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: '00000000-0000-0000-0000-000000000000', quantity: 1 }],
       address: TEST_ADDRESS,
     }, buyer.token);
     expect((bad1.data as { message: string }).message).toContain('variant not available');
 
-    const bad2 = await rpc('create_order', { items: [], address: TEST_ADDRESS }, buyer.token);
+    const bad2 = await rpc('create_order', { idempotency_key: crypto.randomUUID(), items: [], address: TEST_ADDRESS }, buyer.token);
     expect((bad2.data as { message: string }).message).toContain('non-empty');
 
-    const bad3 = await rpc('create_order', {
+    const bad3 = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }],
       address: { phone: '1', country: 'US' },
     }, buyer.token);
@@ -270,7 +275,7 @@ describe('下单：折扣码', () => {
     await promotionFixture(resources, { name: '门槛测试码', code, type: 'order_percentage', params: { percent: 10, threshold: 100 } });
     const { data } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
       buyer.token
     );
     expect((data as { message: string }).message).toContain('minimum subtotal');
@@ -278,12 +283,12 @@ describe('下单：折扣码', () => {
 
   test('同一买家重复使用被拒绝（大小写不敏感）', async () => {
     // 独立建立兑换事实；其他测试的未付款订单会在 afterEach 取消。
-    expect((await rpc('create_order', {
+    expect((await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10',
     }, buyer.token)).status).toBe(200);
     const { data } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'welcome10' },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'welcome10' },
       buyer.token
     );
     expect((data as { message: string }).message).toBe('discount code already used');
@@ -292,7 +297,7 @@ describe('下单：折扣码', () => {
   test('不存在 / 过期的折扣码', async () => {
     const fake = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'FAKE' },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'FAKE' },
       buyer.token
     );
     expect((fake.data as { message: string }).message).toContain('invalid or expired');
@@ -301,7 +306,7 @@ describe('下单：折扣码', () => {
     await promotionFixture(resources, { name: '过期码', code, type: 'order_percentage', params: { percent: 50 }, ends_at: '2020-01-01T00:00:00Z' });
     const expired = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
       buyer.token
     );
     expect((expired.data as { message: string }).message).toContain('invalid or expired');
@@ -324,7 +329,7 @@ describe('下单：折扣码', () => {
 
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
       stranger.token
     );
     expect(Number((o as Record<string, unknown>).discount_total)).toBeCloseTo(5);
@@ -350,7 +355,7 @@ describe('下单：折扣码', () => {
     // 再次使用成功
     const { data: o2 } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
       stranger.token
     );
     expect((o2 as Record<string, unknown>).status).toBe('open');
@@ -361,7 +366,7 @@ describe('取消订单', () => {
   test('重复取消报错', async () => {
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
       stranger.token
     );
     const id = (o as { id: string }).id;
@@ -373,7 +378,7 @@ describe('取消订单', () => {
   test('不能取消别人的订单', async () => {
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
       buyer.token
     );
     const { data } = await rpc('cancel_order', { order_id: (o as { id: string }).id }, stranger.token);
@@ -385,7 +390,7 @@ describe('修改收货地址', () => {
   test('pending 快照不可改；引用别人地址簿仍不会穿透归属', async () => {
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS },
       buyer.token
     );
     const orderId = (o as { id: string }).id;
@@ -437,7 +442,7 @@ describe('RLS 权限', () => {
   });
 
   test('买家读不到别人的订单与明细', async () => {
-    const mine = await checked<{ id: string }>(rpc('create_order', {
+    const mine = await checked<{ id: string }>(rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, buyer.token));
     const otherId = mine.id;
@@ -458,7 +463,7 @@ describe('RLS 权限', () => {
   });
 
   test('未登录不能下单', async () => {
-    const { status, data } = await rpc('create_order', {
+    const { status, data } = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: mugId, quantity: 1 }],
       address: TEST_ADDRESS,
     });

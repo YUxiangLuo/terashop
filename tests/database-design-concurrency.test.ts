@@ -27,7 +27,7 @@ for (const action of ['quote', 'order', 'adjust'] as const) test(`新 Quote 提�
   const result = await staleAfterCommit(async sql => {
     await actor(sql, action === 'adjust' ? admin : second);
     if (action === 'adjust') return sql`select public.adjust_inventory(${f.variantId}::uuid,-1)`;
-    if (action === 'order') return (await sql`select public.create_order(jsonb_build_array(jsonb_build_object('variant_id',${f.variantId}::uuid,'quantity',1)),address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) o`)[0].o;
+    if (action === 'order') return (await sql`select public.create_order(jsonb_build_array(jsonb_build_object('variant_id',${f.variantId}::uuid,'quantity',1)),${crypto.randomUUID()},address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) o`)[0].o;
     return (await sql`select public.create_checkout_quote(jsonb_build_array(jsonb_build_object('variant_id',${f.variantId}::uuid,'quantity',1)),${crypto.randomUUID()},address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) q`)[0].q;
   }, async () => {
     quoteId = (await checked<{ id: string }>(rpc('create_checkout_quote', { items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS, idempotency_key: crypto.randomUUID() }, first.token))).id;
@@ -49,12 +49,12 @@ for (const direct of [false, true]) test(`连续部分履约无状态变化时�
   const f = await fixture(), buyer = await signup(), order = await fixtureOrder(f, buyer, 4, false);
   await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
   const items = (quantity: number) => [{ order_item_id: order.itemId, quantity }];
-  await checked(rpc('create_fulfillment', { order_id: order.id, items: items(1) }, admin.token));
+  await checked(rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: items(1) }, admin.token));
   const result = await staleAfterCommit(async sql => {
     await actor(sql, admin);
     if (direct) return sql`insert into public.fulfillments(order_id,items) values (${order.id}::uuid,${JSON.stringify(items(2))}::text::jsonb)`;
-    return sql`select public.create_fulfillment(${order.id}::uuid,${JSON.stringify(items(2))}::text::jsonb)`;
-  }, () => checked(rpc('create_fulfillment', { order_id: order.id, items: items(2) }, admin.token)));
+    return sql`select public.create_fulfillment(${order.id}::uuid,${JSON.stringify(items(2))}::text::jsonb,${crypto.randomUUID()})`;
+  }, () => checked(rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: items(2) }, admin.token)));
   expect(result.error).toMatchObject({ errno: '40001' });
   const [balance] = await database`select sum(quantity)::int fulfilled from commerce.fulfillment_lines where order_item_id=${order.itemId}::uuid`;
   expect(balance.fulfilled).toBe(3);

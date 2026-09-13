@@ -63,7 +63,7 @@ export async function fixtureOrder(
   }
   const order = await checked<{ id: string; total: number; currency: string }>(quoted
     ? command('create_order_from_quote', { quote_id: quoteId! }, buyer.token)
-    : command('create_order', input, buyer.token));
+    : command('create_order', { ...input, idempotency_key: crypto.randomUUID() }, buyer.token));
   const [line] = await checked<Array<{ id: string }>>(api(
     `/rest/v1/order_items?order_id=eq.${order.id}&select=id`, { token: buyer.token },
   ));

@@ -44,8 +44,8 @@ for (const [provider, bound] of [['paypal', false], ['paypal', true]] as const) 
   });
 }
 
-test('V2 订单创建时即冻结快照；改价需取消并创建新 checkout', async () => {
-  const order = await checked<{ id: string; total: number; shipping_address: { country: string } }>(rpc('create_order_v2', {
+test('订单创建时即冻结快照；改价需取消并创建新 checkout', async () => {
+  const order = await checked<{ id: string; total: number; shipping_address: { country: string } }>(rpc('create_order', {
     idempotency_key: crypto.randomUUID(), items: [{ variant_id: fixture.variantId, quantity: 1 }], address: TEST_ADDRESS,
   }, buyer.token));
   const changed = await rpc('update_order_address', {
@@ -58,7 +58,7 @@ test('V2 订单创建时即冻结快照；改价需取消并创建新 checkout',
   ));
   expect(unchanged).toEqual({ total: order.total, shipping_address: order.shipping_address });
   await checked(rpc('cancel_order', { order_id: order.id }, buyer.token));
-  const replacement = await checked<{ id: string; total: number; shipping_address: { country: string } }>(rpc('create_order_v2', {
+  const replacement = await checked<{ id: string; total: number; shipping_address: { country: string } }>(rpc('create_order', {
     idempotency_key: crypto.randomUUID(), items: [{ variant_id: fixture.variantId, quantity: 1 }], address: OTHER_ADDRESS,
   }, buyer.token));
   expect(replacement.id).not.toBe(order.id);
@@ -100,7 +100,7 @@ test('PayPal declined 后原订单仍冻结，取消后新 checkout 使用新地
   expect(edit.status).toBe(400);
   expect(edit.data).toMatchObject({ message: expect.stringContaining('immutable') });
   await checked(rpc('cancel_order', { order_id: order.id }, buyer.token));
-  const replacement = await checked<{ id: string; total: number; currency: string }>(rpc('create_order_v2', {
+  const replacement = await checked<{ id: string; total: number; currency: string }>(rpc('create_order', {
     idempotency_key: crypto.randomUUID(), items: [{ variant_id: fixture.variantId, quantity: 1 }], address: OTHER_ADDRESS,
   }, buyer.token));
   const next = await fixtureIntent({ ...replacement, itemId: '', quoteId: null }, buyer);

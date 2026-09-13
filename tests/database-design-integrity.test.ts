@@ -122,7 +122,7 @@ test('已创建订单的对外订单号不可修改，包括零元已付订单',
     await sql`update public.product_variants set price=0 where id=${f.v}::uuid`;
     await sql`update public.products set status='active' where id=${f.p}::uuid`;
     await sql`select set_config('request.jwt.claims',${JSON.stringify({ sub: admin.userId, role: 'authenticated' })},true)`;
-    const [row] = await sql`select public.create_order(jsonb_build_array(jsonb_build_object('variant_id',${f.v}::uuid,'quantity',1)),address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) o`;
+    const [row] = await sql`select public.create_order(jsonb_build_array(jsonb_build_object('variant_id',${f.v}::uuid,'quantity',1)),${crypto.randomUUID()},address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) o`;
     await sql`select public.mark_order_paid(${row.o.id}::uuid)`;
     await sql`update public.orders set order_number=default where id=${row.o.id}::uuid`;
   })).rejects.toThrow('order identity and number are immutable');
@@ -132,7 +132,7 @@ test('订单号在受信导入 OVERRIDING SYSTEM VALUE 时仍必须唯一', asyn
   await expect(withRollback(database, async sql => {
     const f = await product(sql); await sql`update public.products set status='active' where id=${f.p}::uuid`;
     await sql`select set_config('request.jwt.claims',${JSON.stringify({ sub: admin.userId, role: 'authenticated' })},true)`;
-    const [row] = await sql`select public.create_order(jsonb_build_array(jsonb_build_object('variant_id',${f.v}::uuid,'quantity',1)),address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) o`;
+    const [row] = await sql`select public.create_order(jsonb_build_array(jsonb_build_object('variant_id',${f.v}::uuid,'quantity',1)),${crypto.randomUUID()},address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) o`;
     await sql`insert into public.orders(order_number,customer_id,email,subtotal,total,shipping_address) overriding system value
       values (${row.o.order_number},${admin.customerId}::uuid,'review@example.invalid',0,0,${JSON.stringify(TEST_ADDRESS)}::text::jsonb)`;
   })).rejects.toMatchObject({ errno: '23505' });

@@ -97,7 +97,7 @@ async function givenPaidOrder(fulfillment: 'none' | 'active' | 'cancelled' = 'no
   if (!payment) throw new Error('paid order has no capture transaction');
   let fulfillmentId: string | undefined;
   if (fulfillment !== 'none') {
-    const result = await checked<{ id: string }>(rpc('create_fulfillment', {
+    const result = await checked<{ id: string }>(rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(),
       order_id: order.id, items: [{ order_item_id: order.itemId, quantity: 1 }],
     }, admin.token));
     fulfillmentId = result.id;
@@ -108,10 +108,37 @@ async function givenPaidOrder(fulfillment: 'none' | 'active' | 'cancelled' = 'no
   return { ...order, paymentId: payment.id, fulfillmentId };
 }
 
+test('三个幂等写入口只暴露一个无后缀签名，并严格要求 idempotency_key', async () => {
+  const names = ['create_order', 'create_fulfillment', 'refund_order'] as const;
+  const signatures: Array<{ proname: string; signatures: number }> = await database`
+    select proname, count(*)::int signatures from pg_proc
+    where pronamespace='public'::regnamespace and proname in (${names[0]},${names[1]},${names[2]})
+    group by proname order by proname`;
+  expect(signatures).toEqual(names.slice().sort().map(proname => ({ proname, signatures: 1 })));
+  for (const name of names) {
+    const [legacy] = await database`select count(*)::int signatures from pg_proc
+      where pronamespace='public'::regnamespace and proname=${`${name}_v2`}`;
+    expect(legacy.signatures).toBe(0);
+    expect((await rpc(`${name}_v2`, {}, admin.token)).status).toBe(404);
+    const base = name === 'create_order' ? { items: [], address: TEST_ADDRESS }
+      : name === 'create_fulfillment' ? { order_id: crypto.randomUUID(), items: [] }
+      : { order_id: crypto.randomUUID() };
+    const token = name === 'create_order' ? buyer.token : admin.token;
+    for (const key of [undefined, null, '', '   ']) {
+      const body = key === undefined ? base : { ...base, idempotency_key: key };
+      const result = await rpc(name, body, token);
+      expect(result.status).toBe(key === undefined ? 404 : 400);
+      expect(result.data).toMatchObject(key === undefined
+        ? { code: 'PGRST202' }
+        : { message: 'idempotency_key is required and must be at most 200 characters' });
+    }
+  }
+});
+
 describe('关系化订单账本', () => {
   test('订单金额自动双写 adjustment ledger，且只通过安全 DTO 暴露', async () => {
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, buyer.token);
     const adjustmentOrderId = (created as { id: string }).id;
 
@@ -127,13 +154,13 @@ describe('关系化订单账本', () => {
     expect(hidden.status).toBe(404);
   });
 
-  test('create_order_v2 对语义相同的重试只建一单、只预占一次库存', async () => {
+  test('create_order 对语义相同的重试只建一单、只预占一次库存', async () => {
     const key = `order-${crypto.randomUUID()}`;
     const before = await checked<{ on_hand: number; reserved: number; available: number }>(rpc(
       'get_inventory_availability', { variant_id: mugId }, admin.token,
     ));
     const [first, replay] = await Promise.all([
-      rpc('create_order_v2', {
+      rpc('create_order', {
         items: [
           { variant_id: mugId, quantity: 1 },
           { variant_id: mugId, quantity: 1 },
@@ -141,7 +168,7 @@ describe('关系化订单账本', () => {
         address: TEST_ADDRESS,
         idempotency_key: key,
       }, buyer.token),
-      rpc('create_order_v2', {
+      rpc('create_order', {
         items: [{ variant_id: mugId, quantity: 2 }],
         address: TEST_ADDRESS,
         idempotency_key: key,
@@ -159,7 +186,7 @@ describe('关系化订单账本', () => {
     expect(await checked(rpc('get_inventory_availability', { variant_id: mugId }, admin.token)))
       .toMatchObject({ on_hand: before.on_hand, reserved: before.reserved + 2, available: before.available - 2 });
 
-    const mismatch = await rpc('create_order_v2', {
+    const mismatch = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 3 }],
       address: TEST_ADDRESS,
       idempotency_key: key,
@@ -200,7 +227,7 @@ describe('关系化订单账本', () => {
 describe('支付交易与已支付快照', () => {
   test('mark_order_paid 直接生成 capture transaction', async () => {
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
     }, buyer.token);
     const order = created as { id: string; total: number };
     const paidOrderId = order.id;
@@ -251,7 +278,7 @@ describe('支付交易与已支付快照', () => {
   test('service-only Payment Intent 捕获具备幂等性并原子推进订单', async () => {
     const owner = await signup();
     const { data: created } = await rpc('create_order', {
-      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
+      idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const orderId = (created as { id: string }).id;
     const intentKey = `pi-${crypto.randomUUID()}`;
@@ -340,7 +367,7 @@ describe('支付交易与已支付快照', () => {
 });
 
 describe('履约行、退款行与 Outbox', () => {
-  test('履约 V2 幂等写入关系化 fulfillment_lines，并成为汇总依据', async () => {
+  test('履约幂等写入关系化 fulfillment_lines，并成为汇总依据', async () => {
     const { id: paidOrderId, itemId: paidOrderItemId } = await givenPaidOrder();
     const key = `fulfillment-${crypto.randomUUID()}`;
     const trackingNumber = `SF-${crypto.randomUUID()}`;
@@ -351,14 +378,14 @@ describe('履约行、退款行与 Outbox', () => {
       carrier: 'Example carrier', tracking_number: trackingNumber,
     };
     const [first, replay] = await Promise.all([
-      rpc('create_fulfillment_v2', body, admin.token),
-      rpc('create_fulfillment_v2', body, admin.token),
+      rpc('create_fulfillment', body, admin.token),
+      rpc('create_fulfillment', body, admin.token),
     ]);
     expect(first.status).toBe(200);
     const fulfillmentId = (first.data as { id: string }).id;
     expect((replay.data as { id: string }).id).toBe(fulfillmentId);
 
-    const mismatch = await rpc('create_fulfillment_v2', {
+    const mismatch = await rpc('create_fulfillment', {
       ...body, items: [{ order_item_id: paidOrderItemId, quantity: 2 }],
     }, admin.token);
     expect(mismatch.status).toBe(400);
@@ -406,13 +433,13 @@ describe('履约行、退款行与 Outbox', () => {
       reason: '账本退款测试',
     };
     const [refunded, replay] = await Promise.all([
-      rpc('refund_order_v2', body, admin.token),
-      rpc('refund_order_v2', body, admin.token),
+      rpc('refund_order', body, admin.token),
+      rpc('refund_order', body, admin.token),
     ]);
     expect(refunded.status).toBe(200);
     expect(replay.data).toEqual(refunded.data);
 
-    const mismatch = await rpc('refund_order_v2', {
+    const mismatch = await rpc('refund_order', {
       ...body, items: [{ order_item_id: paidOrderItemId, quantity: 2 }],
     }, admin.token);
     expect(mismatch.status).toBe(400);

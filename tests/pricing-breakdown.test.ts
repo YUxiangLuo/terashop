@@ -57,7 +57,7 @@ const pricing = (id: string) => checked<Price>(rpc('get_order_pricing', { order_
 const ledger = (id: string) => checked<Ledger>(rpc('get_order_ledger', { order_id: id }, buyer.token));
 async function create(quoted = true, overrides: object = {}): Promise<FixtureOrder> {
   const quote = quoted ? await checked<Price>(rpc('create_checkout_quote', { ...input(overrides), idempotency_key: crypto.randomUUID() }, buyer.token)) : null;
-  const order = await checked<FixtureOrder>(quoted ? rpc('create_order_from_quote', { quote_id: quote!.id }, buyer.token) : rpc('create_order', input(overrides), buyer.token));
+  const order = await checked<FixtureOrder>(quoted ? rpc('create_order_from_quote', { quote_id: quote!.id }, buyer.token) : rpc('create_order', { ...input(overrides), idempotency_key: crypto.randomUUID() }, buyer.token));
   return { ...order, itemId: (await pricing(order.id)).lines[0].id, quoteId: quote?.id ?? null };
 }
 const paid = async (online = false, overrides: object = {}) => {
@@ -178,7 +178,7 @@ test('运费门槛减免与促销免邮分别留存，免邮优惠不重复计�
       expect(sum(p.shipping_line!.discount_allocations)).toBe(800);
       expect(p.promotions[0].amount).toBe(8);
     }
-    expect((await rpc('refund_order', { order_id: order.id, shipping_amount: 0.01 }, admin.token)).status).toBe(400);
+    expect((await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id, shipping_amount: 0.01 }, admin.token)).status).toBe(400);
   }
 });
 
@@ -281,7 +281,7 @@ for (const first of ['intent', 'admin_note']) test(`${first} 提交后旧 REPEAT
 test('手工退款按商业行退净额和对应税；配送需显式选择，分次退税/净额严格守恒', async () => {
   const order = await paid(); const p = await pricing(order.id); const stock = await stockOf(fixture.sku);
   for (const line of p.lines) {
-    await checked(rpc('refund_order', { order_id: order.id, items: [{ order_item_id: line.id, quantity: 1 }], restock: true }, admin.token));
+    await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: [{ order_item_id: line.id, quantity: 1 }], restock: true }, admin.token));
     const refund = (await ledger(order.id)).refunds.find(r => r.lines.some(l => l.order_item_id === line.id))!;
     expect(cents(refund.amount)).toBe(cents(line.line_total) + sum(line.tax_lines));
     expect(sum(refund.lines) + sum(refund.components)).toBe(cents(refund.amount));
@@ -290,8 +290,8 @@ test('手工退款按商业行退净额和对应税；配送需显式选择，�
   expect((await ledger(order.id)).balances.net_paid).toBe(9.04);
   for (let i = 0; i < 2; i++) {
     const command = { order_id: order.id, shipping_amount: 4, idempotency_key: crypto.randomUUID() };
-    const first = await checked<Record<string, unknown>>(rpc('refund_order_v2', command, admin.token));
-    expect(await checked<Record<string, unknown>>(rpc('refund_order_v2', command, admin.token))).toEqual(first);
+    const first = await checked<Record<string, unknown>>(rpc('refund_order', command, admin.token));
+    expect(await checked<Record<string, unknown>>(rpc('refund_order', command, admin.token))).toEqual(first);
   }
   const result = await ledger(order.id);
   expect(result.refunds).toHaveLength(4);
@@ -343,12 +343,12 @@ test('美分极值：零净额/非零税退款、三次数量预留、取消与�
 
 test('纯金额退款明确未分配，不猜税/配送/数量；后续数量退款仍受实收余额限制', async () => {
   const order = await paid(); const p = await pricing(order.id);
-  await checked(rpc('refund_order', { order_id: order.id, amount: 1 }, admin.token));
+  await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id, amount: 1 }, admin.token));
   const first = (await ledger(order.id)).refunds[0];
   expect(first.lines).toEqual([]);
   expect(first.components).toEqual([{ kind: 'unallocated', amount: 1, tax_line_id: null, shipping_line_id: null }]);
-  expect((await rpc('refund_order', { order_id: order.id, items: p.lines.map(l => ({ order_item_id: l.id, quantity: 1 })), shipping_amount: 8 }, admin.token)).status).toBe(400);
-  await checked(rpc('refund_order', { order_id: order.id }, admin.token));
+  expect((await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: p.lines.map(l => ({ order_item_id: l.id, quantity: 1 })), shipping_amount: 8 }, admin.token)).status).toBe(400);
+  await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   expect((await ledger(order.id)).refunds.every(r => r.components.every(c => c.kind === 'unallocated'))).toBe(true);
   const lines = await checked<Array<{ refunded_quantity: number }>>(api(`/rest/v1/order_items?order_id=eq.${order.id}&select=refunded_quantity`, { token: buyer.token }));
   expect(lines.every(l => l.refunded_quantity === 0)).toBe(true);

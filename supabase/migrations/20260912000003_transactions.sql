@@ -1764,63 +1764,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.create_fulfillment(order_id uuid, items jsonb, carrier text DEFAULT ''::text, tracking_number text DEFAULT ''::text, tracking_url text DEFAULT NULL::text) RETURNS public.fulfillments
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $_$
-declare
-  v_items jsonb;
-  v_item jsonb;
-begin
-  if items is null or jsonb_typeof(items) <> 'array' or jsonb_array_length(items) = 0 then
-    raise exception 'items must be a non-empty array';
-  end if;
-
-  for v_item in select value from jsonb_array_elements(create_fulfillment.items)
-  loop
-    if jsonb_typeof(v_item) <> 'object'
-       or coalesce(v_item ->> 'order_item_id', '') = '' then
-      raise exception 'each fulfillment item requires order_item_id';
-    end if;
-    begin
-      perform (v_item ->> 'order_item_id')::uuid;
-    exception when invalid_text_representation then
-      raise exception 'order_item_id must be a UUID';
-    end;
-
-    if coalesce(v_item ->> 'quantity', '') !~ '^[1-9][0-9]*$' then
-      raise exception 'fulfillment quantity must be a positive integer';
-    end if;
-    begin
-      perform (v_item ->> 'quantity')::integer;
-    exception when numeric_value_out_of_range then
-      raise exception 'fulfillment quantity is too large';
-    end;
-  end loop;
-
-  select jsonb_agg(
-           jsonb_build_object('order_item_id', x.order_item_id, 'quantity', x.quantity)
-           order by x.order_item_id
-         )
-  into v_items
-  from (
-    select e.value ->> 'order_item_id' as order_item_id,
-           sum((e.value ->> 'quantity')::integer)::integer as quantity
-    from jsonb_array_elements(create_fulfillment.items) e
-    group by e.value ->> 'order_item_id'
-  ) x;
-
-  return private.create_fulfillment(
-    create_fulfillment.order_id,
-    v_items,
-    create_fulfillment.carrier,
-    create_fulfillment.tracking_number,
-    create_fulfillment.tracking_url
-  );
-end;
-$_$;
-
-CREATE FUNCTION public.create_fulfillment_v2(order_id uuid, items jsonb, idempotency_key text, carrier text DEFAULT ''::text, tracking_number text DEFAULT ''::text, tracking_url text DEFAULT NULL::text) RETURNS jsonb
+CREATE FUNCTION public.create_fulfillment(order_id uuid, items jsonb, idempotency_key text, carrier text DEFAULT ''::text, tracking_number text DEFAULT ''::text, tracking_url text DEFAULT NULL::text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1853,12 +1797,12 @@ begin
       raise exception 'idempotency key was used with different fulfillment parameters';
     end if;
     select * into v_fulfillment from public.fulfillments f
-    where f.id = v_record.resource_id and f.order_id = create_fulfillment_v2.order_id;
+    where f.id = v_record.resource_id and f.order_id = create_fulfillment.order_id;
     if not found then raise exception 'idempotency record points to a missing fulfillment'; end if;
     return private.fulfillment_json(v_fulfillment);
   end if;
 
-  v_fulfillment := public.create_fulfillment(
+  v_fulfillment := private.create_fulfillment(
     order_id, v_items, carrier, tracking_number, tracking_url
   );
   v_response := private.fulfillment_json(v_fulfillment);
@@ -2018,20 +1962,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.refund_order(order_id uuid, items jsonb DEFAULT NULL::jsonb, amount numeric DEFAULT NULL::numeric, reason text DEFAULT NULL::text, restock boolean DEFAULT false, provider text DEFAULT 'manual'::text, shipping_amount numeric DEFAULT NULL) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $_$
-declare v_order public.orders;
-begin
-  v_order := private.refund_order(order_id, items, amount, reason, restock, provider, shipping_amount);
-  perform private.refresh_order_fulfillment(v_order.id);
-  select * into v_order from public.orders o where o.id = refund_order.order_id;
-  return private.storefront_order_json(v_order);
-end;
-$_$;
-
-CREATE FUNCTION public.refund_order_v2(order_id uuid, idempotency_key text, items jsonb DEFAULT NULL::jsonb, amount numeric DEFAULT NULL::numeric, reason text DEFAULT NULL::text, restock boolean DEFAULT false, provider text DEFAULT 'manual'::text, shipping_amount numeric DEFAULT NULL) RETURNS jsonb
+CREATE FUNCTION public.refund_order(order_id uuid, idempotency_key text, items jsonb DEFAULT NULL::jsonb, amount numeric DEFAULT NULL::numeric, reason text DEFAULT NULL::text, restock boolean DEFAULT false, provider text DEFAULT 'manual'::text, shipping_amount numeric DEFAULT NULL) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -2070,18 +2001,21 @@ begin
     end if;
     select o.* into v_order
     from commerce.refunds r join public.orders o on o.id = r.order_id
-    where r.id = v_record.resource_id and r.order_id = refund_order_v2.order_id;
+    where r.id = v_record.resource_id and r.order_id = refund_order.order_id;
     if not found then raise exception 'idempotency record points to a missing refund'; end if;
     return private.storefront_order_json(v_order);
   end if;
 
   select coalesce(array_agg(r.id), '{}'::uuid[]) into v_before_refunds
-  from commerce.refunds r where r.order_id = refund_order_v2.order_id;
-  v_response := public.refund_order(
+  from commerce.refunds r where r.order_id = refund_order.order_id;
+  v_order := private.refund_order(
     order_id, v_items, amount, reason, restock, v_provider, shipping_amount
   );
+  perform private.refresh_order_fulfillment(v_order.id);
+  select * into v_order from public.orders o where o.id = refund_order.order_id;
+  v_response := private.storefront_order_json(v_order);
   select r.id into v_refund_id from commerce.refunds r
-  where r.order_id = refund_order_v2.order_id
+  where r.order_id = refund_order.order_id
     and not (r.id = any(v_before_refunds))
   order by r.created_at desc, r.id desc limit 1;
   if not found then raise exception 'refund ledger was not recorded'; end if;

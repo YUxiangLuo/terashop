@@ -102,7 +102,7 @@ describe('Metafields', () => {
   test('order 域 metafield 仅订单归属人可见', async () => {
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: await variantBySku('MUG-350'), quantity: 1 }], address: TEST_ADDRESS },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: await variantBySku('MUG-350'), quantity: 1 }], address: TEST_ADDRESS },
       userA.token
     );
     const orderId = (o as { id: string }).id;

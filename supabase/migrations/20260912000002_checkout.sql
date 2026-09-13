@@ -1806,28 +1806,6 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.create_order(items jsonb, address jsonb DEFAULT NULL::jsonb, address_id uuid DEFAULT NULL::uuid, shipping_method_id uuid DEFAULT NULL::uuid, discount_code text DEFAULT NULL::text, note text DEFAULT NULL::text) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_quote jsonb;
-begin
-  -- This convenience command creates and converts a Quote in one transaction.
-  -- v2 owns order-command idempotency; its retries never reach this random key.
-  v_quote := public.create_checkout_quote(
-    create_order.items,
-    gen_random_uuid()::text,
-    private.normalize_checkout_address(create_order.address),
-    create_order.address_id,
-    create_order.shipping_method_id,
-    create_order.discount_code,
-    create_order.note
-  );
-  return public.create_order_from_quote((v_quote ->> 'id')::uuid);
-end;
-$$;
-
 CREATE FUNCTION public.create_order_from_quote(quote_id uuid) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -1989,7 +1967,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.create_order_v2(items jsonb, idempotency_key text, address jsonb DEFAULT NULL::jsonb, address_id uuid DEFAULT NULL::uuid, shipping_method_id uuid DEFAULT NULL::uuid, discount_code text DEFAULT NULL::text, note text DEFAULT NULL::text) RETURNS jsonb
+CREATE FUNCTION public.create_order(items jsonb, idempotency_key text, address jsonb DEFAULT NULL::jsonb, address_id uuid DEFAULT NULL::uuid, shipping_method_id uuid DEFAULT NULL::uuid, discount_code text DEFAULT NULL::text, note text DEFAULT NULL::text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -2002,6 +1980,7 @@ declare
   v_response jsonb;
   v_record commerce.command_idempotency;
   v_order public.orders;
+  v_quote jsonb;
 begin
   if v_subject_id is null then raise exception 'authentication required'; end if;
   if coalesce(v_key, '') = '' or length(v_key) > 200 then
@@ -2030,10 +2009,11 @@ begin
     return private.storefront_order_json(v_order);
   end if;
 
-  v_response := public.create_order(
-    v_items, v_address, address_id, shipping_method_id,
+  v_quote := public.create_checkout_quote(
+    v_items, gen_random_uuid()::text, v_address, address_id, shipping_method_id,
     upper(nullif(btrim(discount_code), '')), note
   );
+  v_response := public.create_order_from_quote((v_quote ->> 'id')::uuid);
   insert into commerce.command_idempotency
     (scope, subject_id, idempotency_key, request_hash, resource_type, resource_id)
   values ('order.create', v_subject_id, v_key, v_request_hash,

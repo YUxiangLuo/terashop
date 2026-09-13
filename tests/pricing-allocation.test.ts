@@ -196,7 +196,7 @@ test('Quote、转单、成功账本与退款沿用同一分币结果', async () 
     ));
     expect(lines.reduce((sum, line) => sum + minor(line.discount_total), 0n)).toBe(2n);
     const line = lines.find(row => row.line_total > 0)!;
-    await checked(rpc('refund_order', { order_id: order.id, items: [{ order_item_id: line.id, quantity: 1 }] }, admin.token));
+    await checked(rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: [{ order_item_id: line.id, quantity: 1 }] }, admin.token));
     const ledger = await checked<{ balances: { captured: number; refunded: number; is_balanced: boolean } }>(rpc('get_order_ledger', {
       order_id: order.id,
     }, buyer.token));
@@ -224,7 +224,7 @@ test('已经满额包邮时，零收益独占免邮不阻断后续减 5 元，�
     expect(price).toMatchObject({ discount_total: 5, shipping_total: 0 });
     expect(price.promotions).toEqual([expect.objectContaining({ promotion_id: fixed.id, amount: 5 })]);
     await checked(rpc('create_order', {
-      items: cart([1]), address: TEST_ADDRESS, shipping_method_id: shipping,
+      idempotency_key: crypto.randomUUID(), items: cart([1]), address: TEST_ADDRESS, shipping_method_id: shipping,
     }, buyer.token));
     const [row] = await checked<Array<{ used_count: number }>>(api(`/rest/v1/promotions?id=eq.${free.id}&select=used_count`, { service: true }));
     expect(row.used_count).toBe(0);

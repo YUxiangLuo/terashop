@@ -96,8 +96,8 @@ test('游客没有有效联系邮箱不能占库存或建单；Quote 后清邮�
   const before = await stockOf(fixture.sku);
   for (const email of [null, 'no-at-sign', 'two@@example.test', 'bad name@example.test', 'bad\n@example.test']) {
     await contact(owner, email);
-    for (const name of ['create_checkout_quote', 'create_order', 'create_order_v2']) {
-      const args = { ...input(), ...name === 'create_order' ? {} : { idempotency_key: crypto.randomUUID() } };
+    for (const name of ['create_checkout_quote', 'create_order']) {
+      const args = { ...input(), idempotency_key: crypto.randomUUID() };
       expect((await rpc(name, args, owner.token)).data).toMatchObject({ code: '22023', message: 'valid customer contact email required for checkout' });
     }
   }

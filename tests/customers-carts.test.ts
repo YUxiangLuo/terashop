@@ -96,7 +96,7 @@ test('没有活跃客户映射时授权必须失败关闭，不能借 NULL 比�
     ['get_checkout_quote', { quote_id: quote.id }], ['cancel_checkout_quote', { quote_id: quote.id }],
     ['set_default_address', { address_id: address.id }],
   ] as Array<[string, object]>) expect((await rpc(command, body, erased.token)).status).toBe(400);
-  expect((await rpc('create_order', { items: items(), address: TEST_ADDRESS }, erased.token)).status).toBe(400);
+  expect((await rpc('create_order', { idempotency_key: crypto.randomUUID(), items: items(), address: TEST_ADDRESS }, erased.token)).status).toBe(400);
   await checked(rpc('cancel_order', { order_id: order.id }, owner.token));
   await checked(rpc('cancel_checkout_quote', { quote_id: quote.id }, owner.token));
 });

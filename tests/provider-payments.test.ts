@@ -163,7 +163,7 @@ describe('PayPal refund binding and ledger protections', () => {
         .toMatchObject({ status: 'received', outcome: 'unmatched_refund' });
       expect((await operations(order.id)).refund_requests[0].status).toBe('requested');
       expect(await stockOf(isolated.sku)).toBe(before);
-      expect((await rpc('refund_order', { order_id: order.id, amount: 1 }, admin.token)).status).toBe(400);
+      expect((await rpc('refund_order', { idempotency_key: crypto.randomUUID(), order_id: order.id, amount: 1 }, admin.token)).status).toBe(400);
       await bindRefund(request, reference);
       await checked(api(`/rest/v1/product_variants?id=eq.${isolated.variantId}`, {
         service: true, method: 'PATCH', body: { track_inventory: false },

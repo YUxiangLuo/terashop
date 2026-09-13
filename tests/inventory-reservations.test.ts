@@ -149,14 +149,14 @@ describe('Checkout Quote 与库存预占', () => {
       on_hand: 5, reserved: 4, available: 1,
     });
 
-    const blockedLegacy = await rpc('create_order', {
+    const blockedLegacy = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: contentionStock.variantId, quantity: 2 }],
       address: TEST_ADDRESS,
     }, other.token);
     expect(blockedLegacy.status).toBe(400);
     expect((blockedLegacy.data as { message: string }).message).toContain('insufficient available stock');
 
-    const oneAvailable = await rpc('create_order', {
+    const oneAvailable = await rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: contentionStock.variantId, quantity: 1 }],
       address: TEST_ADDRESS,
     }, other.token);
@@ -196,7 +196,7 @@ describe('Quote 转单与支付确认', () => {
     const { data: orderItems } = await api(
       `/rest/v1/order_items?order_id=eq.${order.id}&select=id`, { token: buyerA.token },
     );
-    const prematureFulfillment = await rpc('create_fulfillment', {
+    const prematureFulfillment = await rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(),
       order_id: order.id,
       items: [{ order_item_id: (orderItems as { id: string }[])[0].id, quantity: 1 }],
     }, admin.token);
@@ -473,7 +473,7 @@ describe('修复：库存口径与回补仓', () => {
       await setDefault(whSh.id, false);
       await setDefault(locBId, true);
       const { data: o } = await rpc('create_order', {
-        items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
+        idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
       }, u.token);
       expect(await levelAt(locBId)).toBe(10);
       expect(await availability(mugId)).toMatchObject({ on_hand: 10, reserved: 2, available: 8 });

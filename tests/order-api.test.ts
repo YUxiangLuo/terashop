@@ -17,7 +17,7 @@ beforeAll(async () => {
     if (i !== 1) await checked(command('cancel_order', { order_id: order.id },buyer.token));
     else {
       await checked(command('mark_order_paid', { order_id: order.id, provider: 'manual' },admin.token));
-      await checked(command('create_fulfillment_v2', { order_id: order.id, items: [{ order_item_id: order.itemId, quantity: 1 }],
+      await checked(command('create_fulfillment', { order_id: order.id, items: [{ order_item_id: order.itemId, quantity: 1 }],
         idempotency_key: crypto.randomUUID(), carrier: 'Test carrier', tracking_number: 'TRACK' },admin.token));
     }
   }

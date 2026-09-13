@@ -233,7 +233,7 @@ describe('下单落账', () => {
 
     const { data: order } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 3 }], address: TEST_ADDRESS },
+      { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 3 }], address: TEST_ADDRESS },
       user.token
     );
     const o = order as Record<string, unknown>;
@@ -276,7 +276,7 @@ describe('下单落账', () => {
     const items = [{ variant_id: kbId, quantity: 2 }]; // 178 ≥ 100
     const { data: order } = await rpc(
       'create_order',
-      { items, address: TEST_ADDRESS, discount_code: 'SAVE20' },
+      { idempotency_key: crypto.randomUUID(), items, address: TEST_ADDRESS, discount_code: 'SAVE20' },
       user.token
     );
     const id = (order as { id: string }).id;
@@ -286,7 +286,7 @@ describe('下单落账', () => {
     // 再次使用被拒
     const again = await rpc(
       'create_order',
-      { items, address: TEST_ADDRESS, discount_code: 'SAVE20' },
+      { idempotency_key: crypto.randomUUID(), items, address: TEST_ADDRESS, discount_code: 'SAVE20' },
       user.token
     );
     expect((again.data as { message: string }).message).toBe('discount code already used');
@@ -423,8 +423,8 @@ describe('修复：促销引擎边界与并发', () => {
     const u2 = await signup();
     // 关键：两人买【不同商品】，变体行锁不构成串行，考验的是促销行锁
     const [r1, r2] = await Promise.all([
-      rpc('create_order', { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code }, u1.token),
-      rpc('create_order', { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code }, u2.token),
+      rpc('create_order', { idempotency_key: crypto.randomUUID(), items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code }, u1.token),
+      rpc('create_order', { idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code }, u2.token),
     ]);
     const ok = [r1, r2].filter((r) => r.status < 300);
     const fail = [r1, r2].filter((r) => r.status >= 400);
@@ -439,8 +439,8 @@ describe('修复：促销引擎边界与并发', () => {
   test('同用户并发用同码（每客限1）：恰好一单成功', async () => {
     const u = await signup();
     const [r1, r2] = await Promise.all([
-      rpc('create_order', { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10' }, u.token),
-      rpc('create_order', { items: [{ variant_id: kbBrownId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10' }, u.token),
+      rpc('create_order', { idempotency_key: crypto.randomUUID(), items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10' }, u.token),
+      rpc('create_order', { idempotency_key: crypto.randomUUID(), items: [{ variant_id: kbBrownId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10' }, u.token),
     ]);
     const ok = [r1, r2].filter((r) => r.status < 300);
     const fail = [r1, r2].filter((r) => r.status >= 400);

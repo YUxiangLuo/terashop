@@ -1664,34 +1664,6 @@ export type Database = {
       create_fulfillment: {
         Args: {
           carrier?: string
-          items: Json
-          order_id: string
-          tracking_number?: string
-          tracking_url?: string
-        }
-        Returns: {
-          carrier: string
-          created_at: string
-          delivered_at: string | null
-          id: string
-          items: Json
-          order_id: string
-          shipped_at: string | null
-          status: string
-          tracking_number: string
-          tracking_url: string | null
-          updated_at: string
-        }
-        SetofOptions: {
-          from: "*"
-          to: "fulfillments"
-          isOneToOne: true
-          isSetofReturn: false
-        }
-      }
-      create_fulfillment_v2: {
-        Args: {
-          carrier?: string
           idempotency_key: string
           items: Json
           order_id: string
@@ -1705,18 +1677,6 @@ export type Database = {
           address?: Json
           address_id?: string
           discount_code?: string
-          items: Json
-          note?: string
-          shipping_method_id?: string
-        }
-        Returns: Json
-      }
-      create_order_from_quote: { Args: { quote_id: string }; Returns: Json }
-      create_order_v2: {
-        Args: {
-          address?: Json
-          address_id?: string
-          discount_code?: string
           idempotency_key: string
           items: Json
           note?: string
@@ -1724,6 +1684,7 @@ export type Database = {
         }
         Returns: Json
       }
+      create_order_from_quote: { Args: { quote_id: string }; Returns: Json }
       create_payment_intent: {
         Args: {
           idempotency_key: string
@@ -1972,18 +1933,6 @@ export type Database = {
         Returns: Json
       }
       refund_order: {
-        Args: {
-          amount?: number
-          items?: Json
-          order_id: string
-          provider?: string
-          reason?: string
-          restock?: boolean
-          shipping_amount?: number
-        }
-        Returns: Json
-      }
-      refund_order_v2: {
         Args: {
           amount?: number
           idempotency_key: string

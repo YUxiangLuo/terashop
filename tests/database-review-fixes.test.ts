@@ -112,32 +112,32 @@ test('长时间未知的退款不再 POST 或释放预留；可信绑定后仍�
   expect(calls).toBe(1);
 });
 
-test('三个客户入口共享 50 行/100 件限制及 5 个活跃 checkout 配额，并发不能超额', async () => {
+test('报价和便捷下单共享 50 行/100 件限制及 5 个活跃 checkout 配额，并发不能超额', async () => {
   const f = await fixture();
-  for (const name of ['create_order', 'create_order_v2', 'create_checkout_quote']) {
+  for (const name of ['create_order', 'create_checkout_quote']) {
     const result = await rpc(name, {
       items: [{ variant_id: f.variantId, quantity: 101 }], address: TEST_ADDRESS,
-      ...(name === 'create_order' ? {} : { idempotency_key: crypto.randomUUID() }),
+      idempotency_key: crypto.randomUUID(),
     }, buyer.token);
     expect(result.status).toBe(400); expect(result.data).toMatchObject({ message: expect.stringContaining('100 units') });
     const tooManyLines = await rpc(name, {
       items: Array.from({ length: 51 }, () => ({ variant_id: crypto.randomUUID(), quantity: 1 })), address: TEST_ADDRESS,
-      ...(name === 'create_order' ? {} : { idempotency_key: crypto.randomUUID() }),
+      idempotency_key: crypto.randomUUID(),
     }, buyer.token);
     expect(tooManyLines.data).toMatchObject({ message: expect.stringContaining('50 lines') });
   }
   const quoteCommand = { items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS, idempotency_key: crypto.randomUUID() };
   const quote = await checked<{ id: string }>(rpc('create_checkout_quote', quoteCommand, buyer.token));
   const results = await Promise.all(Array.from({ length: 9 }, (_, i) => {
-    const name = ['create_order', 'create_order_v2', 'create_checkout_quote'][i % 3];
+    const name = ['create_order', 'create_checkout_quote'][i % 2];
     return rpc(name, { items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS,
-      ...(name === 'create_order' ? {} : { idempotency_key: crypto.randomUUID() }) }, buyer.token);
+      idempotency_key: crypto.randomUUID() }, buyer.token);
   }));
   expect(results.filter(r => r.status === 200)).toHaveLength(4);
   for (const r of results.filter(r => r.status !== 200)) expect(r.data).toMatchObject({ message: expect.stringContaining('too many active checkouts') });
   expect((await rpc('create_checkout_quote', quoteCommand, buyer.token)).status).toBe(200); // Replay consumes no quota.
   expect((await rpc('create_order_from_quote', { quote_id: quote.id }, buyer.token)).status).toBe(200);
-  expect((await rpc('create_order', { items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS }, buyer.token)).status).toBe(400);
+  expect((await rpc('create_order', { idempotency_key: crypto.randomUUID(), items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS }, buyer.token)).status).toBe(400);
 });
 
 test('便捷下单及意图沿用报价期限，过期仅释放预占；未知 capture 的迟到成功只对账', async () => {
@@ -170,13 +170,13 @@ test('便捷下单及意图沿用报价期限，过期仅释放预占；未知 c
 });
 
 for (const terminal of ['paid', 'cancelled', 'expired'] as const) {
-  test(`V2 ${terminal} 后同键重放保留订单、报价和期限，不重新预占；显式 Quote 同键独立`, async () => {
+  test(`便捷下单 ${terminal} 后同键重放保留订单、报价和期限，不重新预占；显式 Quote 同键独立`, async () => {
     const f = await fixture();
     const command = { items: [{ variant_id: f.variantId, quantity: 3 }], address: TEST_ADDRESS, idempotency_key: crypto.randomUUID() };
     const explicit = await checked<{ id: string }>(rpc('create_checkout_quote', {
       ...command, items: [{ variant_id: f.variantId, quantity: 2 }],
     }, buyer.token));
-    const order = await checked<{ id: string; payment_expires_at: string }>(rpc('create_order_v2', command, buyer.token));
+    const order = await checked<{ id: string; payment_expires_at: string }>(rpc('create_order', command, buyer.token));
     const quote = await checked<{ id: string; expires_at: string; lines: Array<{ id: string; quantity: number }> }>(rpc('get_order_checkout_quote', { order_id: order.id }, buyer.token));
     expect(quote.id).not.toBe(explicit.id);
     expect(quote.expires_at).toBe(order.payment_expires_at);
@@ -186,7 +186,7 @@ for (const terminal of ['paid', 'cancelled', 'expired'] as const) {
       .toMatchObject({ on_hand: 100, reserved: 5, available: 95 });
     await checked(rpc('cancel_checkout_quote', { quote_id: explicit.id }, buyer.token));
     const verifyReplay = async () => {
-      const replay = await checked(rpc('create_order_v2', command, buyer.token));
+      const replay = await checked(rpc('create_order', command, buyer.token));
       expect(replay).toMatchObject({ id: order.id, payment_expires_at: order.payment_expires_at,
         status: terminal === 'paid' ? 'open' : 'cancelled', financial_status: terminal === 'paid' ? 'paid' : 'pending' });
       const [counts] = await database`select count(*)::int quotes,
@@ -220,7 +220,7 @@ test('便捷转单失败回滚已创建的 Quote、预占和幂等记录；原�
     await tx.unsafe(`alter table public.orders add constraint review_reject_order
       check (customer_id <> '${buyer.customerId}'::uuid) not valid`);
     await tx`savepoint conversion`;
-    const create = () => tx`select public.create_order_v2(
+    const create = () => tx`select public.create_order(
       ${JSON.stringify([{ variant_id: f.variantId, quantity: 3 }])}::text::jsonb, ${key},
       ${JSON.stringify(TEST_ADDRESS)}::text::jsonb) as result`;
     await expect(Promise.resolve(create())).rejects.toThrow('review_reject_order');

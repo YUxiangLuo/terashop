@@ -37,7 +37,7 @@ async function fixture() {
       end $$`);
     try {
       await database.unsafe('create trigger review_quote_line_ids before insert on commerce.checkout_quote_lines for each row execute function private.review_quote_line_ids()');
-      order = await checked<{ id: string }>(rpc('create_order', {
+      order = await checked<{ id: string }>(rpc('create_order', { idempotency_key: crypto.randomUUID(),
         items: variants.map(v => ({ variant_id: v.variantId, quantity: 1 })), address: TEST_ADDRESS,
       }, buyer.token));
     } finally {
@@ -103,7 +103,7 @@ async function fixture() {
             ${JSON.stringify(refundEvent.data)}::text::jsonb) as result`;
           return { completed: true, event: event.result };
         }
-        await tx`select public.refund_order(order_id=>${order.id}::uuid,
+        await tx`select public.refund_order(order_id=>${order.id}::uuid,idempotency_key=>${crypto.randomUUID()},
           items=>${JSON.stringify(refundItems)}::text::jsonb,restock=>true)`;
         return { completed: true };
       }).catch(error => {
@@ -148,7 +148,7 @@ async function fixture() {
 for (const mode of ['cancel', 'expiry'] as const) {
   test(`${mode}: 释放预占等待订单锁时，新 Quote 仍可预占剩余库存且无回库流水`, async () => {
     const f = await fixture();
-    const order = await checked<{ id: string }>(rpc('create_order', {
+    const order = await checked<{ id: string }>(rpc('create_order', { idempotency_key: crypto.randomUUID(),
       items: [{ variant_id: f.variantId, quantity: 3 }], address: TEST_ADDRESS,
     }, buyer.token));
     const result = await heldTransactionRace(database, async tx => {
