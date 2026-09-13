@@ -90,6 +90,7 @@ CREATE TRIGGER payment_intents_validate BEFORE INSERT OR UPDATE ON commerce.paym
 CREATE TRIGGER payment_provider_events_no_delete BEFORE DELETE ON commerce.payment_provider_events FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER payment_provider_events_no_truncate BEFORE TRUNCATE ON commerce.payment_provider_events FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER payment_provider_events_validate BEFORE INSERT OR UPDATE ON commerce.payment_provider_events FOR EACH ROW EXECUTE FUNCTION private.validate_payment_provider_event();
+CREATE TRIGGER payment_transactions_async_refund_guard BEFORE INSERT ON commerce.payment_transactions FOR EACH ROW EXECUTE FUNCTION private.prevent_refund_during_async_request();
 CREATE TRIGGER payment_transactions_enqueue_outbox AFTER INSERT OR UPDATE OF status ON commerce.payment_transactions FOR EACH ROW EXECUTE FUNCTION private.payment_transaction_to_outbox();
 CREATE TRIGGER payment_transactions_no_delete BEFORE DELETE ON commerce.payment_transactions FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER payment_transactions_no_truncate BEFORE TRUNCATE ON commerce.payment_transactions FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
@@ -212,12 +213,6 @@ CREATE TRIGGER tax_lines_no_truncate BEFORE TRUNCATE ON commerce.order_tax_lines
 CREATE TRIGGER discount_allocations_no_truncate BEFORE TRUNCATE ON commerce.order_discount_allocations FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER order_promotions_no_truncate BEFORE TRUNCATE ON public.order_promotions FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER orders_updated_at BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
-CREATE TRIGGER payments_async_refund_guard BEFORE INSERT ON public.payments FOR EACH ROW EXECUTE FUNCTION private.prevent_refund_during_async_request();
-CREATE TRIGGER payments_commercial_fields_immutable BEFORE DELETE OR UPDATE ON public.payments FOR EACH ROW EXECUTE FUNCTION private.protect_legacy_payment();
-CREATE TRIGGER payments_no_truncate BEFORE TRUNCATE ON public.payments FOR EACH STATEMENT EXECUTE FUNCTION private.protect_legacy_payment();
-CREATE TRIGGER payments_sync_transaction_insert AFTER INSERT ON public.payments FOR EACH ROW EXECUTE FUNCTION private.sync_legacy_payment_transaction();
-CREATE TRIGGER payments_sync_transaction_update AFTER UPDATE ON public.payments FOR EACH ROW EXECUTE FUNCTION private.sync_legacy_payment_transaction();
-CREATE TRIGGER payments_updated_at BEFORE UPDATE ON public.payments FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER categories_tree_write BEFORE INSERT OR UPDATE OR DELETE ON public.categories FOR EACH STATEMENT EXECUTE FUNCTION private.guard_category_tree();
 CREATE CONSTRAINT TRIGGER categories_tree_check AFTER INSERT OR UPDATE ON public.categories DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_category_tree();
 CREATE TRIGGER products_identity BEFORE UPDATE OF id ON public.products FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
@@ -307,9 +302,6 @@ CREATE POLICY "order_promotions: read own or admin" ON public.order_promotions F
   WHERE ((o.id = order_promotions.order_id) AND ((o.customer_id = public.current_customer_id()) OR public.is_admin())))));
 CREATE POLICY "orders: admin update" ON public.orders FOR UPDATE USING (public.is_admin());
 CREATE POLICY "orders: read own or admin" ON public.orders FOR SELECT USING (((public.current_customer_id() = customer_id) OR public.is_admin()));
-CREATE POLICY "payments: read own or admin" ON public.payments FOR SELECT USING ((EXISTS ( SELECT 1
-   FROM public.orders o
-  WHERE ((o.id = payments.order_id) AND ((o.customer_id = public.current_customer_id()) OR public.is_admin())))));
 CREATE POLICY "product_categories: admin write" ON public.product_categories USING (public.is_admin());
 CREATE POLICY "product_categories: public read published" ON public.product_categories FOR SELECT USING ((public.is_admin() OR ((EXISTS ( SELECT 1
    FROM public.products p
@@ -392,7 +384,7 @@ REVOKE ALL ON FUNCTION private.create_fulfillment(order_id uuid, items jsonb, ca
 REVOKE ALL ON FUNCTION private.enforce_metafield_definition_compatibility() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.enforce_metafield_integrity() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.enqueue_outbox_event(p_aggregate_type text, p_aggregate_id uuid, p_event_type text, p_payload jsonb, p_idempotency_key text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION private.finalize_refund_request(p_request_id uuid, p_event commerce.payment_provider_events, p_data jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.finalize_refund_request(p_request_id uuid, p_event commerce.payment_provider_events) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.fulfillment_json(p_fulfillment public.fulfillments) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.mark_order_paid(order_id uuid, provider text, provider_ref text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.normalize_address_country() FROM PUBLIC;
@@ -419,7 +411,6 @@ REVOKE ALL ON FUNCTION private.protect_audit_row() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.protect_capture_request_marker() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.protect_fulfillment_record() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.protect_immutable_row() FROM PUBLIC;
-REVOKE ALL ON FUNCTION private.protect_legacy_payment() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.protect_order_during_paypal_capture() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.protect_order_item_snapshot() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.protect_order_items_during_payment() FROM PUBLIC;
@@ -446,7 +437,6 @@ REVOKE ALL ON FUNCTION private.set_user_role(user_id uuid, role text) FROM PUBLI
 REVOKE ALL ON FUNCTION private.storefront_order_json(p_order public.orders) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.sync_cancelled_order_quote() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.sync_fulfillment_lines() FROM PUBLIC;
-REVOKE ALL ON FUNCTION private.sync_legacy_payment_transaction() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.sync_order_adjustments() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.update_order_address(order_id uuid, address jsonb, address_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.valid_country_codes(p_countries text[]) FROM PUBLIC;
@@ -474,7 +464,7 @@ REVOKE ALL ON FUNCTION public.bind_refund_request_provider(refund_request_id uui
 REVOKE ALL ON FUNCTION public.cancel_checkout_quote(quote_id uuid, reason text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.cancel_order(order_id uuid, reason text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.cancel_refund_request(refund_request_id uuid, actor_id uuid, provider_confirmed boolean, reason text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text, raw jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.claim_outbox_events(worker_id text, max_events integer, lease_seconds integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_outbox_event(event_id uuid, worker_id text, lease_token uuid, succeeded boolean, error_message text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_checkout_quote(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text, ttl_seconds integer) FROM PUBLIC;
@@ -544,7 +534,7 @@ GRANT ALL ON FUNCTION public.bind_refund_request_provider(refund_request_id uuid
 GRANT ALL ON FUNCTION public.cancel_checkout_quote(quote_id uuid, reason text) TO authenticated;
 GRANT ALL ON FUNCTION public.cancel_order(order_id uuid, reason text) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.cancel_refund_request(refund_request_id uuid, actor_id uuid, provider_confirmed boolean, reason text) TO service_role;
-GRANT ALL ON FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text, raw jsonb) TO service_role;
+GRANT ALL ON FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text) TO service_role;
 GRANT ALL ON FUNCTION public.claim_outbox_events(worker_id text, max_events integer, lease_seconds integer) TO service_role;
 GRANT ALL ON FUNCTION public.complete_outbox_event(event_id uuid, worker_id text, lease_token uuid, succeeded boolean, error_message text) TO service_role;
 GRANT ALL ON FUNCTION public.create_checkout_quote(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text, ttl_seconds integer) TO authenticated;
@@ -597,7 +587,7 @@ GRANT EXECUTE ON FUNCTION public.create_return(uuid,jsonb,text,text), public.rec
 GRANT EXECUTE ON FUNCTION public.get_order_returns(uuid) TO authenticated,service_role;
 
 -- Existing objects also use least privilege; clients cannot TRUNCATE, attach triggers or advance sequences.
-GRANT ALL ON TABLE public.categories, public.locations, public.metafield_definitions, public.metafields, public.metaobject_definitions, public.metaobjects, public.product_categories, public.product_images, public.products, public.product_option_values, public.product_options, public.promotion_targets, public.promotions, public.shipping_methods, public.tax_rates, public.variant_option_values, public.addresses, public.profiles, public.product_reviews, public.discount_redemptions, public.inventory_levels, public.inventory_movements, public.fulfillments, public.order_events, public.order_items, public.order_promotions, public.product_listing, public.orders, public.payments, public.product_variants TO service_role;
+GRANT ALL ON TABLE public.categories, public.locations, public.metafield_definitions, public.metafields, public.metaobject_definitions, public.metaobjects, public.product_categories, public.product_images, public.products, public.product_option_values, public.product_options, public.promotion_targets, public.promotions, public.shipping_methods, public.tax_rates, public.variant_option_values, public.addresses, public.profiles, public.product_reviews, public.discount_redemptions, public.inventory_levels, public.inventory_movements, public.fulfillments, public.order_events, public.order_items, public.order_promotions, public.product_listing, public.orders, public.product_variants TO service_role;
 GRANT ALL ON SEQUENCE public.inventory_movements_id_seq, public.order_events_id_seq, public.orders_order_number_seq TO service_role;
 GRANT SELECT ON TABLE public.categories, public.locations, public.metafield_definitions, public.metafields, public.metaobject_definitions, public.metaobjects, public.product_categories, public.product_images, public.products, public.product_option_values, public.product_options, public.promotion_targets, public.promotions, public.shipping_methods, public.tax_rates, public.variant_option_values, public.addresses, public.profiles, public.product_reviews, public.discount_redemptions, public.inventory_levels, public.inventory_movements, public.fulfillments, public.order_events, public.order_items, public.order_promotions, public.product_listing TO anon, authenticated;
 GRANT INSERT, UPDATE, DELETE ON TABLE public.categories, public.locations, public.metafield_definitions, public.metafields, public.metaobject_definitions, public.metaobjects, public.product_categories, public.product_images, public.products, public.product_option_values, public.product_options, public.promotion_targets, public.promotions, public.shipping_methods, public.tax_rates, public.variant_option_values, public.product_variants TO authenticated;
@@ -623,7 +613,6 @@ GRANT SELECT ON public.customers TO authenticated, service_role;
 GRANT UPDATE (email, full_name, phone) ON public.customers TO authenticated, service_role;
 GRANT UPDATE (rating, title, body) ON TABLE public.product_reviews TO authenticated;
 GRANT UPDATE (label, recipient_name, phone, country, region, city, line1, line2, postal_code) ON TABLE public.addresses TO authenticated;
-GRANT SELECT (id, order_id, provider, kind, status, amount, currency, provider_ref, created_at, updated_at) ON TABLE public.payments TO anon, authenticated;
 GRANT SELECT (id, product_id, sku, barcode, price, compare_at_price, track_inventory, "position", is_active, created_at, updated_at) ON TABLE public.product_variants TO anon, authenticated;
 
 -- RLS membership predicate: explicitly callable, but only checks the current auth.uid().

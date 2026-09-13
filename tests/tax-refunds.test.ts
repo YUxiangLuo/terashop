@@ -3,9 +3,12 @@ import { api, rpc, signup, makeAdmin, shippingByName, stockOf, TEST_ADDRESS, ins
 import { Cleanup } from './support/cleanup';
 import { stockedProduct } from './support/catalog';
 import { disablePromotion as disablePromo } from './support/promotions';
+import { withRollback } from '../scripts/lib/transactions';
+import { testDatabase } from './database-concurrency';
 
 // Amount/tax regressions from the original review; each case owns its state.
 const resources = new Cleanup(), fixtures = new Cleanup();
+const database = testDatabase();
 let admin: TestUser, mugId: string;
 beforeAll(async () => {
   fixtures.defer(await installTestTax());
@@ -13,7 +16,7 @@ beforeAll(async () => {
   mugId = (await stockedProduct(admin, { price: 9.9, cleanup: fixtures })).variantId;
 });
 afterEach(() => resources.run());
-afterAll(() => fixtures.run());
+afterAll(async () => { try { await fixtures.run(); } finally { await database.close(); } });
 
 // Retained from the original review; grouped by business domain.
 describe('修复：改地址重算税与运法校验', () => {
@@ -135,9 +138,11 @@ describe('修复：退款闭环', () => {
     }, admin.token);
     expect((data as { financial_status: string }).financial_status).toBe('partially_refunded');
 
-    const { data: pays } = await api(
-      `/rest/v1/payments?order_id=eq.${orderId}&kind=eq.refund&select=amount,status`, { service: true });
-    expect(Number((pays as { amount: number }[])[0].amount)).toBeCloseTo(7.83);  // 商品 20.79/3 + 税 2.70/3
+    const ledger = await checked<{ transactions: Array<{ kind: string; amount: number }> }>(rpc(
+      'get_order_ledger', { order_id: orderId }, owner.token,
+    ));
+    expect(Number(ledger.transactions.find(transaction => transaction.kind === 'refund')?.amount))
+      .toBeCloseTo(7.83);  // 商品 20.79/3 + 税 2.70/3
 
     const { data: items } = await api(
       `/rest/v1/order_items?id=eq.${orderItemId}&select=refunded_quantity,refunded_amount`, { service: true });
@@ -212,15 +217,14 @@ describe('修复：退款闭环', () => {
 });
 
 // Retained from the original review; grouped by business domain.
-test('payments.amount 不允许负数（方向由 kind 表达）', async () => {
+test('payment_transactions.amount 不允许负数（方向由 kind 表达）', async () => {
     const u = await signup();
     const { data: o } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, u.token);
     resources.defer(() => checked(rpc('cancel_order', { order_id: (o as { id: string }).id }, u.token)));
-    const { data } = await api('/rest/v1/payments', {
-      service: true, method: 'POST',
-      body: { order_id: (o as { id: string }).id, kind: 'refund', status: 'succeeded', amount: -5 },
-    });
-    expect((data as { code: string }).code).toBe('23514');
+    await expect(withRollback(database, sql => sql`
+      insert into commerce.payment_transactions(order_id,provider,kind,status,amount,currency)
+      values (${(o as { id: string }).id}::uuid,'manual','refund','succeeded',-5,'USD')
+    `)).rejects.toMatchObject({ errno: '23514', constraint: 'payment_transactions_amount_check' });
   });

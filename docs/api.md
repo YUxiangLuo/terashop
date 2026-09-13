@@ -276,6 +276,9 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 
 ## 支付与退款
 
+支付读取统一使用 `get_order_ledger(order_id)` 的 `transactions`：实收 `kind=capture`，退款 `kind=refund`，返回交易 ID、父交易 ID、意图 ID、金额、币种、状态和渠道引用。仅订单客户、管理员及 service 可读，不返回任意 metadata 或原始 payload。
+`/rest/v1/payments` 已移除，`commerce.payment_transactions` 不向 PostgREST 暴露；不可用直写表替代收付款命令。service-only 的 `capture_payment_intent` 仅接收 `payment_intent_id`、`provider_reference`、`idempotency_key`，不再接收 `raw`；生产通过已验证的渠道事件链调用。
+
 | Edge Function | 调用方 | 请求 |
 | --- | --- | --- |
 | `paypal-create-order` | 客户 | `order_id`、`idempotency_key`；跳转返回的 `approve_url` |
@@ -390,4 +393,4 @@ POST /rest/v1/rpc/receive_return
 - `refund_order` / `refund_order_v2`：同步手工/测试退款，不代表真实渠道已退款；不能穿透活跃异步退款请求。
 
 金额口径：`order_items.total` 为毛额，`line_total` 为扣行折扣后的净额；`orders.discount_total` 只含商品折扣。
-免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payments.amount` 恒正，方向由 `kind` 表达。退款不等于退货收货：退款 `restock` 仅释放未发货取消量，已发货商品由实际收货后的 disposition 驱动回库。
+免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payment_transactions.amount` 恒正，方向由 `kind` 表达。退款不等于退货收货：退款 `restock` 仅释放未发货取消量，已发货商品由实际收货后的 disposition 驱动回库。

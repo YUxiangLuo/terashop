@@ -65,15 +65,17 @@ describe('发货（履约）', () => {
     expect(result.status).toBe(400);
     expect(result.data).toMatchObject({ message: 'order must be paid before fulfillment' });
   });
-  test('mark_order_paid → paid + payments 记录 + 事件', async () => {
+  test('mark_order_paid → paid + capture transaction + 事件', async () => {
     const order = await givenOrder();
     expect(await checked(rpc('mark_order_paid', {
       order_id: order.id, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
     }, admin.token))).toMatchObject({ financial_status: 'paid' });
-    const pays = await checked<Array<Record<string, unknown>>>(api(
-      `/rest/v1/payments?order_id=eq.${order.id}&select=provider,kind,status,amount`, { token: customer.token },
+    const ledger = await checked<{ transactions: Array<Record<string, unknown>> }>(rpc(
+      'get_order_ledger', { order_id: order.id }, customer.token,
     ));
-    expect(pays).toEqual([{ provider: 'manual', kind: 'charge', status: 'succeeded', amount: order.total }]);
+    expect(ledger.transactions).toEqual([
+      expect.objectContaining({ provider: 'manual', kind: 'capture', status: 'succeeded', amount: order.total }),
+    ]);
   });
   test('超发被拒绝', async () => {
     expect((await fulfill(await givenOrder({ paid: true }), 4)).data)
@@ -110,10 +112,10 @@ describe('发货（履约）', () => {
 });
 
 describe('支付标记与订单完成', () => {
-  test('payments.raw 对买家不可见', async () => {
+  test('旧 payments endpoint 不存在，commerce 交易表也未暴露', async () => {
     const order = await givenOrder({ paid: true });
-    expect((await api(`/rest/v1/payments?order_id=eq.${order.id}&select=id,raw`, { token: customer.token })).data)
-      .toMatchObject({ code: '42501' });
+    expect((await api(`/rest/v1/payments?order_id=eq.${order.id}`, { token: customer.token })).status).toBe(404);
+    expect((await api(`/rest/v1/payment_transactions?order_id=eq.${order.id}`, { service: true })).status).toBe(404);
   });
   test('重复标记支付被拒绝', async () => {
     const order = await givenOrder({ paid: true });
@@ -196,12 +198,12 @@ describe('修复：管理端写路径收拢', () => {
     expect((data as { admin_note: string }[])[0].admin_note).toBe('客户要求延迟发货');
   });
 
-  test('admin 直插 payments / fulfillments 被拒（必须走 RPC）', async () => {
+  test('旧 payments endpoint 缺失，admin 直插 fulfillments 被拒（必须走 RPC）', async () => {
     const p = await rawApi('/rest/v1/payments', {
       token: admin.token, method: 'POST',
       body: { order_id: orderId, kind: 'charge', status: 'succeeded', amount: 1 },
     });
-    expect(p.status).toBe(403);
+    expect(p.status).toBe(404);
 
     const f = await rawApi('/rest/v1/fulfillments', {
       token: admin.token, method: 'POST',

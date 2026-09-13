@@ -6,6 +6,8 @@ import {
   api, rpc, signup, makeAdmin, checked, TEST_ADDRESS, installTestTax,
   type TestUser,
 } from './helpers';
+import { withRollback } from '../scripts/lib/transactions';
+import { testDatabase } from './database-concurrency';
 
 let admin: TestUser;
 let buyer: TestUser;
@@ -14,6 +16,7 @@ let mugId: string;
 
 let product: CatalogFixture;
 const fixtures = new Cleanup();
+const database = testDatabase();
 
 interface Ledger {
   order: {
@@ -72,7 +75,11 @@ async function ledger(orderId: string, token = buyer.token): Promise<Ledger> {
 }
 
 let removeTax: (() => Promise<void>) | undefined;
-afterAll(async () => { try { await fixtures.run(); } finally { await removeTax?.(); } });
+afterAll(async () => {
+  try { await fixtures.run(); } finally {
+    try { await removeTax?.(); } finally { await database.close(); }
+  }
+});
 beforeAll(async () => {
   removeTax = await installTestTax();
   admin = await signup();
@@ -86,7 +93,8 @@ const givenPendingOrder = () => fixtureOrder(product, buyer, 1, false);
 async function givenPaidOrder(fulfillment: 'none' | 'active' | 'cancelled' = 'none') {
   const order = await fixtureOrder(product, buyer, 2, false);
   await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
-  const [payment] = await checked<Array<{ id: string }>>(api(`/rest/v1/payments?order_id=eq.${order.id}&select=id`, { service: true }));
+  const payment = (await ledger(order.id)).transactions.find(transaction => transaction.kind === 'capture');
+  if (!payment) throw new Error('paid order has no capture transaction');
   let fulfillmentId: string | undefined;
   if (fulfillment !== 'none') {
     const result = await checked<{ id: string }>(rpc('create_fulfillment', {
@@ -184,11 +192,13 @@ describe('关系化订单账本', () => {
     }, stranger.token);
     expect(status).toBe(400);
     expect((data as { message: string }).message).toBe('order not found');
+    expect((await rpc('get_order_ledger', { order_id: adjustmentOrderId }, admin.token)).status).toBe(200);
+    expect((await rpc('get_order_ledger', { order_id: adjustmentOrderId }, undefined, true)).status).toBe(200);
   });
 });
 
 describe('支付交易与已支付快照', () => {
-  test('mark_order_paid 兼容写 payments，同时生成 capture transaction', async () => {
+  test('mark_order_paid 直接生成 capture transaction', async () => {
     const { data: created } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
     }, buyer.token);
@@ -199,11 +209,6 @@ describe('支付交易与已支付快照', () => {
       order_id: paidOrderId, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
     }, admin.token);
 
-    const { data: payments } = await api(
-      `/rest/v1/payments?order_id=eq.${paidOrderId}&select=id`, { service: true },
-    );
-    expect(payments).toHaveLength(1);
-
     const value = await ledger(paidOrderId);
     expect(value.transactions.length).toBe(1);
     expect(value.transactions[0]).toMatchObject({
@@ -213,7 +218,7 @@ describe('支付交易与已支付快照', () => {
     expect(Number(value.balances.net_paid)).toBeCloseTo(Number(order.total));
   });
 
-  test('即使 service role 也不能改写已支付订单或 payment 金额', async () => {
+  test('即使数据库写入也不能改写成功交易或超额 capture', async () => {
     const { id: paidOrderId, itemId: paidOrderItemId, paymentId: paidPaymentId } = await givenPaidOrder();
     const orderMutation = await api(`/rest/v1/orders?id=eq.${paidOrderId}`, {
       service: true, method: 'PATCH', body: { total: 0.01, tax_total: 0.01 },
@@ -221,22 +226,14 @@ describe('支付交易与已支付快照', () => {
     expect(orderMutation.status).toBe(400);
     expect((orderMutation.data as { message: string }).message).toContain('snapshot is immutable');
 
-    const paymentMutation = await api(`/rest/v1/payments?id=eq.${paidPaymentId}`, {
-      service: true, method: 'PATCH', body: { amount: 0.01 },
-    });
-    expect(paymentMutation.status).toBe(400);
-    expect((paymentMutation.data as { message: string }).message).toContain('commercial fields are immutable');
+    await expect(withRollback(database, sql => sql`
+      update commerce.payment_transactions set amount=0.01 where id=${paidPaymentId}::uuid
+    `)).rejects.toThrow('commercial fields are immutable');
 
-    const duplicateCapture = await api('/rest/v1/payments', {
-      service: true,
-      method: 'POST',
-      body: {
-        order_id: paidOrderId, provider: 'manual', kind: 'charge',
-        status: 'succeeded', amount: 1, currency: 'USD',
-      },
-    });
-    expect(duplicateCapture.status).toBe(400);
-    expect((duplicateCapture.data as { message: string }).message).toContain('exceeds order total');
+    await expect(withRollback(database, sql => sql`
+      insert into commerce.payment_transactions(order_id,provider,kind,status,amount,currency)
+      values (${paidOrderId}::uuid,'manual','capture','succeeded',1,'USD')
+    `)).rejects.toThrow('exceeds order total');
 
     const forgedRefund = await api(`/rest/v1/order_items?id=eq.${paidOrderItemId}`, {
       service: true, method: 'PATCH', body: { refunded_quantity: 1, refunded_amount: 9.9 },
@@ -283,7 +280,6 @@ describe('支付交易与已支付快照', () => {
       payment_intent_id: (first.data as { id: string }).id,
       provider_reference: reference,
       idempotency_key: captureKey,
-      raw: { verified_webhook: true },
     }, undefined, true);
     const replay = await rpc('capture_payment_intent', {
       payment_intent_id: (first.data as { id: string }).id,
@@ -316,6 +312,30 @@ describe('支付交易与已支付快照', () => {
     }, undefined, true);
     expect(conflictingReplay.status).toBe(400);
     expect((conflictingReplay.data as { message: string }).message).toContain('already captured');
+
+    const reserved = await rpc('create_refund_request', {
+      order_id: orderId,
+      actor_id: admin.userId,
+      provider: 'paypal',
+      idempotency_key: `refund-${crypto.randomUUID()}`,
+      amount: Number((created as { total: number }).total),
+    }, undefined, true);
+    expect(reserved.status).toBe(200);
+    expect((reserved.data as { status: string }).status).toBe('requested');
+    await expect(withRollback(database, sql => sql`
+      insert into commerce.payment_transactions(order_id,provider,kind,status,amount,currency)
+      values (${orderId}::uuid,'manual','refund','succeeded',0.01,'USD')
+    `)).rejects.toThrow('active asynchronous refund request');
+    expect((await ledger(orderId, owner.token)).transactions).toHaveLength(1);
+    const overReserved = await rpc('create_refund_request', {
+      order_id: orderId,
+      actor_id: admin.userId,
+      provider: 'paypal',
+      idempotency_key: `refund-${crypto.randomUUID()}`,
+      amount: 0.01,
+    }, undefined, true);
+    expect(overReserved.status).toBe(400);
+    expect((overReserved.data as { message: string }).message).toContain('refundable balance');
   });
 });
 

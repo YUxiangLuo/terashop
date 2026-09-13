@@ -538,7 +538,6 @@ CREATE TABLE commerce.payment_transactions (
     order_id uuid NOT NULL,
     payment_intent_id uuid,
     parent_transaction_id uuid,
-    legacy_payment_id uuid,
     provider text NOT NULL,
     kind text NOT NULL,
     status text NOT NULL,
@@ -592,7 +591,6 @@ CREATE TABLE commerce.refunds (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     order_id uuid NOT NULL,
     payment_transaction_id uuid,
-    legacy_payment_id uuid,
     status text NOT NULL,
     source text NOT NULL,
     amount numeric(12,2) NOT NULL CONSTRAINT refunds_amount_finite CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
@@ -765,24 +763,6 @@ CREATE TABLE public.order_promotions (
     code text,
     amount numeric(12,2) NOT NULL CONSTRAINT order_promotions_amount_finite CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
     created_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-CREATE TABLE public.payments (
-    id uuid DEFAULT gen_random_uuid() NOT NULL,
-    order_id uuid NOT NULL,
-    provider text DEFAULT 'manual'::text NOT NULL,
-    kind text DEFAULT 'charge'::text NOT NULL,
-    status text DEFAULT 'pending'::text NOT NULL,
-    amount numeric(12,2) NOT NULL CONSTRAINT payments_amount_finite CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
-    currency text DEFAULT 'USD'::text NOT NULL CHECK (currency = 'USD'),
-    provider_ref text,
-    raw jsonb,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    payment_intent_id uuid,
-    idempotency_key text,
-    CONSTRAINT payments_kind_check CHECK ((kind = ANY (ARRAY['authorization'::text, 'charge'::text, 'refund'::text]))),
-    CONSTRAINT payments_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
 
 CREATE TABLE public.product_categories (
@@ -1091,9 +1071,6 @@ ALTER TABLE ONLY commerce.payment_provider_events
     ADD CONSTRAINT payment_provider_events_provider_provider_event_id_key UNIQUE (provider, provider_event_id);
 
 ALTER TABLE ONLY commerce.payment_transactions
-    ADD CONSTRAINT payment_transactions_legacy_payment_id_key UNIQUE (legacy_payment_id);
-
-ALTER TABLE ONLY commerce.payment_transactions
     ADD CONSTRAINT payment_transactions_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY commerce.provider_money_movements
@@ -1128,9 +1105,6 @@ ALTER TABLE ONLY commerce.refund_requests
 
 ALTER TABLE ONLY commerce.refunds
     ADD CONSTRAINT refunds_id_order_id_key UNIQUE (id, order_id);
-
-ALTER TABLE ONLY commerce.refunds
-    ADD CONSTRAINT refunds_legacy_payment_id_key UNIQUE (legacy_payment_id);
 
 ALTER TABLE ONLY commerce.refunds
     ADD CONSTRAINT refunds_payment_transaction_id_key UNIQUE (payment_transaction_id);
@@ -1209,12 +1183,6 @@ ALTER TABLE ONLY public.order_promotions
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_pkey PRIMARY KEY (id);
-
-ALTER TABLE public.payments
-    ADD CONSTRAINT payments_amount_positive_chk CHECK ((amount > (0)::numeric)) NOT VALID;
-
-ALTER TABLE ONLY public.payments
-    ADD CONSTRAINT payments_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.product_categories
     ADD CONSTRAINT product_categories_pkey PRIMARY KEY (product_id, category_id);
@@ -1313,9 +1281,6 @@ ALTER TABLE ONLY commerce.payment_intents
     ADD CONSTRAINT payment_intents_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY commerce.payment_transactions
-    ADD CONSTRAINT payment_transactions_legacy_payment_id_fkey FOREIGN KEY (legacy_payment_id) REFERENCES public.payments(id) ON DELETE RESTRICT;
-
-ALTER TABLE ONLY commerce.payment_transactions
     ADD CONSTRAINT payment_transactions_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY commerce.payment_transactions
@@ -1365,9 +1330,6 @@ ALTER TABLE ONLY commerce.refund_requests
 
 ALTER TABLE ONLY commerce.refunds
     ADD CONSTRAINT refunds_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.profiles(id) ON DELETE SET NULL;
-
-ALTER TABLE ONLY commerce.refunds
-    ADD CONSTRAINT refunds_legacy_payment_id_fkey FOREIGN KEY (legacy_payment_id) REFERENCES public.payments(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY commerce.refunds
     ADD CONSTRAINT refunds_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT;
@@ -1440,12 +1402,6 @@ ALTER TABLE ONLY public.orders
 
 ALTER TABLE ONLY public.orders
     ADD CONSTRAINT orders_shipping_method_id_fkey FOREIGN KEY (shipping_method_id) REFERENCES public.shipping_methods(id);
-
-ALTER TABLE ONLY public.payments
-    ADD CONSTRAINT payments_order_id_fkey FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE CASCADE;
-
-ALTER TABLE ONLY public.payments
-    ADD CONSTRAINT payments_payment_intent_id_fkey FOREIGN KEY (payment_intent_id) REFERENCES commerce.payment_intents(id) ON DELETE RESTRICT;
 
 ALTER TABLE ONLY public.product_categories
     ADD CONSTRAINT product_categories_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id) ON DELETE CASCADE;
@@ -1684,9 +1640,6 @@ CREATE INDEX order_items_variant_idx ON public.order_items USING btree (variant_
 CREATE INDEX orders_created_at_idx ON public.orders USING btree (created_at DESC);
 CREATE INDEX orders_customer_idx ON public.orders USING btree (customer_id, order_number DESC);
 CREATE INDEX orders_status_idx ON public.orders USING btree (status, financial_status, fulfillment_status);
-CREATE INDEX payments_order_idx ON public.payments USING btree (order_id);
-CREATE UNIQUE INDEX payments_provider_idempotency_uk ON public.payments USING btree (provider, idempotency_key) WHERE (idempotency_key IS NOT NULL);
-CREATE INDEX payments_provider_ref_idx ON public.payments USING btree (provider, provider_ref);
 CREATE INDEX product_categories_category_idx ON public.product_categories USING btree (category_id);
 CREATE INDEX product_images_product_idx ON public.product_images USING btree (product_id);
 CREATE INDEX product_reviews_customer_idx ON public.product_reviews USING btree (customer_id);
@@ -1741,7 +1694,6 @@ ALTER TABLE public.order_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_promotions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.product_categories ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.product_images ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.product_option_values ENABLE ROW LEVEL SECURITY;

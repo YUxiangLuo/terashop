@@ -229,12 +229,10 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     }, admin.token);
     expect((second.data as { message: string }).message).toContain('exceeds available refundable balance');
 
-    const { data: payments } = await api(
-      `/rest/v1/payments?order_id=eq.${order.id}&kind=eq.refund&status=eq.succeeded&select=amount`,
-      { service: true },
-    );
-    const refunded = (payments as { amount: number }[])
-      .reduce((sum, payment) => sum + Number(payment.amount), 0);
+    const { data: ledger } = await rpc('get_order_ledger', { order_id: order.id }, owner.token);
+    const refunded = (ledger as { transactions: Array<{ kind: string; status: string; amount: number }> }).transactions
+      .filter(transaction => transaction.kind === 'refund' && transaction.status === 'succeeded')
+      .reduce((sum, transaction) => sum + Number(transaction.amount), 0);
     expect(refunded).toBeCloseTo(firstRefund);
 
     const { data: storedLine } = await api(
@@ -282,7 +280,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     }
   });
 
-  test('0 元订单可标记 paid，但不会产生 0 元 payment', async () => {
+  test('0 元订单可标记 paid，但不会产生 0 元 transaction', async () => {
     const suffix = crypto.randomUUID();
     const { data: products } = await api('/rest/v1/products?slug=eq.ceramic-mug-350&select=id');
     const productId = (products as { id: string }[])[0].id;
@@ -310,10 +308,8 @@ describe('关键完整性：订单、支付、履约与退款', () => {
       const { data: paid } = await rpc('mark_order_paid', { order_id: order.id }, admin.token);
       expect((paid as { financial_status: string }).financial_status).toBe('paid');
 
-      const { data: payments } = await api(`/rest/v1/payments?order_id=eq.${order.id}&select=id`, {
-        service: true,
-      });
-      expect(payments).toEqual([]);
+      const { data: ledger } = await rpc('get_order_ledger', { order_id: order.id }, owner.token);
+      expect((ledger as { transactions: unknown[] }).transactions).toEqual([]);
     } finally {
       // 订单快照仍引用促销，停用而不是删除。
       await api(`/rest/v1/promotions?id=eq.${promotionId}`, {

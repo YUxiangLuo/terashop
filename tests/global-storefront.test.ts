@@ -156,11 +156,10 @@ test('数据库拒绝非 USD 订单和支付，不能只靠 Edge 校验', async 
   expect(invalid.data).toMatchObject({ code: '23514', message: expect.stringContaining('orders_currency_usd_chk') });
   const order = await checked<{ id: string }>(rpc('create_order', { items: items(), address: TEST_ADDRESS }, buyer.token));
   orders.push(order.id);
-  const payment = await api('/rest/v1/payments', {
-    service: true, method: 'POST', body: {
-      order_id: order.id, provider: 'manual', kind: 'charge', status: 'succeeded', amount: 1, currency: 'EUR',
-    },
-  });
-  expect(payment.status).toBe(400);
-  expect(payment.data).toMatchObject({ code: '23514', message: expect.stringContaining('payments_currency_check') });
+  await expect(withRollback(database, sql => sql`
+    insert into commerce.payment_transactions(order_id,provider,kind,status,amount,currency)
+    values (${order.id}::uuid,'manual','capture','succeeded',1,'EUR')
+  `)).rejects.toThrow('payment transaction does not match its order');
+  expect((await api('/rest/v1/payments?select=id', { service: true })).status).toBe(404);
+  expect((await api('/rest/v1/payment_transactions?select=id', { service: true })).status).toBe(404);
 });

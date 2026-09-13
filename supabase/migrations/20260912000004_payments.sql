@@ -3,7 +3,7 @@
 begin;
 set local check_function_bodies = false;
 
-CREATE FUNCTION private.finalize_refund_request(p_request_id uuid, p_event commerce.payment_provider_events, p_data jsonb) RETURNS uuid
+CREATE FUNCTION private.finalize_refund_request(p_request_id uuid, p_event commerce.payment_provider_events) RETURNS uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -11,7 +11,6 @@ declare
   v_request commerce.refund_requests;
   v_order public.orders;
   v_line record;
-  v_payment public.payments;
   v_transaction commerce.payment_transactions;
   v_refund_id uuid;
   v_refunded numeric(12, 2);
@@ -34,23 +33,20 @@ begin
 
   perform set_config('commerce.async_refund_finalize', 'on', true);
   perform set_config('commerce.refund_write', 'on', true);
-  insert into public.payments (
+  insert into commerce.payment_transactions (
     order_id, provider, kind, status, amount, currency,
-    provider_ref, raw, idempotency_key
+    provider_reference, parent_transaction_id, idempotency_key
   ) values (
     v_order.id, v_request.provider, 'refund', 'succeeded',
     v_request.amount, v_request.currency, p_event.object_reference,
-    p_data, p_event.provider_event_id
-  ) returning * into v_payment;
-  select * into v_transaction from commerce.payment_transactions t
-  where t.legacy_payment_id = v_payment.id;
-  if not found then raise exception 'refund payment transaction was not recorded'; end if;
+    v_request.parent_transaction_id, p_event.provider_event_id
+  ) returning * into v_transaction;
 
   insert into commerce.refunds (
-    order_id, payment_transaction_id, legacy_payment_id, status, source,
+    order_id, payment_transaction_id, status, source,
     amount, currency, reason, restock_requested, actor_id, metadata
   ) values (
-    v_order.id, v_transaction.id, v_payment.id, 'succeeded', v_request.source,
+    v_order.id, v_transaction.id, 'succeeded', v_request.source,
     v_request.amount, v_request.currency, v_request.reason,
     v_request.restock_requested, v_request.actor_id,
     jsonb_build_object('refund_request_id', v_request.id,
@@ -85,7 +81,7 @@ begin
     values (v_refund_id, v_order.id, v_line.kind, v_line.tax_line_id, v_line.shipping_line_id, v_line.amount);
   end loop;
   select coalesce(sum(p.amount), 0) into v_refunded
-  from public.payments p
+  from commerce.payment_transactions p
   where p.order_id = v_order.id and p.kind = 'refund' and p.status = 'succeeded';
   update public.orders o
   set financial_status = case when v_refunded >= o.total then 'refunded'
@@ -139,8 +135,8 @@ begin
     raise exception 'order is not open (current: %)', v_order.status;
   end if;
 
-  insert into public.payments (order_id, provider, kind, status, amount, currency, provider_ref)
-  values (v_order.id, provider, 'charge', 'succeeded', v_order.total, v_order.currency, provider_ref);
+  insert into commerce.payment_transactions (order_id, provider, kind, status, amount, currency, provider_reference)
+  values (v_order.id, provider, 'capture', 'succeeded', v_order.total, v_order.currency, provider_ref);
 
   update public.orders
   set financial_status = 'paid',
@@ -454,7 +450,7 @@ begin
     begin
       select (public.capture_payment_intent(
         v_intent.id, p_event.object_reference,
-        p_event.provider_event_id, p_event.data
+        p_event.provider_event_id
       ) ->> 'id')::uuid into v_transaction_id;
       update commerce.provider_money_movements m
       set order_id = v_intent.order_id, payment_intent_id = v_intent.id,
@@ -583,7 +579,7 @@ begin
                                 'resource_id', v_movement.id);
     end if;
     begin
-      v_refund_id := private.finalize_refund_request(v_request.id, p_event, p_event.data);
+      v_refund_id := private.finalize_refund_request(v_request.id, p_event);
       select r.payment_transaction_id into v_transaction_id
       from commerce.refunds r where r.id = v_refund_id;
       update commerce.provider_money_movements m
@@ -1279,7 +1275,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text, raw jsonb DEFAULT NULL::jsonb) RETURNS jsonb
+CREATE FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1287,7 +1283,6 @@ declare
   v_intent commerce.payment_intents;
   v_quote commerce.checkout_quotes;
   v_order public.orders;
-  v_payment public.payments;
   v_transaction commerce.payment_transactions;
   v_key text := btrim(idempotency_key);
   v_reference text := btrim(provider_reference);
@@ -1337,15 +1332,13 @@ begin
     raise exception 'checkout reservation is not active';
   end if;
   perform private.consume_order_reservation(v_order.id);
-  insert into public.payments (
-    order_id, provider, kind, status, amount, currency, provider_ref, raw,
+  insert into commerce.payment_transactions (
+    order_id, provider, kind, status, amount, currency, provider_reference,
     payment_intent_id, idempotency_key
   ) values (
-    v_order.id, v_intent.provider, 'charge', 'succeeded', v_intent.amount,
-    v_intent.currency, v_reference, raw, v_intent.id, v_key
-  ) returning * into v_payment;
-  select * into v_transaction from commerce.payment_transactions t
-  where t.legacy_payment_id = v_payment.id;
+    v_order.id, v_intent.provider, 'capture', 'succeeded', v_intent.amount,
+    v_intent.currency, v_reference, v_intent.id, v_key
+  ) returning * into v_transaction;
   update commerce.payment_intents i
   set status = 'succeeded',
       provider_reference = case when i.provider = 'paypal'

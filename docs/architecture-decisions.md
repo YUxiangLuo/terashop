@@ -70,8 +70,8 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 
 ## ADR-008：交易账本与投影同步
 
-当前写入模型包含 `orders`、`payments`、`fulfillments.items`、`order_items.refunded_*`；同一事务同步关系化的
-`order_adjustments`、`payment_intents`、`payment_transactions`、`fulfillment_lines`、`refunds`、`refund_lines` 和退款金额组件。
+支付统一直接写 `commerce.payment_transactions`，不再保留 `public.payments` 中转表。`orders`、`fulfillments.items`、`order_items.refunded_*` 与关系化的
+`order_adjustments`、`payment_intents`、`payment_transactions`、`fulfillment_lines`、`refunds`、`refund_lines` 和退款金额组件在同一事务内保持一致。
 渠道退款先进入状态受限的 `refund_requests`，成功后才写成功账本。
 核心账本 append-only，外键采用 `ON DELETE RESTRICT`；不得把模型/账本同步拆成两个网络请求。
 订单、履约和手工退款的 `*_v2` 命令通过请求指纹与事务内幂等记录支持重试；基础入口仍被命令链使用，不能只删除包装而不调整调用关系。
@@ -234,7 +234,7 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 会话刷新/安全存储属于 Storefront 接入合同；退出、丢失会话或切换已有账号不会自动恢复匿名订单。当前不实现邮件查单、跨设备恢复或客户合并，不能只凭邮箱或订单号授权。CAPTCHA、覆盖直连 API 的限流、匿名身份留存/清理和私有缓存策略是上线前必需部署工作；每身份配额不能防止批量创建新身份。匿名 Auth 清理不得删除商业客户、订单或资金事实，不得清理仍需支付/售后的会话。
 
-参考：[Supabase Anonymous Sign-Ins](https://supabase.com/docs/guides/auth/auth-anonymous)。手工支付投影/履约 JSON 的收敛仍须单独修改调用与交易回归。
+参考：[Supabase Anonymous Sign-Ins](https://supabase.com/docs/guides/auth/auth-anonymous)。履约 JSON 的收敛仍须单独修改调用与交易回归。
 
 ## ADR-024：单一下单管线与简化库存语义
 
@@ -243,3 +243,11 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 `create_order` 是创建并转换 Quote 的便捷入口，两步同事务，失败整体回滚；内部随机 Quote key 与调用方显式报价的 key 无关联。`create_order_v2` 保留独立 `order.create` 幂等范围、规范化请求指纹和当前订单 DTO 重放，成功重试不新增 Quote、不延长期限、不重复预占或占用促销。非幂等入口仍不承诺网络重试安全，客户端优先使用 V2 或显式 Quote 流程。
 
 删除即时扣库实现及 `expire_unpaid_orders`；统一调度 `expire_checkout_quotes`。取消或超时仅释放未付款预占，支付结果未知时保留原有捕获保护和迟到资金对账规则。支付账本/履约双表示的收敛不包含在本次改动中。
+
+## ADR-025：唯一支付账本
+
+手工收款、PayPal 捕获、手工退款及渠道退款直接写 `commerce.payment_transactions`；删除 `public.payments`、双写触发器和 `legacy_payment_id` 关联，不保留兼容视图。实收统一使用 `capture`，退款使用 `refund`，金额恒正。零元订单不虚构资金交易。
+
+交易、订单状态、退款明细/金额组件、库存和 Outbox 保持单事务提交；支付交易的金额、币种、父交易、幂等键及已绑定渠道引用不可改写。异步退款直接引用请求中的捕获交易，手工退款沿用原捕获关联规则；异步请求活跃时禁止手工退款或直接插入退款交易穿透预留。
+
+客户、管理员及 service 通过 `get_order_ledger.transactions` 读取安全 DTO，不暴露账本底表或任意 metadata。删除原 `capture_payment_intent.raw` 参数，不再另存渠道 payload 副本；可信事件的 allowlist 字段与 hash 仍保存在 Inbox，真实外部资金仍由 `provider_money_movements` 独立记录并对账。它们分别代表渠道事件、实际资金和本地入账，不是应合并的重复账本。手工收退款不代表线上渠道发生了资金操作。

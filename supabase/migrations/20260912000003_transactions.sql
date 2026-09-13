@@ -468,7 +468,7 @@ begin
     select 1 from public.inventory_movements im join public.order_items oi on oi.variant_id = im.variant_id
     where oi.id = new.order_item_id and im.order_id = new.order_id and im.reason = 'order' and im.delta < 0
   ) then new.cancelled_quantity else 0 end;
-  if new.restocked_quantity > 0 and v_refund.payment_transaction_id is null and v_refund.legacy_payment_id is null then
+  if new.restocked_quantity > 0 and v_refund.payment_transaction_id is null then
     raise exception 'inventory release requires a successful refund payment';
   end if;
   return new;
@@ -836,33 +836,6 @@ CREATE FUNCTION private.protect_immutable_row() RETURNS trigger
     AS $$
 begin
   raise exception '% is immutable', tg_table_name;
-end;
-$$;
-
-CREATE FUNCTION private.protect_legacy_payment() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-begin
-  if tg_op in ('DELETE', 'TRUNCATE') then
-    raise exception 'payments are append-only';
-  end if;
-  if (new.order_id, new.provider, new.kind, new.amount, new.currency,
-      new.payment_intent_id, new.idempotency_key, new.created_at)
-     is distinct from
-     (old.order_id, old.provider, old.kind, old.amount, old.currency,
-      old.payment_intent_id, old.idempotency_key, old.created_at) then
-    raise exception 'payment commercial fields are immutable';
-  end if;
-  if old.provider_ref is not null and new.provider_ref is distinct from old.provider_ref then
-    raise exception 'payment provider reference is immutable';
-  end if;
-  if new.status <> old.status and not (
-    old.status = 'pending' and new.status in ('succeeded', 'failed', 'cancelled')
-  ) then
-    raise exception 'invalid payment transition: % -> %', old.status, new.status;
-  end if;
-  return new;
 end;
 $$;
 
@@ -1306,7 +1279,7 @@ declare
   v_line_refund numeric(12, 2);
   v_plan jsonb;
   v_component jsonb;
-  v_payment public.payments;
+  v_parent_id uuid;
   v_transaction_id uuid;
   v_refund_id uuid;
 begin
@@ -1326,10 +1299,10 @@ begin
 
   -- 已退合计（以成功的 refund 支付记录为准）
   select coalesce(sum(p.amount), 0) into v_refunded
-  from public.payments p
+  from commerce.payment_transactions p
   where p.order_id = v_order.id and p.kind = 'refund' and p.status = 'succeeded';
-  v_refundable := least(v_order.total, (select coalesce(sum(p.amount), 0) from public.payments p
-    where p.order_id = v_order.id and p.kind = 'charge' and p.status = 'succeeded')) - v_refunded;
+  v_refundable := least(v_order.total, (select coalesce(sum(p.amount), 0) from commerce.payment_transactions p
+    where p.order_id = v_order.id and p.kind = 'capture' and p.status = 'succeeded')) - v_refunded;
   if v_refundable <= 0 then
     raise exception 'order already fully refunded';
   end if;
@@ -1358,11 +1331,13 @@ begin
 
   end loop;
 
-  insert into public.payments (order_id, provider, kind, status, amount, currency)
-  values (v_order.id, provider, 'refund', 'succeeded', v_amount, v_order.currency) returning * into v_payment;
-  select id into strict v_transaction_id from commerce.payment_transactions where legacy_payment_id = v_payment.id;
-  insert into commerce.refunds(order_id, payment_transaction_id, legacy_payment_id, status, source, amount, currency, reason, restock_requested, actor_id)
-  values (v_order.id, v_transaction_id, v_payment.id, 'succeeded', v_plan ->> 'source', v_amount, v_order.currency, reason, restock, auth.uid())
+  select t.id into v_parent_id from commerce.payment_transactions t
+  where t.order_id = v_order.id and t.kind = 'capture' and t.status = 'succeeded'
+  order by t.created_at, t.id limit 1;
+  insert into commerce.payment_transactions (order_id, parent_transaction_id, provider, kind, status, amount, currency)
+  values (v_order.id, v_parent_id, provider, 'refund', 'succeeded', v_amount, v_order.currency) returning id into v_transaction_id;
+  insert into commerce.refunds(order_id, payment_transaction_id, status, source, amount, currency, reason, restock_requested, actor_id)
+  values (v_order.id, v_transaction_id, 'succeeded', v_plan ->> 'source', v_amount, v_order.currency, reason, restock, auth.uid())
   returning id into v_refund_id;
   for v_item in select value from jsonb_array_elements(v_plan -> 'lines') loop
     insert into commerce.refund_lines(refund_id, order_id, order_item_id, quantity, amount)
@@ -1445,46 +1420,6 @@ begin
          sum((e.value ->> 'quantity')::integer)::integer, new.created_at
   from jsonb_array_elements(new.items) e
   group by (e.value ->> 'order_item_id')::uuid;
-  return new;
-end;
-$$;
-
-CREATE FUNCTION private.sync_legacy_payment_transaction() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_parent_id uuid;
-  v_kind text := case new.kind when 'charge' then 'capture' else new.kind end;
-begin
-  if new.amount <= 0 then
-    return new;
-  end if;
-  if v_kind = 'refund' then
-    select t.id into v_parent_id
-    from commerce.payment_transactions t
-    where t.order_id = new.order_id and t.kind = 'capture' and t.status = 'succeeded'
-    order by t.created_at, t.id limit 1;
-  end if;
-
-  insert into commerce.payment_transactions as existing
-    (order_id, payment_intent_id, parent_transaction_id, legacy_payment_id,
-     provider, kind, status, amount, currency, provider_reference,
-     idempotency_key, metadata, processed_at, created_at, updated_at)
-  values
-    (new.order_id, new.payment_intent_id, v_parent_id, new.id,
-     new.provider, v_kind, new.status, new.amount, new.currency, new.provider_ref,
-     new.idempotency_key, jsonb_build_object('legacy_payment', true),
-     case when new.status = 'succeeded' then new.updated_at end,
-     new.created_at, new.updated_at)
-  on conflict (legacy_payment_id) do update
-  set status = excluded.status,
-      provider_reference = coalesce(excluded.provider_reference,
-                                    existing.provider_reference),
-      metadata = existing.metadata || excluded.metadata,
-      processed_at = case when excluded.status = 'succeeded'
-                          then coalesce(existing.processed_at, excluded.updated_at)
-                          else existing.processed_at end;
   return new;
 end;
 $$;
@@ -1684,11 +1619,11 @@ begin
 
   if tg_op = 'UPDATE' then
     if (new.order_id, new.payment_intent_id, new.parent_transaction_id,
-        new.legacy_payment_id, new.provider, new.kind, new.amount,
+        new.provider, new.kind, new.amount,
         new.currency, new.idempotency_key, new.created_at)
        is distinct from
        (old.order_id, old.payment_intent_id, old.parent_transaction_id,
-        old.legacy_payment_id, old.provider, old.kind, old.amount,
+        old.provider, old.kind, old.amount,
         old.currency, old.idempotency_key, old.created_at) then
       raise exception 'payment transaction commercial fields are immutable';
     end if;
@@ -1735,7 +1670,6 @@ CREATE FUNCTION private.validate_refund_header() RETURNS trigger
     AS $$
 declare
   v_transaction commerce.payment_transactions;
-  v_payment public.payments;
 begin
   if new.payment_transaction_id is not null then
     select * into v_transaction from commerce.payment_transactions t
@@ -1746,18 +1680,6 @@ begin
        or (v_transaction.amount, v_transaction.currency, v_transaction.status)
           is distinct from (new.amount, new.currency, new.status) then
       raise exception 'refund header does not match its payment transaction';
-    end if;
-  end if;
-  if new.legacy_payment_id is not null then
-    select * into v_payment from public.payments p where p.id = new.legacy_payment_id;
-    if not found
-       or v_payment.order_id <> new.order_id
-       or v_payment.kind <> 'refund'
-       or (v_payment.amount, v_payment.currency, v_payment.status)
-          is distinct from (new.amount, new.currency, new.status)
-       or (new.payment_transaction_id is not null
-           and v_transaction.legacy_payment_id is distinct from v_payment.id) then
-      raise exception 'refund header does not match its legacy payment';
     end if;
   end if;
   return new;
