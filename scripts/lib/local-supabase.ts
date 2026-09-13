@@ -1,15 +1,16 @@
 export interface LocalSupabase {
   API_URL: string;
   DB_URL: string;
+  MAILPIT_URL: string;
   ANON_KEY: string;
   SERVICE_ROLE_KEY: string;
 }
 
 export function validateLocalSupabase(value: Record<string, unknown>): LocalSupabase {
-  for (const name of ['API_URL', 'DB_URL', 'ANON_KEY', 'SERVICE_ROLE_KEY'] as const) {
+  for (const name of ['API_URL', 'DB_URL', 'MAILPIT_URL', 'ANON_KEY', 'SERVICE_ROLE_KEY'] as const) {
     if (typeof value[name] !== 'string' || !value[name]) throw new Error(`Local Supabase is missing ${name}`);
   }
-  for (const name of ['API_URL', 'DB_URL'] as const) {
+  for (const name of ['API_URL', 'DB_URL', 'MAILPIT_URL'] as const) {
     const url = new URL(value[name] as string);
     const protocols = name === 'DB_URL' ? ['postgres:', 'postgresql:'] : ['http:', 'https:'];
     if (!protocols.includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
@@ -18,6 +19,7 @@ export function validateLocalSupabase(value: Record<string, unknown>): LocalSupa
   }
   return {
     API_URL: value.API_URL as string, DB_URL: value.DB_URL as string,
+    MAILPIT_URL: value.MAILPIT_URL as string,
     ANON_KEY: value.ANON_KEY as string, SERVICE_ROLE_KEY: value.SERVICE_ROLE_KEY as string,
   };
 }

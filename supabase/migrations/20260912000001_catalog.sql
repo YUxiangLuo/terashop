@@ -68,6 +68,72 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.customer_summary_json(p_customer public.customers) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path TO '' AS $$
+  select jsonb_build_object('id',p_customer.id,'email',p_customer.email,'full_name',p_customer.full_name,
+    'phone',p_customer.phone,'has_account',exists(select 1 from auth.users u
+      where u.id = p_customer.auth_user_id and not u.is_anonymous),
+    'anonymized_at',p_customer.anonymized_at,'created_at',p_customer.created_at,'updated_at',p_customer.updated_at);
+$$;
+
+CREATE FUNCTION public.get_admin_customer(customer_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'admin only';
+  end if;
+  return (select private.customer_summary_json(c) || jsonb_build_object(
+    'metafields',private.catalog_metafields_json('customer',c.id,true),
+    'addresses',coalesce((select jsonb_agg(jsonb_build_object('id',a.id,'label',a.label,
+      'recipient_name',a.recipient_name,'phone',a.phone,'country',a.country,'region',a.region,'city',a.city,
+      'line1',a.line1,'line2',a.line2,'postal_code',a.postal_code,'is_default',a.is_default)
+      order by a.is_default desc,a.id) from public.addresses a where a.customer_id = c.id),'[]'::jsonb))
+    from public.customers c where c.id = customer_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_customers(page_size integer DEFAULT 20, search text DEFAULT NULL,
+    anonymized boolean DEFAULT NULL, after_cursor jsonb DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_search text := nullif(btrim(search),'');
+  v_after_time timestamptz;
+  v_after_id uuid;
+  v_items jsonb;
+  v_next jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or char_length(search) > 200 then
+    raise exception using errcode = '22023', message = 'page_size must be 1-100; search maximum 200 characters';
+  end if;
+  if after_cursor is not null then
+    if jsonb_typeof(after_cursor) is distinct from 'object'
+      or jsonb_typeof(after_cursor -> 'created_at') is distinct from 'string'
+      or jsonb_typeof(after_cursor -> 'id') is distinct from 'string'
+      or after_cursor - array['created_at','id'] <> '{}'::jsonb then
+      raise exception using errcode = '22023', message = 'cursor requires created_at and id';
+    end if;
+    v_after_time := (after_cursor ->> 'created_at')::timestamptz;
+    v_after_id := (after_cursor ->> 'id')::uuid;
+    if not isfinite(v_after_time) then raise exception using errcode = '22023', message = 'cursor timestamp must be finite'; end if;
+  end if;
+  with candidates as materialized (
+    select c.* from public.customers c where (anonymized is null or (c.anonymized_at is not null) = anonymized)
+      and (v_after_time is null or (c.created_at,c.id) < (v_after_time,v_after_id))
+      and (v_search is null or strpos(lower(c.full_name),lower(v_search)) > 0
+        or strpos(lower(c.email),lower(v_search)) > 0 or strpos(lower(c.phone),lower(v_search)) > 0)
+    order by c.created_at desc,c.id desc limit page_size + 1
+  ), page as materialized (select * from candidates order by created_at desc,id desc limit page_size)
+  select coalesce(jsonb_agg(private.customer_summary_json(p::public.customers) order by p.created_at desc,p.id desc),'[]'::jsonb),
+    case when (select count(*) from candidates) > page_size then
+      (select jsonb_build_object('created_at',created_at,'id',id) from page order by created_at,id limit 1) end
+    into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 CREATE FUNCTION private.anonymize_customer(p_id uuid) RETURNS public.customers
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 declare v_customer public.customers;
@@ -1094,6 +1160,26 @@ begin
   -- No trigger is disabled and no transaction-wide constraint mode is changed.
   perform private.validate_catalog_product(product_id);
   return (select private.catalog_product_json(p,true) from public.products p where p.id = update_product.product_id);
+end;
+$$;
+
+CREATE FUNCTION public.create_product(product_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'admin only';
+  end if;
+  if product_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or octet_length(changes::text) > 262144
+    or jsonb_typeof(changes -> 'product' -> 'slug') is distinct from 'string'
+    or jsonb_typeof(changes -> 'product' -> 'name') is distinct from 'string' then
+    raise exception using errcode = '22023', message = 'product_id and product slug/name are required; changes maximum 256 KiB';
+  end if;
+  -- The draft exists only inside this transaction. All editing and publication
+  -- rules stay in update_product; any failure also rolls back this insert.
+  insert into public.products(id,slug,name)
+    values (product_id,changes -> 'product' ->> 'slug',changes -> 'product' ->> 'name');
+  return public.update_product(product_id,1,changes);
 end;
 $$;
 

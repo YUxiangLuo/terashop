@@ -9,8 +9,8 @@
     "typescript": "7.0.2"
   },
   "scripts": {
-    "setup": "bunx supabase db reset --local",
-    "start": "bunx supabase start",
+    "setup": "bunx supabase db reset --local --network-id tera-headless-loopback",
+    "start": "bun scripts/start.ts",
     "stop": "bunx supabase stop",
     "test": "bun scripts/test.ts --reset",
     "test:current": "bun scripts/test.ts",
@@ -18,7 +18,7 @@
     "db:lint": "bun scripts/db-lint.ts",
     "docs:check": "bun scripts/docs-check.ts",
     "typecheck": "bunx tsc --noEmit",
-    "types:generate": "bunx supabase gen types typescript --local > types/database.ts",
-    "types:check": "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; bunx supabase gen types typescript --local > \"$tmp\" && diff -u types/database.ts \"$tmp\""
+    "types:generate": "bunx supabase gen types typescript --local --network-id tera-headless-loopback > types/database.ts",
+    "types:check": "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; bunx supabase gen types typescript --local --network-id tera-headless-loopback > \"$tmp\" && diff -u types/database.ts \"$tmp\""
   }
 }

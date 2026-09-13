@@ -1665,6 +1665,7 @@ CREATE INDEX refund_request_components_tax_idx ON commerce.refund_request_compon
 CREATE INDEX refund_request_components_shipping_idx ON commerce.refund_request_components(shipping_line_id) WHERE shipping_line_id IS NOT NULL;
 
 CREATE INDEX categories_parent_idx ON public.categories USING btree (parent_id);
+CREATE INDEX customers_created_idx ON public.customers USING btree (created_at DESC, id DESC);
 CREATE INDEX discount_redemptions_lookup_idx ON public.discount_redemptions USING btree (promotion_id, customer_id);
 CREATE INDEX discount_redemptions_order_idx ON public.discount_redemptions USING btree (order_id);
 CREATE INDEX fulfillments_order_idx ON public.fulfillments USING btree (order_id);
@@ -1681,7 +1682,7 @@ CREATE INDEX order_events_order_idx ON public.order_events USING btree (order_id
 CREATE INDEX order_items_order_idx ON public.order_items USING btree (order_id);
 CREATE INDEX order_items_variant_idx ON public.order_items USING btree (variant_id);
 CREATE INDEX orders_created_at_idx ON public.orders USING btree (created_at DESC);
-CREATE INDEX orders_customer_idx ON public.orders USING btree (customer_id);
+CREATE INDEX orders_customer_idx ON public.orders USING btree (customer_id, order_number DESC);
 CREATE INDEX orders_status_idx ON public.orders USING btree (status, financial_status, fulfillment_status);
 CREATE INDEX payments_order_idx ON public.payments USING btree (order_id);
 CREATE UNIQUE INDEX payments_provider_idempotency_uk ON public.payments USING btree (provider, idempotency_key) WHERE (idempotency_key IS NOT NULL);

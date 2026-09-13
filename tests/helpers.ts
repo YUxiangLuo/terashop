@@ -1,5 +1,6 @@
 import type { Database } from '../types/database';
 import { createApi, onlyRow, checked } from './support/http';
+import { authMail } from './support/mail';
 export { checked, onlyRow } from './support/http';
 export type { ApiOptions, ApiResult } from './support/http';
 
@@ -40,8 +41,12 @@ export async function signup(email = `t_${crypto.randomUUID()}@test.com`): Promi
     body: JSON.stringify({ email, password: 'password123' }),
     signal: AbortSignal.timeout(10_000),
   });
-  const data = await res.json();
-  if (!res.ok || !data.access_token) throw new Error(`signup failed: ${JSON.stringify(data)}`);
+  const pending = await res.json();
+  if (!res.ok || pending.access_token || !pending.id) throw new Error('signup must require email confirmation');
+  const link = await authMail(email, 'signup');
+  const data = await checked<{ access_token: string; user: { id: string } }>(api('/auth/v1/verify', {
+    method: 'POST', body: { type: 'signup', token_hash: link.searchParams.get('token') },
+  }));
   const customer = await rpc('current_customer_id', {}, data.access_token);
   if (customer.status !== 200 || typeof customer.data !== 'string' || customer.data === data.user.id) throw new Error('signup did not create an independent customer');
   return { token: data.access_token, userId: data.user.id, customerId: customer.data, email };

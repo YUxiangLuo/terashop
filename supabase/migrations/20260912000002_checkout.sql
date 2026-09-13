@@ -3,6 +3,21 @@
 begin;
 set local check_function_bodies = false;
 
+CREATE FUNCTION private.checkout_contact_email(p_customer_id uuid) RETURNS text
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_email text;
+begin
+  -- Callers already hold the active Customer lock. Contact is not an Auth
+  -- credential; validate shape only and snapshot it when the order is created.
+  select btrim(email) into v_email from public.customers where id = p_customer_id and anonymized_at is null;
+  if v_email is null or length(v_email) > 320
+    or v_email !~ '^[^[:space:]@[:cntrl:]]+@[^[:space:]@[:cntrl:]]+\.[^[:space:]@[:cntrl:]]+$' then
+    raise exception using errcode = '22023', message = 'valid customer contact email required for checkout';
+  end if;
+  return v_email;
+end;
+$$;
+
 CREATE FUNCTION private.cart_json(p_cart commerce.carts) RETURNS jsonb
     LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
   select jsonb_build_object('id', p_cart.id, 'customer_id', p_cart.customer_id, 'status', p_cart.status,
@@ -1064,7 +1079,7 @@ begin
     discount_code, customer_note
   ) values (
     v_uid,
-    (select coalesce(email, '') from public.customers where id = v_uid),
+    private.checkout_contact_email(v_uid),
     v_price -> 'tax_context',
     (v_price ->> 'subtotal')::numeric,
     (v_price ->> 'discount_total')::numeric,
@@ -1921,6 +1936,7 @@ begin
 
   perform private.assert_checkout_capacity(v_uid);
 
+  perform private.checkout_contact_email(v_uid);
   v_address := private.resolve_checkout_address(v_uid, v_address_input, address_id);
   select l.id into v_location_id from public.locations l
   where l.is_default and l.is_active order by l.id limit 1;
@@ -2122,7 +2138,7 @@ begin
     shipping_address, shipping_method_id, shipping_method_name,
     discount_code, customer_note, payment_expires_at
   ) values (
-    v_uid, (select coalesce(c.email, '') from public.customers c where c.id = v_uid),
+    v_uid, private.checkout_contact_email(v_uid),
     v_price ->> 'currency', (v_price ->> 'subtotal')::numeric,
     (v_price ->> 'discount_total')::numeric,
     (v_price ->> 'shipping_total')::numeric,

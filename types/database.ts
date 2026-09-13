@@ -1800,6 +1800,10 @@ export type Database = {
         }
         Returns: Json
       }
+      create_product: {
+        Args: { changes: Json; product_id: string }
+        Returns: Json
+      }
       create_refund_request: {
         Args: {
           actor_id: string
@@ -1843,12 +1847,15 @@ export type Database = {
         Args: { as_of?: string; max_orders?: number }
         Returns: Json
       }
+      get_admin_customer: { Args: { customer_id: string }; Returns: Json }
+      get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
       get_cart: {
         Args: { cart_id: string; guest_token?: string }
         Returns: Json
       }
       get_checkout_quote: { Args: { quote_id: string }; Returns: Json }
+      get_customer_order: { Args: { order_id: string }; Returns: Json }
       get_inventory_availability: {
         Args: { location_id?: string; variant_id: string }
         Returns: Json
@@ -1882,6 +1889,26 @@ export type Database = {
         Returns: Json
       }
       is_admin: { Args: never; Returns: boolean }
+      list_admin_customers: {
+        Args: {
+          after_cursor?: Json
+          anonymized?: boolean
+          page_size?: number
+          search?: string
+        }
+        Returns: Json
+      }
+      list_admin_orders: {
+        Args: {
+          after_order_number?: number
+          customer_id?: string
+          financial_status_filter?: string
+          fulfillment_status_filter?: string
+          page_size?: number
+          status_filter?: string
+        }
+        Returns: Json
+      }
       list_admin_products: {
         Args: {
           after_cursor?: Json
@@ -1893,6 +1920,16 @@ export type Database = {
         Returns: Json
       }
       list_carts: { Args: never; Returns: Json }
+      list_customer_orders: {
+        Args: {
+          after_order_number?: number
+          financial_status_filter?: string
+          fulfillment_status_filter?: string
+          page_size?: number
+          status_filter?: string
+        }
+        Returns: Json
+      }
       list_pending_provider_refunds: {
         Args: { max_requests?: number; provider: string }
         Returns: Json

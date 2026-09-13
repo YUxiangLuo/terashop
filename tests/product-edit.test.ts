@@ -30,6 +30,49 @@ async function sqlSave(sql: TransactionSQL, id: string, revision: number, change
     [id, revision, JSON.stringify(changes)]))[0].dto as Catalog;
 }
 
+test('原子创建可直接发布完整商品，重复 ID 不覆盖，失败不留下草稿或子资源', async () => {
+  const id = crypto.randomUUID(), variant = crypto.randomUUID(), option = crypto.randomUUID(), value = crypto.randomUUID();
+  cleanup.defer(() => checked(api(`/rest/v1/products?id=eq.${id}`, { service: true, method: 'DELETE' })));
+  const changes = {
+    product: { slug: id, name: 'Created together', status: 'active' },
+    variants: [{ id: variant, price: 17, track_inventory: false }],
+    options: [{ id: option, name: 'Size' }], option_values: [{ id: value, option_id: option, value: 'Small' }],
+    variant_options: [{ id: variant, option_value_ids: [value] }],
+    metafields: [{ variant_id: variant, namespace: 'custom', key: 'note', type: 'text', value: 'private' }],
+  };
+  const created = await checked<Catalog>(rpc('create_product', { product_id: id, changes }, admin.token));
+  expect(created).toMatchObject({ id, name: 'Created together', status: 'active' });
+  expect(created.variants[0]).toMatchObject({ id: variant, price: 17, option_value_ids: [value], metafields: [{ value: 'private' }] });
+  expect(await read(id)).toEqual(created);
+  expect((await rpc('create_product', { product_id: id, changes: { product: { slug: 'overwrite', name: 'overwrite' } } }, admin.token)).status).toBe(409);
+  expect(await read(id)).toEqual(created);
+  const failedId = crypto.randomUUID(), failedVariant = crypto.randomUUID();
+  const failure = await rpc('create_product', { product_id: failedId, changes: {
+    product: { slug: failedId, name: 'rollback' }, variants: [{ id: failedVariant, price: 4 }],
+    metafields: [{ namespace: 'custom', key: 'bad', type: 'number', value: 'bad' }],
+  } }, admin.token);
+  expect(failure.status).toBe(400);
+  expect(await read(failedId)).toBeNull();
+  expect(await checked<unknown[]>(api(`/rest/v1/product_variants?id=eq.${failedVariant}`, { service: true }))).toEqual([]);
+});
+
+test('商品创建默认草稿且拒绝越权、缺少名称/slug、伪造归属和不完整发布', async () => {
+  const id = crypto.randomUUID();
+  cleanup.defer(() => checked(api(`/rest/v1/products?id=eq.${id}`, { service: true, method: 'DELETE' })));
+  for (const token of [undefined, buyer.token]) {
+    expect((await rpc('create_product', { product_id: id, changes: { product: { slug: id, name: 'Draft' } } }, token)).data)
+      .toMatchObject({ code: '42501' });
+  }
+  for (const changes of [null, {}, { product: { slug: id } }, { product: { slug: id, name: null } },
+    { product: { slug: id, name: 'Incomplete', status: 'active' } }, { product: { slug: id, name: 'Forged', id } }]) {
+    expect((await rpc('create_product', { product_id: id, changes }, admin.token)).status).toBe(400);
+    expect(await read(id)).toBeNull();
+  }
+  const draft = await checked<Catalog>(rpc('create_product', { product_id: id, changes: { product: { slug: id, name: 'Draft' } } }, undefined, true));
+  expect(draft).toMatchObject({ status: 'draft', variants: [] });
+  expect(await checked<unknown>(command('get_storefront_product', { product_id: id }))).toBeNull();
+});
+
 test('原子编辑在售商品、规格、变体和图片，保留省略字段并返回最新版本', async () => {
   const p = await stockedProduct(admin, { cleanup, trackInventory: false });
   const before = await read(p.productId);

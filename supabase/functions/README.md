@@ -16,9 +16,12 @@ Edge Runtime 需提供 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_
 
 部署使用仓库的 `supabase/config.toml`。网关 JWT 校验关闭不代表匿名授权：用户、Worker 和 Webhook 各自在 handler 内完成认证。
 本地 Auth 配置便于测试，生产需另行审查邮箱确认、密码策略、MFA、业务限流和允许的跳转地址。
+本地已启用 Mailpit、邮箱确认和 manual linking，游客通过 Auth 原生邮箱绑定验证后设置密码，不增加注册 Edge Function。生产开放该入口前须配置并验证 SMTP 和回调地址；不能用关闭邮箱确认或管理员代确认替代。Mailpit 只捕获本地邮件且包含登录凭据，不向公网暴露；测试覆盖与待补事项见[测试指南](../../docs/testing.md)。
 Google OAuth 启用前必须吊销并轮换历史已暴露凭据。
 
 支付 service RPC 的 `actor_id` 是 handler 通过 Auth `/user` 验证的用户 UUID，数据库再映射独立 Customer；不要传 Customer UUID，也不信任浏览器提交的 actor。游客 Cart 凭据不能调用支付入口。
+游客自行结账使用有效匿名 Auth 会话，PayPal 创建/捕获接受同样经过 `/user` 验证的 JWT；匿名会话不获得管理员退款权限。本地已启用 `enable_anonymous_sign_ins`；变更 Auth 配置需重启本项目本地 Supabase，单独 db reset 不重新加载 Auth 配置。生产启用匿名登录时必须同时配置 CAPTCHA（客户端向 signInAnonymously 传 captchaToken）、匿名注册 IP 限流及覆盖直连 RPC 的业务限流；每 Customer 配额不能阻止批量新建身份。
+匿名页面/凭据响应禁止共享缓存；持久化并刷新会话，丢失后没有邮件查单或自动恢复接口。上线前制定匿名 Auth 清理期限与执行任务，不能直接按创建时间删除仍需付款、退款重试或售后访问的会话；Auth 删除仅解除 Customer 关联，不可级联清商业记录。目前仓库没有自动匿名 Auth 清理 Worker。
 Cart 的创建/读取/编辑/预览可由游客调用；上线前在覆盖直接 PostgREST RPC 的网关施加 IP/行为限流、请求大小与超时限制，不仅保护 BFF。凭据必须从 URL、日志和埋点排除；cookie/BFF 接入须配置 HTTPS、HttpOnly/SameSite 和 CSRF 防护。仓库未实现这些部署层控制。
 
 ## PayPal Orders v2 / Payments v2

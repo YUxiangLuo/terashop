@@ -19,6 +19,28 @@ bun run test:current tests/admin.test.ts --rerun-each=2 --randomize --seed=6149
 
 保持 `--parallel=1`。默认仓、税率、管理员集合、全局 Worker 队列仍有共享状态；handler 测试还拦截全局 fetch/Deno。局部夹具隔离不等于整个套件可以并行。
 
+## 本地邮件验证与可补充覆盖
+
+`local_smtp.enabled=true` 启用 Mailpit，界面为本机 `http://127.0.0.1:54324`；实际 API 地址通过 CLI 的 MAILPIT_URL 注入并验证为回环地址，不继承外部邮箱地址。配置变更须先 `bun run stop && bun run start`，db reset 不重新加载 Auth 配置。Mailpit 捕获邮件，不向真实收件人投递；界面/API 可读取验证凭据，不要暴露到公网、保存为 CI artifact 或记录完整确认链接。
+
+本地和 CI 必须用 `bun run start`：脚本建立项目专用 `tera-headless-loopback` bridge 网络，以 `com.docker.network.bridge.host_binding_ipv4=127.0.0.1` 限制所有发布端口（包括 Mailpit），并在启动前后检查实际绑定。发现旧容器仍监听所有网卡时拒绝沿用，须先 stop 再 start；setup/reset 同样使用该网络。直接 `bunx supabase start` 绕过此保护，CLI 默认会发布到所有网卡；仅把客户端 URL 写成 localhost 不提供访问控制。此设置不修改 Docker 全局配置/防火墙，也不隔离同机有权限的进程。
+
+普通注册现在开启邮箱确认；`helpers.signup` 必须收到真实 SMTP 邮件、提取确认 token 并调用 Auth 验证接口后才能返回登录夹具，不用 service role 代确认或 generateLink 替代投递。`support/mail.ts` 按随机唯一收件人筛选，校验链接确属本项目 Auth 和预期类型，最多等待 10 秒。Mailpit 不保证随 db reset 清空，测试不得读取全局最新邮件或清空其他测试邮件；重复注册相同邮箱时取该收件人的最新匹配邮件。
+
+| 场景 | 当前覆盖 / 后续价值 |
+| --- | --- |
+| 注册确认 | 所有普通注册夹具走真实捕获邮件；专项验证未确认不能密码登录 |
+| 游客升级注册 | 已覆盖确认前不能设置密码、无效/重放 token 拒绝、验证后密码登录、原 Customer/Cart/已支付订单保留及邮箱冲突拒绝 |
+| 密码找回 | 已覆盖真实 recovery 邮件、一次性验证、重设后旧密码失败、新密码成功 |
+| 注册账户改登录邮箱 | 已覆盖真实新邮箱确认、占用冲突、确认前旧邮箱可登录/新邮箱不可登录、确认后反转；Customer/订单联系邮箱不变。当前只验证新邮箱，不覆盖双邮箱确认或取消 |
+| 重发与过期 | signup/recovery/email_change 均覆盖 429 不投递且保留旧令牌、成功重发废弃未过期旧令牌、3600 秒期限两侧、成功验证后重放拒绝 |
+| Storefront 回调 | 后续在 Storefront 项目补浏览器点击链接、PKCE/code 交换、刷新/跨标签页、错误页面及跳转白名单；当前测试走邮件 token 的 Auth HTTP 验证，不声称覆盖浏览器会话落地 |
+| 交易通知 | 邮件捕获可用于未来订单/发货/退款 Outbox 消费器的收件人、快照内容、幂等投递与失败重试测试；目前没有这些邮件消费者，Mailpit 不会自动发送业务邮件 |
+
+本地捕获不能验证公网 SMTP 凭据/TLS、SPF/DKIM/DMARC、反垃圾/真实收件率、退信/投诉或生产限流。当前 double_confirm_changes/secure_password_change 仍为开发配置，不表示已完成生产账户安全策略；上线另行验证真实邮件服务，不可为解决无 SMTP 而关闭邮箱确认。
+
+限流拒绝测试保留 Auth 的真实发送时间，发信后立即重发；本地 60 秒冷却为 SMTP 和 CI 调度留余量。允许重发与过期测试仅将独立用户的 `confirmation_sent_at` / `recovery_sent_at` / `email_change_sent_at` 调到过去：61 秒允许重发，3540 秒仍有效，3601 秒过期。不修改 token、确认状态或全局时钟，不声称验证精确同一毫秒或全局发信配额。已做配置反例验证：1ms 冷却下新限流测试失败，而旧的未来时间写法仍返回 429；0s 在当前 Auth 中会回退为默认 60 秒，并不关闭限流。重发前记录本收件人的消息 ID，读取新邮件时排除旧 ID，不能将旧邮件误认作重发成功。
+
 ## 夹具与断言
 
 - 正向 RPC 优先用 `helpers.command()` 的生成类型；非法参数测试保留 `rpc()` 明确的非类型安全入口。

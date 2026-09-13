@@ -46,9 +46,11 @@ test('清理按逆序执行，单项失败不跳过其他资源，错误可见�
 
 test('测试配置缺项或指向远程时失败关闭，不接受任意继承 DB_URL', () => {
   const env = { API_URL: config.url, DB_URL: 'postgresql://postgres:placeholder@127.0.0.1:54322/postgres',
+    MAILPIT_URL: 'http://127.0.0.1:54324',
     ANON_KEY: config.anonKey, SERVICE_ROLE_KEY: config.serviceKey };
   expect(validateLocalSupabase({ ...env, UNUSED_SECRET: 'not-forwarded' })).toEqual(env);
   for (const invalid of [{ ...env, DB_URL: 'postgresql://db.example.invalid/postgres' },
+    { ...env, MAILPIT_URL: 'https://mail.example.invalid' }, { ...env, MAILPIT_URL: '' },
     { ...env, API_URL: 'https://shop.example.invalid' }, { ...env, DB_URL: '' }, { ...env, SERVICE_ROLE_KEY: '' }]) {
     expect(() => validateLocalSupabase(invalid)).toThrow();
   }

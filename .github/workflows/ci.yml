@@ -31,7 +31,7 @@ jobs:
         with:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
-      - run: bunx supabase start
+      - run: bun run start
       - run: bun run test --integration
       - run: bun run db:lint
       - run: bun run types:check

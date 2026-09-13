@@ -22,7 +22,7 @@ Storefront 列表以 UUID 升序分页，将 `next_cursor` 传给下一次 `afte
 
 Admin 详情增加商品状态/时间戳、编辑版本 `revision` 及变体 `cost/is_active/track_inventory`；精确库存继续使用管理员 `get_inventory_availability`，不是将 Storefront 切换为“管理员模式”。公共扩展引用不会自动递归展开，需按 Metaobject ID 读取其受保护资源。
 
-现有底表/视图读取保留原授权，用于逐步迁移已有调用与测试；本阶段没有完成全部订单/客户管理查询分层，也未增加 Storefront 搜索或运营排序。底表的扩展字段读取同样执行下文的新可见性规则。
+现有底表/视图读取保留原授权，用于逐步迁移已有调用与测试；商品、订单和客户管理的基础读合同见本页，不代表全部底表已封闭。尚未增加 Storefront 搜索或运营排序。底表的扩展字段读取同样执行下文的新可见性规则。
 
 ### Admin 商品列表
 
@@ -43,6 +43,10 @@ POST /rest/v1/rpc/list_admin_products
 默认排序有复合索引，先限定当前页再聚合价格/数量。子串搜索及低命中率筛选仍可能扫描较多候选，不承诺目录规模无关的延迟，也不是全文搜索引擎。
 
 ### 原子商品编辑
+
+`create_product(product_id, changes)` 仅 admin/service 可用：调用方生成并保留新的商品 UUID，`changes.product` 必须包含字符串 slug/name；其余分组与下方 `update_product` 完全相同。默认创建 draft；提供 status=active 时须在同一请求构建完整目录。返回 Admin 商品详情及当前 revision，失败不留下商品或子资源，不创建库存数量。
+
+创建不是 upsert，也没有历史响应缓存；重复 UUID 或 slug 返回 409 / `23505`，不覆盖已有数据。响应丢失时先用保留的 UUID 调用 `get_admin_product` 核对结果；确认不存在后仍复用原 UUID 重试，不生成新 UUID 盲目重建。创建成功后使用 `update_product` 修改。
 
 `update_product(product_id, expected_revision, changes)` 仅 admin/service 可用，返回与 `get_admin_product` 相同的管理 DTO。先读取管理详情，将其 `revision` 原样作为 `expected_revision`。在售商品可以直接保存，全部修改在一个事务提交，其他请求不会读到半成品；任何字段、归属或发布校验失败均回滚全部修改及版本。
 
@@ -86,7 +90,7 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 使用显式字段选择，不对变体使用 `select=*`：`cost` 有列权限保护。精确库存仅管理员可读，商城使用 `in_stock`。
 商品子资源继承发布状态；分类拉取平铺列表后在客户端组树，列表视图仅包含启用分类。
 
-管理员创建商品应先用 `status:"draft"`，依次建立变体、选项/值、规格关联、图片，最后 PATCH 为 `active`。
+管理员优先使用 `create_product` 一次创建商品及子资源。若使用多个底表请求，应先用 `status:"draft"`，依次建立变体、选项/值、规格关联、图片，最后 PATCH 为 `active`。
 草稿也禁止跨商品选项/图片和同一选项多值；发布商品必须有变体，启用变体必须选全规格且组合唯一（无选项时最多一个启用默认变体）。停用变体可暂存未完成配置。
 约束在事务提交时检查；增加规格或替换整个组合优先使用 `update_product` 原子保存，不必下架。若使用多个底表请求，则必须先转草稿再分步编辑。
 子资源 ID 和所属商品/选项/变体不可迁移，关联需删除重建。分类禁止任意长度的环。
@@ -102,9 +106,75 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 - Auth 邮箱变化不覆盖客户联系邮箱。删除 Auth 只解除关联，不删除 Customer 或订单；新同邮箱账号不会接管旧记录。
 - `anonymize_customer` 清客户联系信息、地址、客户 metafield 与全部 Cart，禁止恢复这些客户自有内容；`anonymize_user` 另清 profile 和审计 actor。两者都不等于删除 Auth、撤销登录凭据或擦除订单地址/属性、评价正文等历史数据。
 
+### 游客自行结账
+
+只支持客户自行线上下单，不提供后台代客下单。游客使用 Supabase `auth.signInAnonymously()`（HTTP `POST /auth/v1/signup`，body `{}`）取得匿名会话，无需注册、密码或验证邮箱。只在没有现有会话时创建；已有账号会话直接复用，不要每次结账更换身份。匿名 Auth 用户使用 `authenticated` 数据库角色和独立 Customer，**不是公开 anon key，也不是 Cart token**。
+
+1. 开始结账时取得/保留会话，用 `current_customer_id()` 获取商业 ID。
+2. PATCH 自己的 Customer 联系邮箱；新报价和新订单要求非空、至多 320 字符且符合基本邮箱格式。只校验格式，不证明邮箱所有权；姓名和配送地址沿用现有合同。
+3. 若此前使用 token Cart，先以匿名会话调用 `claim_cart`；也可直接以匿名会话创建客户 Cart（需 idempotency_key），或不使用 Cart 直接报价。
+4. 以同一会话调用 Quote、转单、PayPal 创建/捕获和客户订单查询。权限、配额、预占期限及重试规则与注册客户一致。
+
+订单 email 在首次建单时从 Customer 取值、去除首尾空格并保存快照，不是 Quote 锁价内容；报价后修改联系邮箱会影响尚未建的订单，既有订单和幂等重放不变。格式错误返回 400 / `22023`，事务回滚。
+
+联系邮箱可与注册客户相同，绝不因此合并或授权历史。切换到已有账户不会迁移匿名会话的客户 Cart、Quote 或订单，应在结账前选择身份；原 token Cart 只能认领一次。匿名会话丢失、退出或换设备后，目前没有邮件查单、订单找回或客户合并接口，不得凭邮箱/订单号自动恢复。若未来需要跨设备查单，须另建可撤销、限时的验证流程。
+
+匿名会话的访问/刷新凭据按登录凭据保护、刷新，勿放 URL/日志；匿名页面与会话响应不可共享缓存。上线前必须配置 CAPTCHA/匿名注册及 RPC 限流和匿名 Auth 清理策略，参见[支付与部署](../supabase/functions/README.md)。
+
+### 游客验证邮箱后注册
+
+在**原匿名会话**上使用 Supabase Auth 原生身份绑定，不新建 Customer、不调用 signUp 创建另一身份，也不增加自制注册 RPC。本地启用 manual linking 和邮箱确认；生产需要相同 Auth 设置及可用 SMTP。
+
+1. 使用当前匿名会话调用 `auth.updateUser({email}, {emailRedirectTo: '<允许的注册回调地址>'})`，HTTP 为 `PUT /auth/v1/user`。联系邮箱可预填，但不能当作已验证邮箱；只传 email，不同时设置密码。
+2. 用户点击 Auth 发出的确认链接，或使用自定义邮件模板的 OTP 调用 `auth.verifyOtp({email,token,type:'email_change'})`。默认模板提供确认链接；本地从 Mailpit 获取。Storefront 负责配置允许的回调地址、接收并持久化验证后的会话（PKCE 接入按 SDK 流程交换 code），本仓库不含注册页面/回调 UI。
+3. 用 `auth.getUser()` 确认绑定完成（`is_anonymous=false`，Auth ID 与原身份一致），再调用 `auth.updateUser({password})`。确认前设置密码被 Auth 拒绝；不能由 service role 代设 `email_confirm=true` 绕过。
+4. 之后可用 `auth.signInWithPassword({email,password})` 登录。Auth UUID、Customer UUID 不变，原购物车、订单、资金归属保持；后台 has_account 变为 true。
+
+邮箱确认完成时身份已转为非匿名，即便尚未设置密码；不要仅凭 has_account 判断密码设置完成。登录邮箱更新只同步 profiles.email，不改 customers.email 或 orders.email；绑定邮箱不必与历史联系邮箱相同。若页面在确认后关闭，可沿用有效会话设置密码，或通过 Auth 密码找回流程恢复。
+
+邮箱已被注册时绑定被拒绝，提示登录已有账户；不自动迁移或合并游客记录。丢失匿名会话且尚未发起绑定，仍不能只凭联系邮箱找回订单。生产 SMTP 未配置/验证前不开放升级入口，但游客结账无需邮件验证，可以独立使用。
+
+### 注册账户改邮箱、重发与过期
+
+注册账户同样用当前会话 `auth.updateUser({email})` 请求更换登录邮箱。当前 `double_confirm_changes=false`，只需确认新地址；确认前旧邮箱仍可登录，新邮箱不可登录，确认后反转。Auth/Customer ID 不变，profile 邮箱跟随 Auth，客户联系邮箱及历史订单快照不变。占用邮箱拒绝，不隐式合并客户。生产是否启用新旧邮箱双重确认需另行决定，本地此项回归不代表双确认已经启用。
+
+- 注册确认使用 `auth.resend({type:'signup',email})`；改邮箱重发使用 `auth.resend({type:'email_change',email:当前登录邮箱})`，邮件发送到待确认的新邮箱。HTTP 均为 `POST /auth/v1/resend`。
+- 密码找回通过 `auth.resetPasswordForEmail(email)` / `POST /auth/v1/recover` 再次请求，不向 resend 传 recovery 类型。
+- 本地同类邮件冷却配置为 60 秒；命中返回 429 / `over_email_send_rate_limit`，不新增邮件，也不废弃原令牌。全局发信限额和生产策略另计。
+- 成功重发替换同类旧令牌，即使旧令牌尚未过期也不能再用；应使用最新邮件。三个流程的本地令牌期限均为 3600 秒，从该类邮件发送时间计算；过期或成功使用后的重放返回 403 / `otp_expired`。该错误也涵盖无效令牌，不能据此推断是哪一种原因。
+
+### 客户管理查询
+
+`get_admin_customer(customer_id)` 与 `list_admin_customers` 仅 admin/service 可用；ID 是商业 Customer UUID，不是 Auth ID。详情不存在返回 null。
+
+- `list_admin_customers(page_size=20, search=null, anonymized=null, after_cursor=null)` 返回 `{items,next_cursor}`，page_size 为 1–100。按 `(created_at DESC,id DESC)` 分页，游标 `{created_at,id}` 原样传回，保留微秒；修改筛选时清除游标，不承诺跨请求快照。
+- search 最多 200 字符，去除首尾空格后为空表示不筛选；匹配姓名、联系邮箱或电话的不区分大小写字面子串。`%/_` 不是通配符；电话不自动规范化，同邮箱客户不合并。anonymized 为 null 包含全部，true 仅匿名化客户，false 仅未匿名化客户；与 search 按 AND 组合。
+- 列表返回 `id/email/full_name/phone/has_account/anonymized_at/created_at/updated_at`，不加载地址、订单、扩展值或总数。has_account 表示关联非匿名 Auth 账户；游客会话为 false，不证明该账号当前可登录或未匿名化。
+- 详情增加 `addresses`（默认地址优先、再按 UUID 排序）和 `metafields`；不暴露 Auth ID、角色、凭据或 Auth 登录邮箱。匿名化后不从订单历史回填联系资料；客户地址为空不代表历史订单地址已擦除。
+- 查询客户订单使用 `list_admin_orders(customer_id=...)`，不在客户详情无限嵌套订单。子串搜索成本仍随客户数量增长，不是全文检索或已验证的生产性能承诺。
+
+## 客户／后台订单查询
+
+| RPC | 参数与权限 |
+| --- | --- |
+| `get_customer_order` | order_id；仅当前活跃登录客户自己的订单，其他归属或不存在返回 null；管理员调用也不扩大范围 |
+| `get_admin_order` | order_id；仅 admin/service，不存在返回 null |
+| `list_customer_orders` | page_size 默认 20、after_order_number、status_filter、financial_status_filter、fulfillment_status_filter；只查当前客户，无 customer_id 参数 |
+| `list_admin_orders` | 同上，另可传 customer_id 筛选；仅 admin/service，不传客户则查全店 |
+
+列表返回 `{items,next_cursor}`，page_size 为 1–100；按不可变、唯一的 order_number 倒序，将 next_cursor 传给下一次 after_order_number，末页为 null。订单号顺序不等于事务提交时间，不承诺跨页快照；状态变化也可能改变筛选结果。状态筛选均为精确匹配、以 AND 组合；使用现有 status（open/completed/cancelled）、financial_status（pending/paid/partially_refunded/refunded/voided）、fulfillment_status（unfulfilled/partially_fulfilled/fulfilled），未知值拒绝。
+
+客户列表仅返回 `id/order_number/status/financial_status/fulfillment_status/currency/total/created_at`；后台列表另有 customer_id 和下单时的 email 快照。不加载商品行、地址、内部备注或精确总数。
+
+详情复用下单返回的安全订单头、持久化 `pricing` 明细和 `fulfillments`（物流字段及关系化 order_item_id/quantity 行）；目录改价不会重算订单快照。Admin 详情额外返回 admin_note。两者不返回支付渠道操作信息；资金账本、退款/退货、履约余额继续用已有专项 RPC，并各自检查权限。
+
+客户查询必须能解析出当前活跃 Customer，无会话、失去 Auth 关联或已匿名化均拒绝；有效游客会话可查询自己的订单。不能用请求体客户 ID 或 service role 无身份调用来冒充客户。管理员仍可按商业 Customer ID 查询匿名化客户的历史订单，此数据继续受订单保留政策约束。
+
 ## 持久 Cart（可选）
 
 Cart 保存购买意向，不保存价格、锁价或占库存。可以为空，每个活跃 Cart 最多 50 条规范化商业行/100 件；同变体/属性合并，已有行 ID 在改数量时保留。停售/价格、库存、优惠资格在预览/转 Quote 时重新核验，不把 Cart 当可支付对象。
+
+本表的“登录客户”包括有效匿名 Auth 会话；“游客 token”指尚未取得会话的 capability Cart。两者不可混用。
 
 | RPC | 参数 / 行为 |
 | --- | --- |
@@ -135,7 +205,7 @@ POST /rest/v1/rpc/update_cart
 ## 推荐结账流程
 
 1. `price_checkout` 预览价格（匿名可用），不占库存，也不保证之后价格不变。
-2. 登录后 `create_checkout_quote` 生成报价并预占库存；使用 Cart 时先认领，再调用 `checkout_cart`。
+2. 取得注册或匿名会话、填写 Customer 联系邮箱后，`create_checkout_quote` 生成报价并预占库存；使用 token Cart 时先认领，再调用 `checkout_cart`。
 3. `create_order_from_quote` 再次校验价格，建立待支付订单，继续持有预占。
 4. 调用渠道支付入口；渠道确认成功后，数据库原子扣库存并推进订单。
 
