@@ -1699,6 +1699,48 @@ begin
 end;
 $_$;
 
+-- Cancellation/expiry does not prove an already dispatched Capture failed.
+-- Once a capture money fact exists, Inbox retries/reconciliation own recovery.
+CREATE FUNCTION public.list_pending_paypal_captures(max_requests integer DEFAULT 20) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO ''
+    AS $$
+declare
+  v_result jsonb;
+begin
+  if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
+  if max_requests is null or max_requests not between 1 and 20 then
+    raise exception 'max_requests must be between 1 and 20';
+  end if;
+  with candidates as materialized (
+    select i.id
+    from commerce.payment_intents i
+    where i.provider = 'paypal' and i.provider_reference is not null
+      and i.provider_capture_requested_at is not null
+      and i.status in ('requires_action', 'processing', 'cancelled')
+      and (i.last_provider_poll_at is null
+           or i.last_provider_poll_at <= clock_timestamp() - interval '5 minutes')
+      and not exists (
+        select 1 from commerce.provider_money_movements m
+        where m.payment_intent_id = i.id and m.kind = 'capture'
+      )
+    order by coalesce(i.last_provider_poll_at, i.provider_capture_requested_at), i.id
+    for update skip locked
+    limit max_requests
+  ), claimed as (
+    update commerce.payment_intents i
+    set last_provider_poll_at = clock_timestamp(),
+        provider_poll_attempts = i.provider_poll_attempts + 1
+    from candidates c where i.id = c.id
+    returning i as intent
+  )
+  select coalesce(jsonb_agg(private.provider_payment_intent_json(c.intent)
+    order by (c.intent).provider_capture_requested_at, (c.intent).id), '[]'::jsonb)
+  into v_result from claimed c;
+  return v_result;
+end;
+$$;
+
 CREATE FUNCTION public.list_pending_provider_refunds(provider text, max_requests integer DEFAULT 50) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''

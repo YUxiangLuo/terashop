@@ -103,6 +103,8 @@ PayPal Capture POST 前必须调用 `prepare_paypal_capture`，按 intent → qu
 Quote 到期仍可释放预占并取消关联订单，不无限延长 hold；这不意味着未知 Capture 已失败，迟到成功资金只入对账，不复活订单或再次扣库存。
 `mark_order_paid` 不得先取消仍能扣款的线上意图再手工收款；不明 Capture 保留保护，已终结失败的 Capture 才允许新支付尝试。
 
+Capture 查询恢复由 service-only `list_pending_paypal_captures` / `paypal-reconcile-captures` 承担，不能依赖浏览器返回或 Webhook 已成功入箱。仅领取已绑定且有发送标记的未解决意图，包含 cancelled/过期对象；SKIP LOCKED 和持久化查询时间实现五分钟最短间隔。只 GET 已知 Order 并复用 Inbox，不代扣已批准订单、不清发送标记。出现关联 capture 资金事实后停止渠道轮询，由 Inbox 重试/人工对账接手；单次未查到 Capture 不证明失败。长期未知必须监控并人工核实，不以查询次数猜测资金终态。Storefront 状态与错误恢复见 [接入合同](storefront-paypal.md)。
+
 ## ADR-010：Quote 的价格与预占边界
 
 Quote 不提前占用促销 usage；转单时按固定锁顺序锁库存与有限促销，再次计价，只有完整 pricing hash 一致才创建订单，否则重新报价。

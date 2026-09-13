@@ -311,6 +311,8 @@ CREATE TABLE commerce.payment_intents (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     provider_capture_requested_at timestamp with time zone,
+    last_provider_poll_at timestamp with time zone,
+    provider_poll_attempts integer DEFAULT 0 NOT NULL CHECK (provider_poll_attempts >= 0),
     CONSTRAINT payment_intents_amount_check CHECK ((amount > (0)::numeric)),
     CONSTRAINT payment_intents_capture_provider_ck CHECK (((provider_capture_requested_at IS NULL) OR (provider = 'paypal'::text))),
     CONSTRAINT payment_intents_currency_check CHECK (currency = 'USD'),
@@ -1611,6 +1613,10 @@ CREATE INDEX outbox_events_claim_idx ON commerce.outbox_events USING btree (stat
 CREATE UNIQUE INDEX payment_intents_one_active_per_order_uk ON commerce.payment_intents USING btree (order_id) WHERE (status = ANY (ARRAY['requires_action'::text, 'processing'::text]));
 CREATE INDEX payment_intents_order_idx ON commerce.payment_intents USING btree (order_id, created_at DESC);
 CREATE UNIQUE INDEX payment_intents_provider_reference_uk ON commerce.payment_intents USING btree (provider, provider_reference) WHERE (provider_reference IS NOT NULL);
+CREATE INDEX payment_intents_capture_poll_idx ON commerce.payment_intents
+    (coalesce(last_provider_poll_at, provider_capture_requested_at), id)
+    WHERE provider = 'paypal' AND provider_capture_requested_at IS NOT NULL
+      AND provider_reference IS NOT NULL AND status IN ('requires_action', 'processing', 'cancelled');
 CREATE INDEX payment_provider_events_object_idx ON commerce.payment_provider_events USING btree (provider, object_reference, created_at) WHERE (object_reference IS NOT NULL);
 CREATE INDEX payment_provider_events_retry_idx ON commerce.payment_provider_events USING btree (status, created_at, id) WHERE (status = ANY (ARRAY['received'::text, 'failed'::text]));
 CREATE INDEX payment_transactions_intent_idx ON commerce.payment_transactions USING btree (payment_intent_id, created_at DESC) WHERE (payment_intent_id IS NOT NULL);
@@ -1618,6 +1624,8 @@ CREATE INDEX payment_transactions_order_idx ON commerce.payment_transactions USI
 CREATE INDEX payment_transactions_parent_idx ON commerce.payment_transactions USING btree (parent_transaction_id) WHERE (parent_transaction_id IS NOT NULL);
 CREATE UNIQUE INDEX payment_transactions_provider_idempotency_uk ON commerce.payment_transactions USING btree (provider, idempotency_key) WHERE (idempotency_key IS NOT NULL);
 CREATE INDEX provider_money_movements_order_idx ON commerce.provider_money_movements USING btree (order_id, created_at DESC) WHERE (order_id IS NOT NULL);
+CREATE INDEX provider_money_movements_capture_intent_idx ON commerce.provider_money_movements
+    (payment_intent_id) WHERE kind = 'capture' AND payment_intent_id IS NOT NULL;
 CREATE INDEX provider_money_movements_reconcile_idx ON commerce.provider_money_movements USING btree (reconciliation_status, created_at, id) WHERE (reconciliation_status <> 'matched'::text);
 CREATE INDEX refund_lines_order_item_idx ON commerce.refund_lines USING btree (order_item_id, refund_id);
 CREATE INDEX refund_request_lines_item_idx ON commerce.refund_request_lines USING btree (order_item_id, refund_request_id);

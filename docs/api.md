@@ -277,6 +277,8 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 
 ## 支付与退款
 
+SSG 页面、游客会话、PayPal 返回页及错误重试见 [Storefront PayPal 接入合同](storefront-paypal.md)。
+
 支付读取统一使用 `get_order_ledger(order_id)` 的 `transactions`：实收 `kind=capture`，退款 `kind=refund`，返回交易 ID、父交易 ID、意图 ID、金额、币种、状态和渠道引用。仅订单客户、管理员及 service 可读，不返回任意 metadata 或原始 payload。
 `/rest/v1/payments` 已移除，`commerce.payment_transactions` 不向 PostgREST 暴露；不可用直写表替代收付款命令。service-only 的 `capture_payment_intent` 仅接收 `payment_intent_id`、`provider_reference`、`idempotency_key`，不再接收 `raw`；生产通过已验证的渠道事件链调用。
 

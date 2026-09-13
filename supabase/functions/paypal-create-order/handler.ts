@@ -139,7 +139,7 @@ export async function handlePayPalCreateOrder(request: Request): Promise<Respons
       currency: bound.currency,
       approve_url: approvalUrl,
       expires_at: bound.expires_at,
-      pending_reconciliation: processing?.outcome === 'action_required',
+      pending_reconciliation: processing?.status === 'received' || processing?.outcome === 'action_required',
     }, 200, cors);
   } catch (error) {
     console.error('paypal-create-order failed', error instanceof Error ? error.name : 'unknown');

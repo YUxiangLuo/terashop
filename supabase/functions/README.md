@@ -13,6 +13,7 @@ Edge Runtime 需提供 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_
 | PayPal 创建 / 捕获 / 退款 | handler 验证用户 JWT，数据库校验归属/管理员 |
 | `paypal-webhook` | 不验证 JWT；通过官方 postback API 验证 transmission headers |
 | `paypal-reconcile-refunds` | handler 校验 service-role token |
+| `paypal-reconcile-captures` | handler 校验 service-role token；只查询已发起 Capture，不扣款 |
 
 部署使用仓库的 `supabase/config.toml`。网关 JWT 校验关闭不代表匿名授权：用户、Worker 和 Webhook 各自在 handler 内完成认证。
 本地 Auth 配置便于测试，生产需另行审查邮箱确认、密码策略、MFA、业务限流和允许的跳转地址。
@@ -63,11 +64,21 @@ Webhook 入箱后处理失败返回 500；已识别的瞬时数据库故障保�
 | RPC `purge_expired_carts` | `{"max_carts":100}` | 定时循环清理过期 Cart/行；返回删除数量，上限 500 |
 | RPC `retry_payment_provider_events` | `{"max_events":50}` | 持续定时运行 |
 | Edge `paypal-reconcile-refunds` | `{"max_events":20}` | 每分钟；同一请求最短轮询间隔 5 分钟 |
+| Edge `paypal-reconcile-captures` | `{"max_events":20}` | 每分钟；同一意图最短轮询间隔 5 分钟，只 GET Order |
 | RPC `claim_outbox_events` | `{"worker_id":"worker-1","max_events":50,"lease_seconds":300}` | 循环领取，副作用消费者必须幂等 |
 | RPC `complete_outbox_event` | `{"event_id":"<uuid>","worker_id":"worker-1","lease_token":"<claim 返回的 uuid>","succeeded":true}` | 消费后确认；失败传 false 与 `error_message` |
 | RPC `redrive_outbox_event` | `{"event_id":"<uuid>","expected_attempt":25,"worker_id":"operator-1","reason":"依赖已恢复，工单号…"}` | 人工确认原因并排除故障后重投；不自动无限重试 |
 
 交易过期只需调度 `expire_checkout_quotes`，每次最多处理 500 个对象，使用 SKIP LOCKED；旧 `expire_unpaid_orders` 已移除。未付款窗口到期前普通取消仍受不明 Capture 保护，到期 Worker 释放预占不代表渠道资金已失败，迟到成功继续进入对账。
+
+Capture Worker 通过 service-only `list_pending_paypal_captures({"max_requests":20})` 领取已绑定 Order、存在持久化发送标记、状态为 requires_action/processing/cancelled 且没有关联 capture 资金事实的意图。过期不排除，已确认 failed/succeeded 排除；未发送的 APPROVED Order 不属于后台代扣范围。领取使用 SKIP LOCKED 和持久化 last_provider_poll_at/provider_poll_attempts，HTTP 失败或 Worker 崩溃也须等至少五分钟重领；这不是外部副作用的 exactly-once 租约。
+
+Worker 只 GET `/v2/checkout/orders/<绑定 ID>`，验证关联后将 Capture 交现有 Inbox；不 POST Capture、不根据 Order 的 APPROVED/VOIDED 或一次 404 判定资金失败、不延长库存预占、不自动退款。未发现 Capture 返回 `awaiting_capture`，单项 HTTP/资源错误返回 `retry_required` 并继续其他对象；`processed` 计数代表处理的候选数，不是成功支付数。调度方必须检查 `results`，不能只检查 HTTP 200。
+
+正常 Pending 仍定期查询；关联 capture 资金事实出现后交 Inbox 重试/人工对账，避免绕过 Inbox 的 25 次自动重试限制。非 USD 等无法关联意图的资金仍需人工处理。查询没有自动次数上限，也不以次数耗尽证明资金失败：必须监控未解决意图年龄、provider_poll_attempts、过期未决、持续 awaiting_capture/retry_required 及外部 action_required 资金。建议未解决超过一小时告警；排除配置/网络故障后继续 GET，不换 ID、不清标记、不重新扣款。长期无 Capture、404 或 reversal 需人工核实，当前不提供自动终结这些未知结果的命令。
+
+Capture 标记已提交但实际 POST 尚未发出的崩溃也会进入该队列，GET 无 Capture 时保持未知。`paypal.capture_requested` Outbox 可用于告警/唤醒查询，不是允许消费者代扣的指令。调度应持续运行，不只依赖该事件；调度、告警平台和消费者仍需部署方配置。
+
 Cart 到期立即拒绝凭据访问，但物理清理依赖 `purge_expired_carts`；独立调用并监控积压，不取消关联 Quote/订单或改库存。终态 Cart 的行属性保留到清理，Quote/订单历史属性不在 Cart 清理范围。
 Outbox claim 返回 `attempt`、`lease_token` 和 `lease_expires_at`；过期、旧 token、错误 owner 的 complete 返回 false。处理时长超过租约需调整下次领取配置；相同 worker_id 不能替代租约 token，消费者仍须按 event_id 幂等。
 

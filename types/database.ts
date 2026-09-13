@@ -1830,6 +1830,10 @@ export type Database = {
         }
         Returns: Json
       }
+      list_pending_paypal_captures: {
+        Args: { max_requests?: number }
+        Returns: Json
+      }
       list_pending_provider_refunds: {
         Args: { max_requests?: number; provider: string }
         Returns: Json

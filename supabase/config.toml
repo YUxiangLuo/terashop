@@ -190,6 +190,9 @@ verify_jwt = false
 [functions.paypal-reconcile-refunds]
 verify_jwt = false
 
+[functions.paypal-reconcile-captures]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327
