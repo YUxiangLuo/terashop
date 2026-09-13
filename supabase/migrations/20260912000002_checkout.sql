@@ -174,9 +174,6 @@ declare
 begin
   if items is null or jsonb_typeof(items) <> 'array' then raise exception 'items must be an array'; end if;
   v_items := case when jsonb_array_length(items) = 0 then '[]'::jsonb else private.canonical_checkout_lines(items) end;
-  if jsonb_array_length(v_items) > 50 or (select coalesce(sum((e ->> 'quantity')::integer), 0) from jsonb_array_elements(v_items) e) > 100 then
-    raise exception 'cart is limited to 50 commercial lines and 100 units';
-  end if;
   v_address := private.normalize_checkout_address(address);
   v_hash := private.command_request_hash(jsonb_build_object('operation','update','version',expected_version,
     'items',v_items,'address',v_address,'shipping_method_id',shipping_method_id,'discount_code',v_code,'note',note));
@@ -458,10 +455,33 @@ declare
   v_attributes jsonb;
   v_key text;
   v_result jsonb;
+  v_quantity text;
+  v_units integer := 0;
 begin
-  -- Keep the inventory quantity validator separate from commercial line identity.
-  perform private.canonical_variant_quantities(p_items);
+  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then
+    raise exception 'items must be a non-empty array';
+  end if;
+  -- All callers, including anonymous price previews, share this input budget.
+  -- Positive quantities imply at most 100 raw lines, even before merging.
+  if jsonb_array_length(p_items) > 100 then
+    raise exception 'checkout is limited to 100 input lines';
+  end if;
+  if octet_length(p_items::text) > 1048576 then
+    raise exception 'checkout items JSONB text is limited to 1 MiB';
+  end if;
   for v_item in select value from jsonb_array_elements(p_items) loop
+    if jsonb_typeof(v_item) <> 'object' or coalesce(v_item ->> 'variant_id', '') = '' then
+      raise exception 'each item requires variant_id';
+    end if;
+    perform (v_item ->> 'variant_id')::uuid;
+    v_quantity := v_item ->> 'quantity';
+    if coalesce(v_quantity, '') !~ '^[1-9][0-9]*$' then
+      raise exception 'item quantity must be a positive integer';
+    end if;
+    -- Check digit count before casting so oversized integers cannot overflow.
+    if length(v_quantity) > 3 then raise exception 'checkout is limited to 100 units'; end if;
+    v_units := v_units + v_quantity::integer;
+    if v_units > 100 then raise exception 'checkout is limited to 100 units'; end if;
     if v_item - array['variant_id', 'quantity', 'attributes', 'line_key'] <> '{}'::jsonb then
       raise exception 'unsupported checkout line field';
     end if;
@@ -485,6 +505,9 @@ begin
     from jsonb_array_elements(p_items) e
     group by (e ->> 'variant_id')::uuid, coalesce(e -> 'attributes', '{}'::jsonb)
   ) x;
+  if jsonb_array_length(v_result) > 50 then
+    raise exception 'checkout is limited to 50 lines';
+  end if;
   return v_result;
 end;
 $$;
@@ -1169,7 +1192,7 @@ begin
         into v_get_qty, v_get_only_qty from _price_lines l
         where private.line_in_scope(v_snapshot, 'get', l.variant_id, l.product_id, l.category_ids);
         -- Reserve distinct purchase units before choosing the cheapest gifts.
-        -- Cart quantities bound this search to at most 100 rounds. A selected
+        -- Shared checkout normalization caps purchase rounds at 100. A selected
         -- scope can overlap through products/categories, not only target IDs.
         v_rounds := v_scope_qty / v_buy;
         loop
@@ -1747,11 +1770,6 @@ begin
   end if;
 
   v_items := private.canonical_checkout_lines(items);
-  if jsonb_array_length(v_items) > 50
-     or (select sum((e.value ->> 'quantity')::integer)
-         from jsonb_array_elements(v_items) e) > 100 then
-    raise exception 'checkout quote is limited to 50 lines and 100 units';
-  end if;
   v_address_input := case when address_id is null
                           then private.normalize_checkout_address(address)
                           else null end;

@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { withRollback } from '../scripts/lib/transactions';
 import { testDatabase } from './database-concurrency';
+import { Cleanup } from './support/cleanup';
+import { promotionFixture } from './support/promotions';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, fixtureIntent, paymentFixture, settleIntent, type PaymentFixture } from './payment-fixtures';
 
@@ -27,6 +29,66 @@ const cart = (variant: string) => [
   { variant_id: variant, quantity: 1, attributes: { engraving: 'Alice' } },
   { variant_id: variant, quantity: 1, attributes: { engraving: 'Bob' } },
 ];
+
+test('匿名计价共享 50 商业行/100 件预算，重叠买赠拒绝超大数量及合并越界', async () => {
+  const f = await fixture(), cleanup = new Cleanup(), code = crypto.randomUUID().toUpperCase();
+  try {
+    const promotion = await promotionFixture(cleanup, { name: code, code, type: 'buy_x_get_y',
+      params: { buy: 1, get: 1 }, apply_scope: 'selected', get_scope: 'selected' });
+    await checked(api('/rest/v1/promotion_targets', { service: true, method: 'POST', body: [
+      { promotion_id: promotion, role: 'apply', variant_id: f.variantId },
+      { promotion_id: promotion, role: 'get', variant_id: f.variantId },
+    ] }));
+    const line = (quantity: number, label?: string) => ({ variant_id: f.variantId, quantity,
+      ...(label === undefined ? {} : { attributes: { label } }) });
+    for (const [items, count] of [
+      [[line(100)], 1],
+      [Array.from({ length: 100 }, () => line(1)), 1],
+      [Array.from({ length: 50 }, (_, i) => line(2, String(i))), 50],
+    ] as const) {
+      const price = await checked<Price>(rpc('price_checkout', { items, discount_code: code }));
+      expect(price.lines).toHaveLength(count);
+      expect(price.lines.reduce((sum, l) => sum + l.quantity, 0)).toBe(100);
+      expect(price.discount_total).toBe(500);
+    }
+    for (const items of [[line(101)], [line(60), line(41)], [line(60, 'a'), line(41, 'b')],
+      [line(1_000_000)], [line(2_147_483_648)]]) {
+      const result = await rpc('price_checkout', { items, discount_code: code });
+      expect(result.status).toBe(400);
+      expect(result.data).toMatchObject({ message: expect.stringContaining('100 units') });
+    }
+    const distinct = await rpc('price_checkout', {
+      items: Array.from({ length: 51 }, (_, i) => line(1, String(i))), discount_code: code,
+    });
+    expect(distinct.status).toBe(400);
+    expect(distinct.data).toMatchObject({ message: expect.stringContaining('50 lines') });
+    const raw = await rpc('price_checkout', { items: Array.from({ length: 101 }, () => line(1)) });
+    expect(raw.status).toBe(400);
+    expect(raw.data).toMatchObject({ message: expect.stringContaining('100 input lines') });
+  } finally { await cleanup.run(); }
+});
+
+test('原始输入行数和 JSONB UTF-8 字节预算在逐行规范化之前拒绝', async () => {
+  await withRollback(database, async sql => {
+    await sql`select set_config('request.jwt.claims','{"role":"anon"}',true)`;
+    await sql`set local role anon`;
+    // Invalid line content distinguishes a front-door budget check from a late check.
+    for (const [count, message] of [[100, 'each item requires variant_id'], [101, '100 input lines']] as const) {
+      await sql`savepoint probe`;
+      await expect(Promise.resolve(sql`select public.price_checkout((select jsonb_agg(null::jsonb) from generate_series(1,${count})))`))
+        .rejects.toThrow(message);
+      await sql`rollback to savepoint probe`;
+    }
+    for (const extra of [-1, 0, 1]) {
+      await sql`savepoint probe`;
+      // Account for PostgreSQL's JSONB text punctuation; CJK tests bytes, not characters.
+      await expect(Promise.resolve(sql`select public.price_checkout(jsonb_build_array(jsonb_build_object('padding',
+        repeat('界',300000) || repeat('x',1048576 + ${extra} - 900000 - octet_length('[{"padding": ""}]')))))`))
+        .rejects.toThrow(extra > 0 ? '1 MiB' : 'each item requires variant_id');
+      await sql`rollback to savepoint probe`;
+    }
+  });
+});
 
 test('商业行规范化：属性键顺序、输入顺序、拆行、UUID 大小写和会话设置不改变身份及哈希', async () => {
   const variant = 'aaaa0000-0000-4000-8000-000000000001';
