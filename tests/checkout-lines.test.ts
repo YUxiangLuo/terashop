@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { withRollback } from '../scripts/lib/transactions';
 import { testDatabase } from './database-concurrency';
 import { Cleanup } from './support/cleanup';
+import { stockedProduct } from './support/catalog';
 import { promotionFixture } from './support/promotions';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
-import { checked, fixtureIntent, paymentFixture, settleIntent, type PaymentFixture } from './payment-fixtures';
+import { checked, fixtureIntent, settleIntent } from './payment-fixtures';
 
 interface Line {
   id: string; variant_id: string; line_key: string; attributes: Record<string, string>;
@@ -14,17 +15,11 @@ interface Quote { id: string; total: number; lines: Line[] }
 interface Price { lines: Array<Omit<Line, 'id'>>; total: number; discount_total: number; promotions: Array<{ promotion_id: string; amount: number }> }
 const database = testDatabase();
 let admin: TestUser;
-const products: string[] = [];
+const products = new Cleanup();
 beforeAll(async () => { admin = await signup(); await makeAdmin(admin.userId); });
-afterAll(async () => {
-  if (products.length) await checked(api(`/rest/v1/products?id=in.(${products.join(',')})`, {
-    service: true, method: 'PATCH', body: { status: 'archived' },
-  }));
-  await database.close();
-});
-async function fixture(): Promise<PaymentFixture> {
-  const f = await paymentFixture(admin); products.push(f.productId); return f;
-}
+afterEach(() => products.run());
+afterAll(() => database.close());
+const fixture = () => stockedProduct(admin, { cleanup: products });
 const cart = (variant: string) => [
   { variant_id: variant, quantity: 1, attributes: { engraving: 'Alice' } },
   { variant_id: variant, quantity: 1, attributes: { engraving: 'Bob' } },
@@ -89,6 +84,44 @@ test('原始输入行数和 JSONB UTF-8 字节预算在逐行规范化之前拒�
     }
   });
 });
+
+for (const command of ['create_checkout_quote', 'create_order']) {
+  test(`${command}: 输入拒绝不占库存或消费幂等键，100 条重复输入可合并后重试`, async () => {
+    const f = await fixture(), buyer = await signup(), idempotency_key = crypto.randomUUID();
+    const line = (quantity: number, label = 'same') => ({ variant_id: f.variantId, quantity, attributes: { label } });
+    const invoke = (items: unknown) => rpc(command, { items, address: TEST_ADDRESS, idempotency_key }, buyer.token);
+    for (const [items, message] of [
+      [Array.from({ length: 101 }, () => line(1)), '100 input lines'],
+      [[{ padding: '界'.repeat(350000) }], '1 MiB'],
+      [[line(60), line(41)], '100 units'],
+      [Array.from({ length: 51 }, (_, i) => line(1, String(i))), '50 lines'],
+    ] as const) {
+      const rejected = await invoke(items);
+      expect(rejected.status).toBe(400);
+      expect(rejected.data).toMatchObject({ message: expect.stringContaining(message) });
+    }
+    expect(await database`select id from commerce.checkout_quotes where customer_id=${buyer.customerId}::uuid`).toHaveLength(0);
+    expect(await database`select id from public.orders where customer_id=${buyer.customerId}::uuid`).toHaveLength(0);
+    const availability = () => checked<{ reserved: number }>(rpc('get_inventory_availability', { variant_id: f.variantId }, admin.token));
+    expect((await availability()).reserved).toBe(0);
+    const accepted = await checked<{ id: string }>(invoke(Array.from({ length: 100 }, () => line(1))));
+    try {
+      const lines = command === 'create_checkout_quote'
+        ? (await checked<Quote>(rpc('get_checkout_quote', { quote_id: accepted.id }, buyer.token))).lines
+        : await checked<Line[]>(api(`/rest/v1/order_items?order_id=eq.${accepted.id}`, { token: buyer.token }));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ variant_id: f.variantId, quantity: 100, attributes: { label: 'same' } });
+      expect((await checked<{ id: string }>(invoke([line(100)]))).id).toBe(accepted.id);
+      expect((await availability()).reserved).toBe(100);
+      expect(await stockOf(f.sku)).toBe(100);
+    } finally {
+      await checked(command === 'create_checkout_quote'
+        ? rpc('cancel_checkout_quote', { quote_id: accepted.id }, buyer.token)
+        : rpc('cancel_order', { order_id: accepted.id }, buyer.token));
+    }
+    expect((await availability()).reserved).toBe(0);
+  });
+}
 
 test('商业行规范化：属性键顺序、输入顺序、拆行、UUID 大小写和会话设置不改变身份及哈希', async () => {
   const variant = 'aaaa0000-0000-4000-8000-000000000001';

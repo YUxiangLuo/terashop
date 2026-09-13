@@ -1,19 +1,22 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
-import { checked, paymentFixture, fixtureOrder, fixtureIntent, settleIntent, type PaymentFixture } from './payment-fixtures';
+import { checked, fixtureOrder, fixtureIntent, settleIntent, type PaymentFixture } from './payment-fixtures';
 import { heldTransactionRace, staleAfterCommit, testDatabase } from './database-concurrency';
+import { withRollback } from '../scripts/lib/transactions';
+import { Cleanup } from './support/cleanup';
+import { stockedProduct } from './support/catalog';
 
 interface Customer { id: string; auth_user_id: string | null; email: string | null; full_name: string; phone: string | null; anonymized_at: string | null }
 interface Cart { id: string; customer_id: string | null; version: number; status: string; address: object | null; note: string | null; expires_at: string; quote_id: string | null; guest_token?: string; lines: Array<{ id: string; variant_id: string; line_key: string; quantity: number; attributes: Record<string, string> }> }
 interface Quote { id: string; status: string; lines: Array<{ id: string; line_key: string; attributes: object }>; total: number }
 const database = testDatabase();
 const cartIds: string[] = [];
+const cleanup = new Cleanup();
 let admin: TestUser, fixture: PaymentFixture;
-beforeAll(async () => { admin = await signup(); await makeAdmin(admin.userId); fixture = await paymentFixture(admin); });
+beforeAll(async () => { admin = await signup(); await makeAdmin(admin.userId); fixture = await stockedProduct(admin, { cleanup }); });
 afterAll(async () => {
-  for (const id of cartIds) await database`delete from commerce.carts where id=${id}::uuid`;
-  if (fixture) await api(`/rest/v1/products?id=eq.${fixture.productId}`, { service: true, method: 'PATCH', body: { status: 'archived' } });
-  await database.close();
+  for (const id of cartIds) cleanup.defer(() => database`delete from commerce.carts where id=${id}::uuid`.execute());
+  try { await cleanup.run(); } finally { await database.close(); }
 });
 const claims = (user: TestUser) => JSON.stringify({ role: 'authenticated', sub: user.userId });
 const items = (quantity = 1, attributes: Record<string, string> = {}) => [{ variant_id: fixture.variantId, quantity, attributes }];
@@ -151,6 +154,34 @@ test('Cart 拒绝数量/属性/伪造价格/未知字段和超大状态，失败
     expect((await update(cart, undefined, extra)).status).toBe(400);
   }
   const current = await checked<Cart>(get(cart)); expect(current.version).toBe(1); expect(current.expires_at).toBe(cart.expires_at);
+});
+
+for (const authenticated of [false, true]) test(`${authenticated ? '登录' : '游客'} Cart: 原始预算拒绝保持已有内容，100 行合并和 50 商业行边界可保存`, async () => {
+  const owner = authenticated ? await signup() : undefined;
+  const cart = await filled(owner, { items: items(3, { gift: 'keep' }), address: TEST_ADDRESS, note: 'keep' });
+  const before = await checked<Cart>(get(cart, owner));
+  for (const [lines, message] of [
+    [Array.from({ length: 101 }, () => items()[0]), '100 input lines'],
+    [[{ padding: '界'.repeat(350000) }], '1 MiB'],
+    [[...items(60), ...items(41)], '100 units'],
+  ] as const) {
+    const rejected = await update(cart, owner, { items: lines });
+    expect(rejected.status).toBe(400);
+    expect(rejected.data).toMatchObject({ message: expect.stringContaining(message) });
+    expect(await checked<Cart>(get(cart, owner))).toEqual(before);
+  }
+  const merged = { ...await checked<Cart>(update(cart, owner, {
+    items: Array.from({ length: 100 }, () => items()[0]),
+  })), guest_token: cart.guest_token };
+  expect(merged.version).toBe(cart.version + 1);
+  expect(merged.lines).toHaveLength(1);
+  expect(merged.lines[0]).toMatchObject({ variant_id: fixture.variantId, quantity: 100, attributes: {} });
+  const distinct = await checked<Cart>(update(merged, owner, {
+    items: Array.from({ length: 50 }, (_, i) => items(2, { label: String(i) })[0]),
+  }));
+  expect(distinct.lines).toHaveLength(50);
+  expect(distinct.lines.every(line => line.quantity === 2)).toBe(true);
+  expect(new Set(distinct.lines.map(line => line.line_key)).size).toBe(50);
 });
 
 test('Cart 不预占库存、不锁价：缺货可保留意向，转 Quote 失败原子回滚', async () => {
@@ -314,7 +345,7 @@ test('物理清理 converted Cart 不取消 Quote 或释放预占，也不修改
   const owner = await signup(); const cart = await filled(owner, { address: TEST_ADDRESS });
   const quote = await checked<Quote>(rpc('checkout_cart', { cart_id: cart.id, expected_version: cart.version }, owner.token));
   try {
-    await expect(database.begin(async tx => {
+    await withRollback(database, async tx => {
       await tx`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`;
       const before = await tx`select on_hand, private.active_reserved_quantity(variant_id, location_id, null) as reserved from public.inventory_levels where variant_id=${fixture.variantId}::uuid order by location_id`;
       // Time advancement is confined to this rollback transaction.
@@ -322,8 +353,7 @@ test('物理清理 converted Cart 不取消 Quote 或释放预占，也不修改
       expect(await tx`select id from commerce.carts where id=${cart.id}::uuid`).toHaveLength(0);
       expect(await tx<Array<{ status: string }>>`select status from commerce.checkout_quotes where id=${quote.id}::uuid`).toEqual([{ status: 'open' }]);
       expect(await tx`select on_hand, private.active_reserved_quantity(variant_id, location_id, null) as reserved from public.inventory_levels where variant_id=${fixture.variantId}::uuid order by location_id`).toEqual(before);
-      throw new Error('rollback cart cleanup probe');
-    })).rejects.toThrow('rollback cart cleanup probe');
+    });
   } finally { await checked(rpc('cancel_checkout_quote', { quote_id: quote.id }, owner.token)); }
 });
 

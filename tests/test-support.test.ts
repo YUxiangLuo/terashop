@@ -1,11 +1,32 @@
 import { afterAll, expect, test } from 'bun:test';
 import { testDatabase, heldTransactionRace, staleAfterCommit } from './database-concurrency';
 import { stockedProduct } from './support/catalog';
+import { withRollback } from '../scripts/lib/transactions';
 import { api, checked, makeAdmin, signup } from './helpers';
 
 const database = testDatabase();
 afterAll(() => database.close());
 const key = () => String(BigInt(`0x${crypto.randomUUID().replaceAll('-', '').slice(0, 14)}`));
+
+for (const failure of [undefined, new Error('rollback fixture'), Symbol('callback failure')]) {
+  test(`回滚夹具${failure === undefined ? '成功返回值' : typeof failure === 'symbol' ? '透传非 Error 异常' : '透传同名异常'}，真实写入均不提交`, async () => {
+    const id = crypto.randomUUID(), result = { id, marker: 17 };
+    try {
+      const run = withRollback(database, async tx => {
+        await tx`insert into public.products(id, slug, name) values (${id}::uuid, ${id}, 'Rollback probe')`;
+        expect(await tx`select id from public.products where id=${id}::uuid`).toHaveLength(1);
+        if (failure !== undefined) throw failure;
+        return result;
+      });
+      if (failure === undefined) expect(await run).toBe(result);
+      else await expect(run).rejects.toBe(failure);
+      expect(await database`select id from public.products where id=${id}::uuid`).toHaveLength(0);
+    } finally {
+      // Clean only this probe if a broken helper accidentally committed it.
+      await database`delete from public.products where id=${id}::uuid`;
+    }
+  });
+}
 
 test('并发夹具的持锁分支设置失败时拒绝，不留下未完成的 ready 屏障', async () => {
   await expect(heldTransactionRace(database, async () => { throw new Error('holder setup failed'); }, async () => null))
