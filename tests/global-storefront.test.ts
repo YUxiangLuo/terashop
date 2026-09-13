@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { api, rpc, signup, variantBySku, shippingByName, checked, TEST_ADDRESS, type TestUser } from './helpers';
+import { withRollback } from '../scripts/lib/transactions';
+import { testDatabase } from './database-concurrency';
 
+const database = testDatabase();
 let buyer: TestUser;
 let variantId: string;
 const orders: string[] = [];
@@ -11,7 +14,46 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const id of orders) await checked(rpc('cancel_order', { order_id: id }, buyer.token));
 });
+afterAll(() => database.close());
 const items = () => [{ variant_id: variantId, quantity: 1 }];
+
+for (const column of ['shipping_address', 'billing_address'] as const) {
+  test(`受信订单 INSERT/UPDATE 的 ${column} 拒绝 JSON null 国家，合法地址及可选账单地址仍可提交`, async () => {
+    await withRollback(database, async sql => {
+      await sql`set local role service_role`;
+      const [order] = await sql`insert into public.orders(customer_id,email,subtotal,total,shipping_address)
+        values (${buyer.customerId}::uuid,${buyer.email},10,10,
+          jsonb_build_object('recipient_name','Review','line1','12 Example Road','country','JP')) returning id`;
+      await sql`insert into public.order_items(order_id,name,unit_price,quantity,total)
+        values (${order.id}::uuid,'Review fixture',10,1,10)`;
+      await sql`set constraints all immediate`;
+      // Force full-order validation, not just a standalone CHECK expression.
+      const [valid] = await sql`select shipping_address,billing_address from public.orders where id=${order.id}::uuid`;
+      expect(valid.shipping_address.country).toBe('JP');
+      expect(valid.billing_address).toBeNull();
+      await sql`update public.orders set billing_address=jsonb_build_object('country','GB') where id=${order.id}::uuid`;
+      await sql`set constraints all deferred`;
+      for (const operation of ['INSERT', 'UPDATE']) {
+        await sql`savepoint invalid_address`;
+        const query = operation === 'INSERT'
+          ? `insert into public.orders(customer_id,email,subtotal,total,shipping_address,billing_address)
+             values ($1::uuid,$2,10,10,${column === 'shipping_address' ? "jsonb_build_object('country',null)" : "jsonb_build_object('country','JP')"},
+               ${column === 'billing_address' ? "jsonb_build_object('country',null)" : 'null'})`
+          : `update public.orders set ${column}=jsonb_build_object('country',null) where id=$1::uuid`;
+        await expect(Promise.resolve(sql.unsafe(query, operation === 'INSERT'
+          ? [buyer.customerId, buyer.email] : [order.id]))).rejects.toMatchObject({
+          errno: '23514', constraint: `orders_${column}_country_chk`,
+        });
+        await sql`rollback to savepoint invalid_address`;
+        await sql`release savepoint invalid_address`;
+      }
+      await sql`update public.orders set billing_address=null where id=${order.id}::uuid`;
+      await sql`set constraints all immediate`;
+      const [unchanged] = await sql`select shipping_address,billing_address from public.orders where id=${order.id}::uuid`;
+      expect(unchanged).toEqual(valid);
+    });
+  });
+}
 
 test('单一 USD 与配送国家无关，seed 不暗中安装任何税率', async () => {
   expect(await checked<Array<{ id: string }>>(api('/rest/v1/tax_rates?is_active=eq.true&select=id', { service: true }))).toEqual([]);

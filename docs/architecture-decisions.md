@@ -124,6 +124,7 @@ PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard
 ## ADR-012：客户写入与默认地址
 
 收货地址使用 `recipient_name`、`line1`、`line2`、`city`、`region`、`postal_code`、`country`、`phone`；仅姓名、第一地址行和国家在订单中必填，其余字段按地区/渠道需要填写。地址簿与直接地址快照使用同一解析入口，不默认为 CN 或 US。
+订单表的收货/账单地址国家 CHECK 必须明确为 TRUE，不能让 JSON `country: null` 经 SQL 三值逻辑通过；受信 INSERT/UPDATE 同样受限。账单地址整体仍可为 SQL NULL，提供时则必须含两位大写国家码。
 普通客户只能创建 pending 评价，管理员审核后公开；作者修改内容自动回落待审，管理员受权写入不受客户 policy 限制。
 默认地址命令先锁活跃 Customer 行，再锁目标地址并清理旧默认；所有新建地址都先取客户锁，`is_default=true` 沿用该顺序。地址/客户 metafield 内容修改与匿名化串行化；已持子行的 UPDATE 用 NOWAIT，竞争时整笔事务重试，不能在擦除后补入旧客户 PII。
 客户端仅可 PATCH 地址内容，身份/归属不可变，既有默认值切换必须走 `set_default_address`，service-role 表写入也不能绕过。
