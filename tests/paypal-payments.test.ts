@@ -1,4 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { stockedProduct } from './support/catalog';
+import { Cleanup } from './support/cleanup';
+import { fixtureOrder, withRefundPolling } from './payment-fixtures';
+import { testDatabase } from './database-concurrency';
 import {
   api, TEST_ADDRESS, makeAdmin, rpc, signup, stockOf, type TestUser,
 } from './helpers';
@@ -57,7 +61,8 @@ interface Operations {
 let admin: TestUser;
 let buyer: TestUser;
 let fixture: Fixture;
-const createdProducts: string[] = [];
+const cleanup = new Cleanup(), database = testDatabase();
+cleanup.defer(() => database.close());
 
 async function digest(value: unknown): Promise<string> {
   const bytes = new TextEncoder().encode(JSON.stringify(value));
@@ -98,51 +103,11 @@ async function operations(orderId: string, token = buyer.token): Promise<Operati
   return result.data as Operations;
 }
 
-async function createFixture(): Promise<Fixture> {
-  const suffix = crypto.randomUUID();
-  const sku = `PAYPAL-${suffix}`;
-  const products = await api('/rest/v1/products?select=id', {
-    service: true,
-    method: 'POST',
-    body: { slug: `paypal-${suffix}`, name: 'PayPal fixture', status: 'draft' },
-  });
-  const productId = (products.data as Array<{ id: string }>)[0].id;
-  createdProducts.push(productId);
-  const variants = await api('/rest/v1/product_variants?select=id', {
-    service: true,
-    method: 'POST',
-    body: { product_id: productId, sku, price: 10, track_inventory: true },
-  });
-  const variantId = (variants.data as Array<{ id: string }>)[0].id;
-  const published = await api(`/rest/v1/products?id=eq.${productId}`, {
-    service: true, method: 'PATCH', body: { status: 'active' },
-  });
-  if (published.status >= 400) throw new Error(JSON.stringify(published.data));
-  const stocked = await rpc('adjust_inventory', {
-    variant_id: variantId,
-    delta: 12,
-    reason: 'restock',
-    note: 'PayPal tests',
-  }, admin.token);
-  if (stocked.status >= 400) throw new Error(JSON.stringify(stocked.data));
-  return { productId, variantId, sku };
-}
+const createFixture = (): Promise<Fixture> => stockedProduct(admin, { label: 'paypal', onHand: 12, cleanup });
 
 async function createPayPalOrder(quantity: number): Promise<CreatedOrder> {
-  const quote = await rpc('create_checkout_quote', {
-    items: [{ variant_id: fixture.variantId, quantity }],
-    idempotency_key: `paypal-quote-${crypto.randomUUID()}`,
-    address: TEST_ADDRESS,
-  }, buyer.token);
-  if (quote.status >= 400) throw new Error(JSON.stringify(quote.data));
-  const converted = await rpc('create_order_from_quote', {
-    quote_id: (quote.data as { id: string }).id,
-  }, buyer.token);
-  if (converted.status >= 400) throw new Error(JSON.stringify(converted.data));
-  const orderId = (converted.data as { id: string }).id;
-  const items = await api(`/rest/v1/order_items?order_id=eq.${orderId}&select=id`, {
-    token: buyer.token,
-  });
+  const order = await fixtureOrder(fixture, buyer, quantity);
+  const orderId = order.id;
   const intent = await rpc('create_payment_intent_for_customer', {
     order_id: orderId,
     actor_id: buyer.userId,
@@ -163,7 +128,7 @@ async function createPayPalOrder(quantity: number): Promise<CreatedOrder> {
   if (bound.status >= 400) throw new Error(JSON.stringify(bound.data));
   return {
     id: orderId,
-    itemId: (items.data as Array<{ id: string }>)[0].id,
+    itemId: order.itemId,
     intent: row,
     orderReference,
   };
@@ -190,15 +155,7 @@ async function capturePayPal(created: CreatedOrder): Promise<string> {
   return captureReference;
 }
 
-afterAll(async () => {
-  if (createdProducts.length > 0) {
-    await api(`/rest/v1/products?id=in.(${createdProducts.join(',')})`, {
-      service: true,
-      method: 'PATCH',
-      body: { status: 'archived' },
-    });
-  }
-});
+afterAll(() => cleanup.run());
 
 beforeAll(async () => {
   admin = await signup();
@@ -449,17 +406,20 @@ describe('PayPal 异步退款', () => {
       provider: 'paypal', max_requests: 10,
     }, buyer.token);
     expect(deniedList.status).toBe(403);
-    const pendingList = await rpc('list_pending_provider_refunds', {
-      provider: 'paypal', max_requests: 10,
-    }, undefined, true);
-    expect(pendingList.status).toBe(200);
-    expect(pendingList.data).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: refund.id, parent_provider_reference: captureReference }),
-    ]));
-    const duplicateClaim = await rpc('list_pending_provider_refunds', {
-      provider: 'paypal', max_requests: 10,
-    }, undefined, true);
-    expect(duplicateClaim.data).toEqual([]);
+    await withRefundPolling(database, [refund.id], async () => {
+      const pendingList = await rpc('list_pending_provider_refunds', {
+        provider: 'paypal', max_requests: 10,
+      }, undefined, true);
+      expect(pendingList.status).toBe(200);
+      expect(pendingList.data).toEqual([
+        expect.objectContaining({ id: refund.id, parent_provider_reference: captureReference }),
+      ]);
+      const duplicateClaim = await rpc('list_pending_provider_refunds', {
+        provider: 'paypal', max_requests: 10,
+      }, undefined, true);
+      expect(duplicateClaim.status).toBe(200);
+      expect(duplicateClaim.data).toEqual([]);
+    });
 
     const pending = await paypalEvent({
       eventType: 'PAYMENT.REFUND.PENDING',

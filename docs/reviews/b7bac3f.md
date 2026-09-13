@@ -1,8 +1,10 @@
-# 数据库深度审阅与修复闭环
+# 历史审阅：基点 b7bac3f
+
+归档版本：`cec8f0b`。以下证据、结果与补注保留当时状态，不是当前合同或运行手册；当前入口见 [数据库开发](../database.md) 与 [ADR](../architecture-decisions.md)。测试链接固定到归档提交。
 
 审阅基点：`b7bac3f`。本轮直接修改未部署的初始化基线，既有本地数据库需要重建；不是已部署环境的数据升级脚本。
 
-后续基于 `76cba7b` 的促销范围、RR 库存/履约、Metafields、订单校验与索引复审见 [数据库设计复审](database-design-fixes.md)。下面保留本轮八项问题的历史实验记录。
+后续基于 `76cba7b` 的促销范围、RR 库存/履约、Metafields、订单校验与索引复审见 [数据库设计复审](76cba7b.md)。下面保留本轮八项问题的历史实验记录。
 
 ## 已修复的八项问题
 
@@ -23,9 +25,9 @@ R1 使用真实生产 handler / 本地 Auth / PostgREST，只模拟渠道 HTTP�
 
 原 opt-in 审计脚本已由断言“缺陷不可发生”的正式回归替代，不再维护一份将旧错误结果视为成功的实验脚本。
 
-- [`database-review-fixes.test.ts`](../tests/database-review-fixes.test.ts)：真实退款 handler 的发出/取消窗口、取消先提交、网络歧义及陈旧重试；并发共享配额、付款期限、迟到 Capture；NaN、头行守恒、Outbox token、SQL 角色权限和跨客户幂等。
-- [`inventory-concurrency.test.ts`](../tests/inventory-concurrency.test.ts)：手工退款、PayPal 退款、取消、批量过期四种实际命令与 Quote 的受控交错。测试专用 AFTER trigger 仅暂停实际库存更新，通过 advisory barrier / pg_blocking_pids 确认锁等待，不禁用业务不变量。
-- [`provider-retry.test.ts`](../tests/provider-retry.test.ts)：分别向 capture / refund 本地入账注入 40P01、40001、55P03，确认保留外部资金、退避、自动恢复及幂等库存。故障触发器与资金实验整体回滚。
+- [`database-review-fixes.test.ts`](https://github.com/vesein/tera-headless/blob/cec8f0b/tests/database-review-fixes.test.ts)：真实退款 handler 的发出/取消窗口、取消先提交、网络歧义及陈旧重试；并发共享配额、付款期限、迟到 Capture；NaN、头行守恒、Outbox token、SQL 角色权限和跨客户幂等。
+- [`inventory-concurrency.test.ts`](https://github.com/vesein/tera-headless/blob/cec8f0b/tests/inventory-concurrency.test.ts)：手工退款、PayPal 退款、取消、批量过期四种实际命令与 Quote 的受控交错。测试专用 AFTER trigger 仅暂停实际库存更新，通过 advisory barrier / pg_blocking_pids 确认锁等待，不禁用业务不变量。
+- [`provider-retry.test.ts`](https://github.com/vesein/tera-headless/blob/cec8f0b/tests/provider-retry.test.ts)：分别向 capture / refund 本地入账注入 40P01、40001、55P03，确认保留外部资金、退避、自动恢复及幂等库存。故障触发器与资金实验整体回滚。
 - 原有回归保留；履约顺序改为先付款，独立测试不再累积同一客户的未付款额度，Outbox 测试改为传领取 token。
 
 ## 数据库约束与命令分工
@@ -49,7 +51,7 @@ R1 使用真实生产 handler / 本地 Auth / PostgREST，只模拟渠道 HTTP�
 - **Outbox complete 新增必填 `lease_token`**；使用 claim 返回值。消费者仍需幂等，不保证外部副作用 exactly-once。
 - 未付款发货不再允许；商品行/订单头分两个 HTTP 请求写入也不再允许。前端和受信导入应使用最新合同与生成类型。
 - Inbox 瞬时错误按 next_attempt_at 重试；失败、25 次重试耗尽、未知资金及陈旧未绑定退款需要告警/人工对账。
-- 初始化基线、API、ADR 与部署文档已同步；操作示例见 [支付与部署](../supabase/functions/README.md)。
+- 初始化基线、API、ADR 与部署文档已同步；操作示例见 [支付与部署](../../supabase/functions/README.md)。
 
 ## 验证结果与边界
 

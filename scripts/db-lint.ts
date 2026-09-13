@@ -1,4 +1,6 @@
 import { SQL, type TransactionSQL } from 'bun';
+import { withRollback } from './lib/transactions';
+import { localSupabase } from './lib/local-supabase';
 
 interface Issue {
   function: string;
@@ -62,19 +64,6 @@ function reviewedTriggerBranch(issue: Issue, source: string): boolean {
   ].join('\n');
 }
 
-// Always roll back: neither extension installation nor lint fixtures may survive,
-// including when a query, assertion or the checker itself throws.
-export async function withRollback<T>(database: SQL, run: (sql: TransactionSQL) => Promise<T>): Promise<T> {
-  const rollback = Symbol('lint rollback');
-  let result!: T;
-  try {
-    await database.begin(async sql => { result = await run(sql); throw rollback; });
-  } catch (error) {
-    if (error !== rollback) throw error;
-  }
-  return result;
-}
-
 export async function checkDatabase(sql: TransactionSQL) {
   await sql`create extension if not exists plpgsql_check with schema extensions`;
   const [pricing] = await sql`
@@ -127,12 +116,7 @@ export async function checkDatabase(sql: TransactionSQL) {
 }
 
 if (import.meta.main) {
-  // Deliberately use this project's local Supabase, not an arbitrary DB_URL from
-  // the shell. Keep credentials in memory and never echo status output.
-  const status = Bun.spawnSync(['bunx', '--no-install', 'supabase', 'status', '-o', 'json']);
-  if (status.exitCode !== 0) throw new Error('Local Supabase is unavailable; run bun run start');
-  const { DB_URL } = JSON.parse(status.stdout.toString());
-  if (typeof DB_URL !== 'string') throw new Error('Local Supabase status did not return DB_URL');
+  const { DB_URL } = localSupabase();
   const database = new SQL(DB_URL, { max: 1 });
   try {
     const report = await withRollback(database, checkDatabase);

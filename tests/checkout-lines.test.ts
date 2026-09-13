@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { withRollback } from '../scripts/db-lint';
+import { withRollback } from '../scripts/lib/transactions';
 import { testDatabase } from './database-concurrency';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, fixtureIntent, paymentFixture, settleIntent, type PaymentFixture } from './payment-fixtures';

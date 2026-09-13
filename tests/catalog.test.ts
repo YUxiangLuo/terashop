@@ -1,10 +1,11 @@
 import { describe, test, expect } from 'bun:test';
-import { api, variantBySku } from './helpers';
+import { api, checked, onlyRow } from './helpers';
+import { Cleanup } from './support/cleanup';
 
 describe('商品目录', () => {
-  test('product_listing：匿名可见在售商品，含价格区间与是否有货', async () => {
+  test('product_listing：演示目录的在售商品含价格区间与是否有货', async () => {
     const { status, data } = await api(
-      '/rest/v1/product_listing?select=slug,price_from,compare_at_from,in_stock,categories&order=slug'
+      '/rest/v1/product_listing?slug=in.(essential-tee,mechanical-keyboard-87,ceramic-mug-350,usb-c-cable-1m)&select=slug,price_from,compare_at_from,in_stock,categories&order=slug'
     );
     expect(status).toBe(200);
     const rows = data as Record<string, unknown>[];
@@ -17,8 +18,8 @@ describe('商品目录', () => {
   });
 
   test('product_listing 不暴露库存数量与成本价（视图无此列）', async () => {
-    const { data } = await api('/rest/v1/product_listing?select=*&limit=1');
-    const row = (data as Record<string, unknown>[])[0];
+    const row = await onlyRow<Record<string, unknown>>(api('/rest/v1/product_listing?select=*&limit=1'));
+    expect(row.id).toEqual(expect.any(String));
     expect(row).not.toHaveProperty('on_hand');
     expect(row).not.toHaveProperty('cost');
   });
@@ -39,9 +40,18 @@ describe('商品目录', () => {
   });
 
   test('草稿/下架商品对匿名隐藏', async () => {
-    // seed 全部 active；验证过滤能力本身
-    const { data } = await api('/rest/v1/products?status=neq.active&select=slug');
-    expect(data).toEqual([]);
+    const cleanup = new Cleanup();
+    try {
+      for (const status of ['draft', 'archived']) {
+        const product = await onlyRow<{ id: string }>(api('/rest/v1/products?select=id', {
+          service: true, method: 'POST', body: { slug: crypto.randomUUID(), name: 'Hidden fixture', status },
+        }));
+        cleanup.defer(() => checked(api(`/rest/v1/products?id=eq.${product.id}`, { service: true, method: 'DELETE' })));
+        const path = `/rest/v1/products?id=eq.${product.id}&select=id,status`;
+        expect(await checked<Array<{ id: string; status: string }>>(api(path, { service: true }))).toEqual([{ id: product.id, status }]);
+        expect(await api(path)).toEqual({ status: 200, data: [] });
+      }
+    } finally { await cleanup.run(); }
   });
 
   test('分类含 parent_id，可在客户端组树（PostgREST 不支持自连接内嵌）', async () => {
@@ -63,7 +73,7 @@ describe('商品目录', () => {
   });
 
   test('不存在的 SKU 查询返回空', async () => {
-    const id = await variantBySku('NOPE').catch(() => null);
-    expect(id).toBeNull();
+    expect(await api(`/rest/v1/product_variants?sku=eq.MISSING-${crypto.randomUUID()}&select=id`))
+      .toEqual({ status: 200, data: [] });
   });
 });

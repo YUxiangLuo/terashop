@@ -4,10 +4,12 @@ import { handlePayPalCreateRefund } from '../supabase/functions/paypal-create-re
 import { handlePayPalReconcileRefunds } from '../supabase/functions/paypal-reconcile-refunds/handler';
 import { handlePayPalWebhook } from '../supabase/functions/paypal-webhook/handler';
 import { api, rpc, signup, makeAdmin, stockOf, SERVICE_KEY, type TestUser } from './helpers';
-import { checked, fixtureOrder, fixtureIntent, paymentFixture, settleIntent, type PaymentFixture } from './payment-fixtures';
+import { checked, fixtureOrder, fixtureIntent, paymentFixture, settleIntent, withRefundPolling, type PaymentFixture } from './payment-fixtures';
+import { testDatabase } from './database-concurrency';
 import { paymentRequest, withPaymentProviderMock } from './payment-handler-harness';
 import type { PayPalRefund } from '../supabase/functions/_shared/paypal';
 
+const database = testDatabase();
 let admin: TestUser;
 let buyer: TestUser;
 let fixture: PaymentFixture;
@@ -16,9 +18,11 @@ beforeAll(async () => {
   fixture = await paymentFixture(admin);
 });
 afterAll(async () => {
-  if (fixture) await api(`/rest/v1/products?id=eq.${fixture.productId}`, {
-    service: true, method: 'PATCH', body: { status: 'archived' },
-  });
+  try {
+    if (fixture) await checked(api(`/rest/v1/products?id=eq.${fixture.productId}`, {
+      service: true, method: 'PATCH', body: { status: 'archived' },
+    }));
+  } finally { await database.close(); }
 });
 const oauth = (request: Request) => request.url.endsWith('/v1/oauth2/token')
   ? Response.json({ access_token: 'endpoint-mock-token', expires_in: 3600 }) : null;
@@ -30,6 +34,7 @@ const operations = (id: string) => checked<{
 
 test('创建 Order 使用数据库金额/地址和配置跳转；重试 GET 不重建，其他客户不能发起渠道请求', async () => {
   const local = await fixtureOrder(fixture, buyer);
+  const reference = `ORDER${crypto.randomUUID().replaceAll('-', '')}`;
   const command = { order_id: local.id, idempotency_key: crypto.randomUUID(), amount: '0.01', return_url: 'https://attacker.example' };
   let order: Record<string, unknown>;
   let posts = 0;
@@ -44,8 +49,8 @@ test('创建 Order 使用数据库金额/地址和配置跳转；重试 GET 不�
       expect(unit.shipping.address.country_code).toBe('US');
       expect(body.payment_source.paypal.experience_context.return_url).toBe('https://shop.example/paypal/return');
       expect(request.headers.get('PayPal-Request-Id')).toBe(unit.custom_id);
-      order = { ...body, id: 'ORDERENDPOINT12345', status: 'PAYER_ACTION_REQUIRED', links: [{
-        rel: 'payer-action', href: 'https://www.sandbox.paypal.com/checkoutnow?token=ORDERENDPOINT12345',
+      order = { ...body, id: reference, status: 'PAYER_ACTION_REQUIRED', links: [{
+        rel: 'payer-action', href: `https://www.sandbox.paypal.com/checkoutnow?token=${reference}`,
       }] };
     } else gets++;
     return Response.json(order!);
@@ -54,7 +59,7 @@ test('创建 Order 使用数据库金额/地址和配置跳转；重试 GET 不�
     for (let i = 0; i < 2; i++) {
       const response = await handlePayPalCreateOrder(paymentRequest(command, buyer.token));
       expect({ status: response.status, data: await response.json() }).toMatchObject({
-        status: 200, data: { provider_reference: 'ORDERENDPOINT12345', amount: 10, currency: 'USD', status: 'requires_action' },
+        status: 200, data: { provider_reference: reference, amount: 10, currency: 'USD', status: 'requires_action' },
       });
     }
   });
@@ -118,13 +123,12 @@ test('退款 Worker 验证 service token；隔离错误 ID，正常 Refund GET �
       refunds.get(data.provider_reference)!.orderId = order.id;
     }
     const results: Array<{ refund_request_id: string; status: string; outcome: string }> = [];
-    // Other test files may have pending fixtures. Claims lease them out of the way;
-    // do not replace the real candidates RPC or mutate their rows to force ordering.
-    for (let i = 0; i < 10 && ![...refunds.values()].every(row => results.some(result => result.refund_request_id === row.localId)); i++) {
+    await withRefundPolling(database, [...refunds.values()].map(row => row.localId), async () => {
       const response = await handlePayPalReconcileRefunds(paymentRequest({ max_events: 20 }, SERVICE_KEY));
       expect(response.status).toBe(200);
       results.push(...(await response.json()).results);
-    }
+      expect(results).toHaveLength(2);
+    });
     for (const row of refunds.values()) {
       expect(results).toContainEqual(expect.objectContaining({
         refund_request_id: row.localId, status: row.wrong ? 'retry_required' : 'processed',

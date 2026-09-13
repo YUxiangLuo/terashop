@@ -1,5 +1,7 @@
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { api, rpc, signup, variantBySku, stockOf, TEST_ADDRESS, installTestTax, type TestUser } from './helpers';
+import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
+import { Cleanup } from './support/cleanup';
+import { promotionFixture } from './support/promotions';
+import { api, rpc, signup, variantBySku, shippingByName, stockOf, TEST_ADDRESS, installTestTax, checked, type TestUser } from './helpers';
 
 // seed 促销：
 //   WELCOME10  输码 满50打9折（独占）
@@ -27,14 +29,9 @@ interface PriceResult {
   total: number;
 }
 
-async function createPromo(body: Record<string, unknown>): Promise<string> {
-  const { data } = await api('/rest/v1/promotions?select=id', { service: true, method: 'POST', body });
-  return (data as { id: string }[])[0].id;
-}
-
-async function deletePromo(id: string) {
-  await api(`/rest/v1/promotions?id=eq.${id}`, { service: true, method: 'DELETE' });
-}
+const resources = new Cleanup();
+afterEach(() => resources.run());
+const createPromo = (body: Record<string, unknown>) => promotionFixture(resources, body);
 
 async function promoUsedCount(name: string): Promise<number> {
   const { data } = await api(
@@ -59,14 +56,15 @@ describe('预览 price_checkout', () => {
   test('匿名可预览；只读——不建单、不扣库存、不占促销用量', async () => {
     const stockBefore = await stockOf('CABLE-1M');
     const usedBefore = await promoUsedCount('数据线买一送一');
+    const beforeOrders = await checked(api('/rest/v1/orders?select=id&order=id', { token: user.token }));
 
     const { data } = (await preview([{ variant_id: cableId, quantity: 4 }])) as { data: PriceResult };
     expect(Number(data.discount_total)).toBeCloseTo(9.8);
 
     expect(await stockOf('CABLE-1M')).toBe(stockBefore);
     expect(await promoUsedCount('数据线买一送一')).toBe(usedBefore);
-    const { data: orders } = await api('/rest/v1/orders?select=id', { token: user.token });
-    expect(orders).toEqual([]);
+    const { data: orders } = await api('/rest/v1/orders?select=id&order=id', { token: user.token });
+    expect(orders).toEqual(beforeOrders);
   });
 
   test('买一送一阶梯：1件无优惠 / 3件免1 / 4件免2', async () => {
@@ -118,8 +116,6 @@ describe('预览 price_checkout', () => {
     // 数据线 qty=1 不触发 BOGO；数码半价命中
     expect(p.promotions.map((x) => x.name)).toEqual(['数码半价']);
     expect(Number(p.discount_total)).toBeCloseTo(2.45);
-
-    await deletePromo(pid);
   });
 
   test('自动满减：按原始小计判断门槛', async () => {
@@ -133,8 +129,6 @@ describe('预览 price_checkout', () => {
     const over = (await preview([{ variant_id: kbId, quantity: 3 }])).data as PriceResult; // 267
     expect(over.promotions.map((x) => x.name)).toEqual(['满200减20']);
     expect(Number(over.discount_total)).toBeCloseTo(20);
-
-    await deletePromo(pid);
   });
 
   test('独占规则：先算的独占促销阻止后续促销', async () => {
@@ -146,16 +140,16 @@ describe('预览 price_checkout', () => {
   });
 
   test('独占规则：低优先级输码促销被自动独占促销压制', async () => {
-    const pid = await createPromo({
-      name: '迟到的7折码', code: 'LATE30', type: 'order_percentage',
+    const code = `LATE-${crypto.randomUUID()}`;
+    await createPromo({
+      name: '迟到的7折码', code, type: 'order_percentage',
       params: { percent: 30 }, priority: 300, stackable: false,
     });
     // 数据线×4：BOGO（priority 100，独占）先生效 → LATE30 被跳过且不报错
-    const { data } = await preview([{ variant_id: cableId, quantity: 4 }], { discount_code: 'LATE30' }, user.token);
+    const { data } = await preview([{ variant_id: cableId, quantity: 4 }], { discount_code: code }, user.token);
     const p = data as PriceResult;
     expect(p.promotions.map((x) => x.name)).toEqual(['数据线买一送一']);
     expect(Number(p.discount_total)).toBeCloseTo(9.8);
-    await deletePromo(pid);
   });
 
   test('可叠加促销按顺序累计：范围折后再算整单折', async () => {
@@ -180,8 +174,7 @@ describe('预览 price_checkout', () => {
     expect(p.promotions.map((x) => x.name)).toEqual(['杯子9折', '全场95折']);
     expect(Number(p.discount_total)).toBeCloseTo(1.44);
 
-    await deletePromo(a);
-    await deletePromo(b);
+
   });
 
   test('无效码在预览中就报错；参数校验兜底', async () => {
@@ -226,14 +219,12 @@ describe('预览 price_checkout', () => {
     expect(Number(cableLine.discount_total)).toBeCloseTo(4.9);
     const kbLine = p.lines.find((l) => l.sku === 'KB87-RED')!;
     expect(Number(kbLine.discount_total)).toBeCloseTo(0);
-
-    await deletePromo(pid);
   });
 });
 
 describe('下单落账', () => {
   test('create_order 与预览价格一致，促销落账到 order_promotions 与行级分摊', async () => {
-    // CABLE 被 orders.test.ts 消耗，落账测试用库存充足的马克杯（满3件7折）
+    // Seed-backed pricing smoke test; state is restored within this case.
     const usedBefore = await promoUsedCount('马克杯满3件7折');
 
     const previewRes = (await preview(
@@ -288,6 +279,8 @@ describe('下单落账', () => {
       { items, address: TEST_ADDRESS, discount_code: 'SAVE20' },
       user.token
     );
+    const id = (order as { id: string }).id;
+    resources.defer(() => checked(rpc('cancel_order', { order_id: id }, user.token)));
     expect(Number((order as Record<string, unknown>).discount_total)).toBeCloseTo(20);
 
     // 再次使用被拒
@@ -297,5 +290,162 @@ describe('下单落账', () => {
       user.token
     );
     expect((again.data as { message: string }).message).toBe('discount code already used');
+  });
+});
+
+// Retained from the original review; grouped by business domain.
+describe('修复：促销引擎边界与并发', () => {
+  let teeId: string, kbRedId: string, kbBrownId: string;
+  beforeAll(async () => {
+    teeId = await variantBySku('TEE-BLK-S');
+    kbRedId = await variantBySku('KB87-RED');
+    kbBrownId = await variantBySku('KB87-BROWN');
+  });
+  async function promoUsedCount(code: string): Promise<number> {
+    const [row] = await checked<Array<{ used_count: number }>>(api(`/rest/v1/promotions?code=eq.${code}&select=used_count`, { service: true }));
+    return row.used_count;
+  }
+  test('行级折扣钳制：60%+60% 叠加不超过行金额，税额不为负', async () => {
+    const a = await createPromo({ name: '钳制A', type: 'item_percentage', params: { percent: 60 }, priority: 10, stackable: true });
+    const b = await createPromo({ name: '钳制B', type: 'item_percentage', params: { percent: 60 }, priority: 11, stackable: true });
+    const { data: prod } = await api('/rest/v1/products?slug=eq.ceramic-mug-350&select=id');
+    for (const pid of [a, b]) {
+      await api('/rest/v1/promotion_targets', {
+        service: true, method: 'POST',
+        body: { promotion_id: pid, product_id: (prod as { id: string }[])[0].id },
+      });
+    }
+
+    const { data } = await rpc('price_checkout', {
+      items: [{ variant_id: mugId, quantity: 1 }], address: { country: 'US' },
+    });
+    const p = data as {
+      lines: { discount_total: number; line_total: number }[];
+      discount_total: number; tax_total: number; total: number;
+      promotions: { name: string; amount: number }[];
+    };
+    expect(Number(p.lines[0].discount_total)).toBeCloseTo(9.9);   // 钳制到行金额
+    expect(Number(p.lines[0].line_total)).toBe(0);
+    expect(Number(p.tax_total)).toBe(0);                            // 不再出现负税
+    expect(Number(p.total)).toBe(0);
+    // 第二个促销落账金额被修正为实际分摊（5.94 → 3.96）
+    const amounts = p.promotions.map((x) => Number(x.amount)).sort();
+    expect(amounts).toEqual([3.96, 5.94]);
+
+
+  });
+
+  test('BOGO 钳制：行已被其他促销折近满时，赠品折算不击穿行金额', async () => {
+    const pid = await createPromo({
+      name: '数据线8折', type: 'item_percentage', params: { percent: 80 }, priority: 50, stackable: true,
+    });
+    const { data: prod } = await api('/rest/v1/products?slug=eq.usb-c-cable-1m&select=id');
+    await api('/rest/v1/promotion_targets', {
+      service: true, method: 'POST',
+      body: { promotion_id: pid, product_id: (prod as { id: string }[])[0].id },
+    });
+
+    // 数据线×2：8折后行余 1.96，BOGO 免 1 件需 4.90 → 免不起，不击穿
+    const { data } = await rpc('price_checkout', {
+      items: [{ variant_id: cableId, quantity: 2 }], address: { country: 'US' },
+    });
+    const p = data as {
+      lines: { discount_total: number; line_total: number }[];
+      promotions: { name: string }[];
+    };
+    expect(Number(p.lines[0].discount_total)).toBeCloseTo(7.84);
+    expect(Number(p.lines[0].line_total)).toBeCloseTo(1.96);
+    expect(p.promotions.map((x) => x.name)).toEqual(['数据线8折']);
+  });
+
+  test('buy_x_get_y 的 get_percent 超界被拒', async () => {
+    const { data } = await api('/rest/v1/promotions', {
+      service: true, method: 'POST',
+      body: { name: 'bad-bogo', type: 'buy_x_get_y', params: { buy: 1, get: 1, get_percent: 150 } },
+    });
+    expect((data as { message: string }).message).toContain('get_percent');
+  });
+
+  test('促销码统一大写归一化：小写创建的码可用任意大小写命中', async () => {
+    const code = `mixcase-${crypto.randomUUID()}`;
+    const pid = await createPromo({
+      name: '大小写测试', code, type: 'order_percentage', params: { percent: 25 },
+    });
+    const { data: row } = await api(`/rest/v1/promotions?id=eq.${pid}&select=code`, { service: true });
+    expect((row as { code: string }[])[0].code).toBe(code.toUpperCase());
+
+    const { data } = await rpc('price_checkout', {
+      items: [{ variant_id: mugId, quantity: 1 }], address: { country: 'US' }, discount_code: code.toUpperCase(),
+    });
+    expect(Number((data as { discount_total: number }).discount_total)).toBeCloseTo(2.48);
+  });
+
+  test('free_shipping(stackable=false) 是完整独占：阻止后续独占促销', async () => {
+    const fs = await createPromo({ name: '独占免邮', type: 'free_shipping', params: {}, priority: 1, stackable: false });
+    const ship = await shippingByName('Standard shipping');
+
+    const { data } = await rpc('price_checkout', {
+      items: [{ variant_id: teeId, quantity: 1 }], address: { country: 'US' }, shipping_method_id: ship,
+    });
+    const p = data as {
+      promotions: { name: string }[]; discount_total: number; shipping_total: number;
+    };
+    // 服饰8折（同为独占）被免邮阻断
+    expect(p.promotions.map((x) => x.name)).toEqual(['独占免邮']);
+    expect(Number(p.discount_total)).toBe(0);
+    expect(Number(p.shipping_total)).toBe(0);
+
+  });
+
+  test('free_shipping 反向：先算的独占促销也会阻断免邮', async () => {
+    const fs = await createPromo({ name: '迟到的免邮', type: 'free_shipping', params: {}, priority: 200, stackable: false });
+    const ship = await shippingByName('Standard shipping');
+
+    const { data } = await rpc('price_checkout', {
+      items: [{ variant_id: teeId, quantity: 1 }], address: { country: 'US' }, shipping_method_id: ship,
+    });
+    const p = data as {
+      promotions: { name: string }[]; discount_total: number; shipping_total: number;
+    };
+    // 服饰8折（priority 100）先生效且独占 → 免邮被跳过，运费照收
+    expect(p.promotions.map((x) => x.name)).toEqual(['服饰分类8折']);
+    expect(Number(p.discount_total)).toBeCloseTo(3.98);
+    expect(Number(p.shipping_total)).toBeCloseTo(8);
+
+  });
+
+  test('并发抢 usage_limit=1 的码：恰好一人成功', async () => {
+    const code = `RACE-${crypto.randomUUID()}`.toUpperCase();
+    await createPromo({
+      name: '并发抢码', code, type: 'order_percentage', params: { percent: 10 }, usage_limit: 1,
+    });
+    const u1 = await signup();
+    const u2 = await signup();
+    // 关键：两人买【不同商品】，变体行锁不构成串行，考验的是促销行锁
+    const [r1, r2] = await Promise.all([
+      rpc('create_order', { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code }, u1.token),
+      rpc('create_order', { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code }, u2.token),
+    ]);
+    const ok = [r1, r2].filter((r) => r.status < 300);
+    const fail = [r1, r2].filter((r) => r.status >= 400);
+    expect(ok.length).toBe(1);
+    expect(fail.length).toBe(1);
+    expect((fail[0].data as { message: string }).message).toContain('invalid or expired');
+    expect(await promoUsedCount(code)).toBe(1);
+    const winner = r1.status === 200 ? u1 : u2;
+    resources.defer(() => checked(rpc('cancel_order', { order_id: (ok[0].data as { id: string }).id }, winner.token)));
+  });
+
+  test('同用户并发用同码（每客限1）：恰好一单成功', async () => {
+    const u = await signup();
+    const [r1, r2] = await Promise.all([
+      rpc('create_order', { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10' }, u.token),
+      rpc('create_order', { items: [{ variant_id: kbBrownId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'WELCOME10' }, u.token),
+    ]);
+    const ok = [r1, r2].filter((r) => r.status < 300);
+    const fail = [r1, r2].filter((r) => r.status >= 400);
+    expect(ok.length).toBe(1);
+    expect((fail[0].data as { message: string }).message).toBe('discount code already used');
+    resources.defer(() => checked(rpc('cancel_order', { order_id: (ok[0].data as { id: string }).id }, u.token)));
   });
 });

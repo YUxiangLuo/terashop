@@ -1,7 +1,9 @@
-import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from 'bun:test';
+import { Cleanup } from './support/cleanup';
+import { promotionFixture } from './support/promotions';
 import {
   api, rpc, signup, variantBySku, shippingByName, stockOf,
-  TEST_ADDRESS, installTestTax, type TestUser,
+  TEST_ADDRESS, installTestTax, checked, type TestUser,
 } from './helpers';
 
 // seed 基准：CABLE-1M 5 件 / KB87-RED 20 件 / MUG-350 200 件
@@ -18,20 +20,20 @@ let removeTax: (() => Promise<void>) | undefined;
 afterAll(async () => { await removeTax?.(); });
 beforeAll(async () => {
   removeTax = await installTestTax();
-  buyer = await signup();
-  stranger = await signup();
   cableId = await variantBySku('CABLE-1M');
   kbRedId = await variantBySku('KB87-RED');
   mugId = await variantBySku('MUG-350');
 });
 
-// Keep per-test unpaid fixtures from exhausting the shared customer's checkout quota.
-afterEach(async () => {
-  const { data } = await api('/rest/v1/orders?status=eq.open&financial_status=eq.pending&select=id', { token: buyer.token });
-  for (const order of data as Array<{ id: string }>) {
-    expect((await rpc('cancel_order', { order_id: order.id }, buyer.token)).status).toBe(200);
-  }
+const resources = new Cleanup();
+beforeEach(async () => {
+  [buyer, stranger] = await Promise.all([signup(), signup()]);
+  for (const owner of [buyer, stranger]) resources.defer(async () => {
+    const rows = await checked<Array<{ id: string }>>(api('/rest/v1/orders?status=eq.open&financial_status=eq.pending&select=id', { token: owner.token }));
+    for (const order of rows) await checked(rpc('cancel_order', { order_id: order.id }, owner.token));
+  });
 });
+afterEach(() => resources.run());
 
 describe('用户与地址', () => {
   test('注册自动创建 profile（含 email）', async () => {
@@ -66,6 +68,7 @@ describe('用户与地址', () => {
   });
 
   test('同一客户只允许一个默认地址', async () => {
+    await checked(api('/rest/v1/addresses', { token: buyer.token, method: 'POST', body: { ...TEST_ADDRESS, is_default: true } }));
     await api('/rest/v1/addresses', {
       token: buyer.token,
       method: 'POST',
@@ -79,6 +82,7 @@ describe('用户与地址', () => {
   });
 
   test('买家读不到别人的地址', async () => {
+    await checked(api('/rest/v1/addresses', { token: buyer.token, method: 'POST', body: TEST_ADDRESS }));
     const { data } = await api('/rest/v1/addresses?select=id', { token: stranger.token });
     expect(data).toEqual([]);
   });
@@ -265,14 +269,11 @@ describe('下单：金额计算', () => {
 
 describe('下单：折扣码', () => {
   test('低于门槛', async () => {
-    await api('/rest/v1/promotions', {
-      service: true, method: 'POST',
-      body: { name: '门槛测试码', code: 'MIN100X', type: 'order_percentage',
-              params: { percent: 10, threshold: 100 } },
-    });
+    const code = `MIN-${crypto.randomUUID()}`;
+    await promotionFixture(resources, { name: '门槛测试码', code, type: 'order_percentage', params: { percent: 10, threshold: 100 } });
     const { data } = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'MIN100X' },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
       buyer.token
     );
     expect((data as { message: string }).message).toContain('minimum subtotal');
@@ -299,14 +300,11 @@ describe('下单：折扣码', () => {
     );
     expect((fake.data as { message: string }).message).toContain('invalid or expired');
 
-    await api('/rest/v1/promotions', {
-      service: true, method: 'POST',
-      body: { name: '过期码', code: 'EXPIRED', type: 'order_percentage',
-              params: { percent: 50 }, ends_at: '2020-01-01T00:00:00Z' },
-    });
+    const code = `EXPIRED-${crypto.randomUUID()}`;
+    await promotionFixture(resources, { name: '过期码', code, type: 'order_percentage', params: { percent: 50 }, ends_at: '2020-01-01T00:00:00Z' });
     const expired = await rpc(
       'create_order',
-      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'EXPIRED' },
+      { items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
       buyer.token
     );
     expect((expired.data as { message: string }).message).toContain('invalid or expired');
@@ -323,15 +321,13 @@ describe('下单：折扣码', () => {
   });
 
   test('取消订单释放折扣：used_count 回落且可再次使用', async () => {
-    await api('/rest/v1/promotions', {
-      service: true, method: 'POST',
-      body: { name: '释放测试', code: 'REL50', type: 'order_fixed', params: { amount: 5 } },
-    });
+    const code = `REL-${crypto.randomUUID()}`.toUpperCase();
+    await promotionFixture(resources, { name: '释放测试', code, type: 'order_fixed', params: { amount: 5 } });
     const kbBefore = await stockOf('KB87-RED');
 
     const { data: o } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'REL50' },
+      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
       stranger.token
     );
     expect(Number((o as Record<string, unknown>).discount_total)).toBeCloseTo(5);
@@ -344,7 +340,7 @@ describe('下单：折扣码', () => {
     expect((cancelled as Record<string, unknown>).status).toBe('cancelled');
 
     // used_count 回落 + 库存回补（含流水）
-    const { data: d } = await api('/rest/v1/promotions?code=eq.REL50&select=used_count', { service: true });
+    const { data: d } = await api(`/rest/v1/promotions?code=eq.${code}&select=used_count`, { service: true });
     expect((d as { used_count: number }[])[0].used_count).toBe(0);
     expect(await stockOf('KB87-RED')).toBe(kbBefore);
 
@@ -357,7 +353,7 @@ describe('下单：折扣码', () => {
     // 再次使用成功
     const { data: o2 } = await rpc(
       'create_order',
-      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: 'REL50' },
+      { items: [{ variant_id: kbRedId, quantity: 1 }], address: TEST_ADDRESS, discount_code: code },
       stranger.token
     );
     expect((o2 as Record<string, unknown>).status).toBe('open');
@@ -441,8 +437,10 @@ describe('RLS 权限', () => {
   });
 
   test('买家读不到别人的订单与明细', async () => {
-    const { data: mine } = await api('/rest/v1/orders?select=id&limit=1', { token: buyer.token });
-    const otherId = (mine as { id: string }[])[0].id;
+    const mine = await checked<{ id: string }>(rpc('create_order', {
+      items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
+    }, buyer.token));
+    const otherId = mine.id;
     const asStranger = await api(`/rest/v1/orders?id=eq.${otherId}&select=id`, { token: stranger.token });
     expect(asStranger.data).toEqual([]);
     const items = await api(`/rest/v1/order_items?order_id=eq.${otherId}&select=id`, { token: stranger.token });

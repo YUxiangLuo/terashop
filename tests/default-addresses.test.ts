@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { api, rpc, signup, makeAdmin, TEST_ADDRESS, type TestUser } from './helpers';
-import { checked } from './payment-fixtures';
+import { api, rpc, signup, makeAdmin, checked, TEST_ADDRESS, type TestUser } from './helpers';
 import { heldTransactionRace, testDatabase } from './database-concurrency';
 
 const database = testDatabase();

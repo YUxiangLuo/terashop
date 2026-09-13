@@ -1,5 +1,24 @@
-import { api, rpc, TEST_ADDRESS, type TestUser } from './helpers';
+import { api, rpc, command, checked, TEST_ADDRESS, type TestUser } from './helpers';
+import { stockedProduct } from './support/catalog';
+export { checked } from './support/http';
 import { sha256Hex } from '../supabase/functions/_shared/provider-events.ts';
+import type { SQL } from 'bun';
+import { withRollback } from '../scripts/lib/transactions';
+
+// Exercise the real SKIP LOCKED poller without consuming another suite's queue
+// or assuming our request is in its first page. Locks, not row edits or mocks.
+// Only these isolating locks roll back; owned HTTP/RPC effects stay committed.
+export function withRefundPolling<T>(database: SQL, ids: string[], run: () => Promise<T>): Promise<T> {
+  if (!ids.length) throw new Error('Refund polling requires owned fixture IDs');
+  return withRollback(database, async tx => {
+    await tx`set local statement_timeout='10s'`;
+    await tx`select id from commerce.refund_requests
+      where provider='paypal' and id not in (
+        select jsonb_array_elements_text(${JSON.stringify(ids)}::text::jsonb)::uuid
+      ) order by id for update`;
+    return run();
+  });
+}
 
 export interface PaymentFixture {
   productId: string;
@@ -25,31 +44,7 @@ export interface FixtureIntent {
   provider_reference: string;
 }
 
-export async function checked<T>(response: Promise<{ status: number; data: unknown }>): Promise<T> {
-  const result = await response;
-  if (result.status >= 300) throw new Error(JSON.stringify(result));
-  return result.data as T;
-}
-
-export async function paymentFixture(admin: TestUser): Promise<PaymentFixture> {
-  const suffix = crypto.randomUUID();
-  const [product] = await checked<Array<{ id: string }>>(api('/rest/v1/products?select=id', {
-    service: true, method: 'POST',
-    body: { slug: `workflow-${suffix}`, name: 'Payment workflow fixture', status: 'draft' },
-  }));
-  const sku = `WORKFLOW-${suffix}`;
-  const [variant] = await checked<Array<{ id: string }>>(api('/rest/v1/product_variants?select=id', {
-    service: true, method: 'POST',
-    body: { product_id: product.id, sku, price: 10, track_inventory: true },
-  }));
-  await checked(api(`/rest/v1/products?id=eq.${product.id}`, {
-    service: true, method: 'PATCH', body: { status: 'active' },
-  }));
-  await checked(rpc('adjust_inventory', {
-    variant_id: variant.id, delta: 100, reason: 'restock', note: 'workflow tests',
-  }, admin.token));
-  return { productId: product.id, variantId: variant.id, sku };
-}
+export const paymentFixture = (admin: TestUser): Promise<PaymentFixture> => stockedProduct(admin);
 
 export async function fixtureOrder(
   fixture: PaymentFixture,
@@ -61,14 +56,14 @@ export async function fixtureOrder(
   const input = { items: [{ variant_id: fixture.variantId, quantity }], address: TEST_ADDRESS, ...options };
   let quoteId: string | null = null;
   if (quoted) {
-    const quote = await checked<{ id: string }>(rpc('create_checkout_quote', {
+    const quote = await checked<{ id: string }>(command('create_checkout_quote', {
       ...input, idempotency_key: crypto.randomUUID(),
     }, buyer.token));
     quoteId = quote.id;
   }
   const order = await checked<{ id: string; total: number; currency: string }>(quoted
-    ? rpc('create_order_from_quote', { quote_id: quoteId }, buyer.token)
-    : rpc('create_order', input, buyer.token));
+    ? command('create_order_from_quote', { quote_id: quoteId! }, buyer.token)
+    : command('create_order', input, buyer.token));
   const [line] = await checked<Array<{ id: string }>>(api(
     `/rest/v1/order_items?order_id=eq.${order.id}&select=id`, { token: buyer.token },
   ));
@@ -78,11 +73,11 @@ export async function fixtureOrder(
 export async function fixtureIntent(
   order: FixtureOrder, buyer: TestUser, provider: 'paypal' = 'paypal',
 ): Promise<FixtureIntent> {
-  const intent = await checked<FixtureIntent>(rpc('create_payment_intent_for_customer', {
+  const intent = await checked<FixtureIntent>(command('create_payment_intent_for_customer', {
     order_id: order.id, actor_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
   }, undefined, true));
   const reference = `ORDER${crypto.randomUUID().replaceAll('-', '')}`;
-  return checked<FixtureIntent>(rpc('bind_payment_intent_provider', {
+  return checked<FixtureIntent>(command('bind_payment_intent_provider', {
     payment_intent_id: intent.id, provider_reference: reference,
     provider_status: 'requires_action', amount: intent.amount, currency: intent.currency,
   }, undefined, true));

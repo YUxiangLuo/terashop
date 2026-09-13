@@ -8,7 +8,21 @@ permissions:
   contents: read
 
 jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.0
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run test:unit
+      - run: bun run docs:check
+
   database:
+    needs: checks
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -18,10 +32,9 @@ jobs:
           bun-version: 1.4.0
       - run: bun install --frozen-lockfile
       - run: bunx supabase start
-      - run: bun run test
+      - run: bun run test --integration
       - run: bun run db:lint
       - run: bun run types:check
-      - run: bun run typecheck
 
   secret-scan:
     runs-on: ubuntu-24.04

@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from 'bun:test';
-import { withRollback } from '../scripts/db-lint';
+import { withRollback } from '../scripts/lib/transactions';
 import { testDatabase } from './database-concurrency';
 
 const database = testDatabase();

@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import type { TransactionSQL } from 'bun';
-import { withRollback } from '../scripts/db-lint';
+import { withRollback } from '../scripts/lib/transactions';
 import { testDatabase } from './database-concurrency';
 import { signup, TEST_ADDRESS, type TestUser } from './helpers';
 

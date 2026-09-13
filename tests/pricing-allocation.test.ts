@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { api, rpc, signup, makeAdmin, TEST_ADDRESS, type TestUser } from './helpers';
-import { checked } from './payment-fixtures';
+import { api, rpc, signup, makeAdmin, checked, TEST_ADDRESS, type TestUser } from './helpers';
 import { normalizeCheckoutAmount } from '../supabase/functions/_shared/paypal';
 
 interface Line { variant_id: string; quantity: number; unit_price: number; discount_total: number; line_total: number }

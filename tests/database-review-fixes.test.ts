@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, fixtureOrder, fixtureIntent, paymentFixture, settleIntent, type PaymentFixture } from './payment-fixtures';
 import { testDatabase, heldTransactionRace } from './database-concurrency';
-import { withRollback } from '../scripts/db-lint';
+import { withRollback } from '../scripts/lib/transactions';
 import { withPaymentProviderMock, paymentRequest } from './payment-handler-harness';
 import { handlePayPalCreateRefund } from '../supabase/functions/paypal-create-refund/handler';
 import { sha256Hex } from '../supabase/functions/_shared/provider-events';

@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { api, rpc, signup, variantBySku, shippingByName, TEST_ADDRESS, type TestUser } from './helpers';
-import { checked } from './payment-fixtures';
+import { api, rpc, signup, variantBySku, shippingByName, checked, TEST_ADDRESS, type TestUser } from './helpers';
 
 let buyer: TestUser;
 let variantId: string;
@@ -10,7 +9,7 @@ beforeAll(async () => {
   variantId = await variantBySku('MUG-350');
 });
 afterAll(async () => {
-  for (const id of orders) await rpc('cancel_order', { order_id: id }, buyer.token);
+  for (const id of orders) await checked(rpc('cancel_order', { order_id: id }, buyer.token));
 });
 const items = () => [{ variant_id: variantId, quantity: 1 }];
 

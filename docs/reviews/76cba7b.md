@@ -1,4 +1,6 @@
-# 数据库设计复审：实验与修复
+# 历史设计复审：基点 76cba7b
+
+归档版本：`cec8f0b`。以下计数、耗时和设计说明保留当时状态，不随测试整理滚动改写；当前合同见 [ADR](../architecture-decisions.md)，执行流程见 [数据库开发](../database.md)。测试链接固定到归档提交。
 
 基点：`76cba7b`。本轮修改未部署的初始化基线，必须重建可丢弃的本地数据库；不是生产数据升级脚本。
 
@@ -58,18 +60,10 @@ Customer / Order 自身仍不可删除，匿名化继续使用原客户锁及清
 
 ## 正式回归与运行
 
-- [`database-design-integrity.test.ts`](../tests/database-design-integrity.test.ts)：目标删除、买赠、显式 scope、类型、owner FK、不可伪造路由和订单号。
-- [`database-design-concurrency.test.ts`](../tests/database-design-concurrency.test.ts)：预占/下单/调整、部分履约、owner 删除的旧快照，以及 READ COMMITTED 对照。
-- [`order-validation.test.ts`](../tests/order-validation.test.ts)：真实函数调用计数、保存点/强制校验/COMMIT、队列权限与实际 SQL 执行计划。
+- [`database-design-integrity.test.ts`](https://github.com/vesein/tera-headless/blob/cec8f0b/tests/database-design-integrity.test.ts)：目标删除、买赠、显式 scope、类型、owner FK、不可伪造路由和订单号。
+- [`database-design-concurrency.test.ts`](https://github.com/vesein/tera-headless/blob/cec8f0b/tests/database-design-concurrency.test.ts)：预占/下单/调整、部分履约、owner 删除的旧快照，以及 READ COMMITTED 对照。
+- [`order-validation.test.ts`](https://github.com/vesein/tera-headless/blob/cec8f0b/tests/order-validation.test.ts)：真实函数调用计数、保存点/强制校验/COMMIT、队列权限与实际 SQL 执行计划。
 - 既有退货指纹测试增加 order-first 锁屏障，避免前一个失败事务尚在清理时，被 NOWAIT 瞬态错误抢先中断预期的指纹断言；保留原错误断言和独立的受控并发测试。
-
-```bash
-bun run test
-bun run db:lint
-bun run types:generate
-bun run types:check
-bun run typecheck
-```
 
 最终从基线重建后的全量结果：**413 pass / 0 fail，35 个测试文件**。本轮新增 28 项回归；连同既有退货回归的定向运行为 58 pass / 0 fail。SQL lint 检查 265 个函数/触发器上下文，0 issues，仍为原有 3 个精确审阅例外；类型自动生成后漂移检查、TypeScript 检查及 `git diff --check` 均通过。提交完成后校验队列剩余 0 行。
 

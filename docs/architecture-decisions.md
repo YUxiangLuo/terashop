@@ -189,4 +189,4 @@ Receipt 不立即增加可售量，未处置数量只是该退货的待验收余
 
 Metafield 类型使用封闭 CHECK，未知类型拒绝；任意 JSON 必须显式选择 `json`。输入仍为 owner_type / owner_id，五个生成的 owner_*_id 列只负责路由真实外键，不接受客户端赋值。商品、变体、分类删除由 FK 级联清理对应扩展值；Customer / Order 的不可删除保护与匿名化合同不变。父对象删除与旧快照写入的并发正确性由 PostgreSQL RI 保证，EXISTS 检查只提供可读错误。
 
-shop 继续沿用单店约定，Metaobject JSON 引用及 definition 发布规则不是本轮新设计。实验、性能计数及重建回归见 [数据库设计复审](database-design-fixes.md)。
+shop 继续沿用单店约定，Metaobject JSON 引用及 definition 发布规则不是本轮新设计。实验、性能计数及重建回归见 [归档设计复审](reviews/76cba7b.md)。

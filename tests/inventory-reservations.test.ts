@@ -1,15 +1,12 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, afterEach, describe, expect, test } from 'bun:test';
+import { stockedProduct, archiveProduct, type CatalogFixture } from './support/catalog';
+import { Cleanup } from './support/cleanup';
 import {
-  api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS,
+  api, rpc, signup, makeAdmin, stockOf, checked, TEST_ADDRESS,
   type TestUser,
 } from './helpers';
 
-interface StockFixture {
-  productId: string;
-  variantId: string;
-  sku: string;
-  slug: string;
-}
+type StockFixture = CatalogFixture;
 
 interface QuoteResult {
   id: string;
@@ -38,37 +35,8 @@ let cancelStock: StockFixture;
 let expiryStock: StockFixture;
 let pricingStock: StockFixture;
 let promoStock: StockFixture;
-const createdProductIds: string[] = [];
-
-async function createStockFixture(label: string): Promise<StockFixture> {
-  const suffix = crypto.randomUUID();
-  const slug = `reservation-${label}-${suffix}`;
-  const sku = `RES-${label}-${suffix}`;
-  const { status: productStatus, data: products } = await api('/rest/v1/products?select=id', {
-    service: true,
-    method: 'POST',
-    body: { slug, name: `Reservation ${label}`, status: 'draft' },
-  });
-  if (productStatus >= 400) throw new Error(JSON.stringify(products));
-  const productId = (products as { id: string }[])[0].id;
-  createdProductIds.push(productId);
-  const { status: variantStatus, data: variants } = await api('/rest/v1/product_variants?select=id', {
-    service: true,
-    method: 'POST',
-    body: { product_id: productId, sku, price: 10, track_inventory: true },
-  });
-  if (variantStatus >= 400) throw new Error(JSON.stringify(variants));
-  const variantId = (variants as { id: string }[])[0].id;
-  const published = await api(`/rest/v1/products?id=eq.${productId}`, {
-    service: true, method: 'PATCH', body: { status: 'active' },
-  });
-  if (published.status >= 400) throw new Error(JSON.stringify(published.data));
-  const stocked = await rpc('adjust_inventory', {
-    variant_id: variantId, delta: 5, reason: 'restock', note: 'reservation test setup',
-  }, admin.token);
-  if (stocked.status >= 400) throw new Error(JSON.stringify(stocked.data));
-  return { productId, variantId, sku, slug };
-}
+const cleanup = new Cleanup();
+const createStockFixture = (label: string) => stockedProduct(admin, { label, onHand: 5, cleanup });
 
 async function availability(variantId: string): Promise<Availability> {
   const { status, data } = await rpc('get_inventory_availability', {
@@ -91,13 +59,7 @@ const createQuote = (
   ...extra,
 }, user.token);
 
-afterAll(async () => {
-  if (createdProductIds.length > 0) {
-    await api(`/rest/v1/products?id=in.(${createdProductIds.join(',')})`, {
-      service: true, method: 'PATCH', body: { status: 'archived' },
-    });
-  }
-});
+afterAll(() => cleanup.run());
 
 beforeAll(async () => {
   admin = await signup();
@@ -423,5 +385,121 @@ describe('过期释放与重新报价', () => {
     expect(await availability(fixture.variantId)).toMatchObject({
       on_hand: 5, reserved: 0, available: 5,
     });
+  });
+});
+
+// Retained from the original review; grouped by business domain.
+describe('修复：库存口径与回补仓', () => {
+  const resources = new Cleanup();
+  let mugId: string;
+  beforeAll(async () => { mugId = (await stockedProduct(admin, { label: 'locations', cleanup })).variantId; });
+  afterEach(() => resources.run());
+  test('in_stock 只看默认仓：非默认仓有货不算有货', async () => {
+    // 探针商品：无任何库存行
+    const slug = `stock-probe-${crypto.randomUUID()}`;
+    const { data: prod } = await api('/rest/v1/products?select=id', {
+      service: true, method: 'POST',
+      body: { slug, name: '库存探针', status: 'draft' },
+    });
+    const productId = (prod as { id: string }[])[0].id;
+    resources.defer(() => archiveProduct(productId));
+    const { data: variant } = await api('/rest/v1/product_variants?select=id', {
+      service: true, method: 'POST',
+      body: { product_id: productId, sku: `PROBE-${productId}`, price: 1 },
+    });
+    const probeVariant = (variant as { id: string }[])[0].id;
+    const published = await api(`/rest/v1/products?id=eq.${productId}`, {
+      service: true, method: 'PATCH', body: { status: 'active' },
+    });
+    expect(published.status).toBe(200);
+
+    const listing = async () => {
+      const { data } = await api(`/rest/v1/product_listing?slug=eq.${slug}&select=in_stock`);
+      return (data as { in_stock: boolean }[])[0].in_stock;
+    };
+    expect(await listing()).toBe(false);
+
+    // 非默认仓有货 → 仍 false（口径与下单扣减一致）
+    const { data: loc } = await api('/rest/v1/locations?select=id', {
+      service: true, method: 'POST', body: { code: `WH-PROBE-${crypto.randomUUID()}`, name: '探针仓' },
+    });
+    const locId = (loc as { id: string }[])[0].id;
+    resources.defer(() => checked(api(`/rest/v1/locations?id=eq.${locId}`, { service: true, method: 'PATCH', body: { is_active: false } })));
+    await api('/rest/v1/inventory_levels', {
+      service: true, method: 'POST', body: { variant_id: probeVariant, location_id: locId, on_hand: 10 },
+    });
+    expect(await listing()).toBe(false);
+
+    // 默认仓有货 → true
+    const { data: defLoc } = await api('/rest/v1/locations?is_default=eq.true&select=id', { service: true });
+    await api('/rest/v1/inventory_levels', {
+      service: true, method: 'POST',
+      body: { variant_id: probeVariant, location_id: (defLoc as { id: string }[])[0].id, on_hand: 1 },
+    });
+    expect(await listing()).toBe(true);
+
+    // Resources are retired in afterEach, even when an assertion fails.
+  });
+
+  test('取消订单回补到【原始扣减仓】而非当前默认仓', async () => {
+    const u = await signup();
+    const { data: locs } = await api('/rest/v1/locations?select=id,code,is_default', { service: true });
+    const whSh = (locs as { id: string; is_default: boolean }[]).find((l) => l.is_default)!;
+
+    // 建仓 B 并放马克杯库存 10
+    const { data: locB } = await api('/rest/v1/locations?select=id', {
+      service: true, method: 'POST', body: { code: `WH-B-${crypto.randomUUID()}`, name: '仓B' },
+    });
+    const locBId = (locB as { id: string }[])[0].id;
+    resources.defer(() => checked(api(`/rest/v1/locations?id=eq.${locBId}`, { service: true, method: 'PATCH', body: { is_active: false } })));
+    await api('/rest/v1/inventory_levels', {
+      service: true, method: 'POST', body: { variant_id: mugId, location_id: locBId, on_hand: 10 },
+    });
+
+    const levelAt = async (locId: string) => {
+      const { data } = await api(
+        `/rest/v1/inventory_levels?variant_id=eq.${mugId}&location_id=eq.${locId}&select=on_hand`,
+        { service: true });
+      return Number((data as { on_hand: number }[])[0].on_hand);
+    };
+    const setDefault = async (locId: string, on: boolean) => {
+      await checked(api(`/rest/v1/locations?id=eq.${locId}`, {
+        service: true, method: 'PATCH', body: { is_default: on },
+      }));
+    };
+
+    try {
+      // 切换默认仓到 B 后下单：从 B 扣减
+      await setDefault(whSh.id, false);
+      await setDefault(locBId, true);
+      const { data: o } = await rpc('create_order', {
+        items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
+      }, u.token);
+      expect(await levelAt(locBId)).toBe(8);
+
+      // 默认仓切回 WH-SH 后取消：库存必须回补到 B 而不是 WH-SH
+      await setDefault(locBId, false);
+      await setDefault(whSh.id, true);
+      await rpc('cancel_order', { order_id: (o as { id: string }).id }, u.token);
+      expect(await levelAt(locBId)).toBe(10);
+
+      const { data: moves } = await api(
+        `/rest/v1/inventory_movements?order_id=eq.${(o as { id: string }).id}&reason=eq.cancel&select=location_id`,
+        { service: true });
+      expect((moves as { location_id: string }[])[0].location_id).toBe(locBId);
+    } finally {
+      // 无论成败都恢复默认仓，保护后续测试文件
+      await setDefault(locBId, false);
+      await setDefault(whSh.id, true);
+    }
+
+    // The immutable movements reference B: retire it, do not attempt DELETE.
+  });
+
+  test('同一时刻只能有一个默认仓', async () => {
+    const { data } = await api('/rest/v1/locations', {
+      service: true, method: 'POST', body: { code: `WH-DUP-${crypto.randomUUID()}`, name: '重复默认仓', is_default: true },
+    });
+    expect((data as { code: string }).code).toBe('23505');  // unique_violation
   });
 });

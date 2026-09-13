@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, paymentFixture, fixtureOrder, fixtureIntent, settleIntent, type PaymentFixture } from './payment-fixtures';
-import { heldTransactionRace, testDatabase } from './database-concurrency';
+import { heldTransactionRace, staleAfterCommit, testDatabase } from './database-concurrency';
 
 interface Customer { id: string; auth_user_id: string | null; email: string | null; full_name: string; phone: string | null; anonymized_at: string | null }
 interface Cart { id: string; customer_id: string | null; version: number; status: string; address: object | null; note: string | null; expires_at: string; quote_id: string | null; guest_token?: string; lines: Array<{ id: string; variant_id: string; line_key: string; quantity: number; attributes: Record<string, string> }> }
@@ -263,20 +263,12 @@ test('受控同时编辑返回版本冲突，不静默覆盖；不同参数不�
 for (const action of ['edit', 'capacity']) test(`REPEATABLE READ 旧快照不能绕过 Cart ${action} 的版本/配额`, async () => {
   const owner = await signup(); const cart = await create(owner);
   if (action === 'capacity') for (let i = 0; i < 3; i++) await create(owner);
-  const ready = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-  const stale = database.begin(async tx => {
-    await tx`set transaction isolation level repeatable read`;
+  const result = await staleAfterCommit(database, async tx => {
     await tx`select set_config('request.jwt.claims', ${claims(owner)}, true)`;
-    await tx`select count(*) from commerce.carts`;
-    ready.resolve(); await release.promise;
     if (action === 'edit') await tx`select public.update_cart(${cart.id}::uuid, ${cart.version}::integer, ${JSON.stringify(items(3))}::text::jsonb)`;
     else await tx`select public.create_cart(${crypto.randomUUID()})`;
-  }).then(() => null, error => { ready.reject(error); return error; });
-  try {
-    await ready.promise;
-    if (action === 'edit') await checked(update(cart, owner, { items: items(2) })); else await create(owner);
-    release.resolve(); expect(await stale).toMatchObject({ errno: '40001' });
-  } finally { release.resolve(); await stale; }
+  }, () => action === 'edit' ? checked(update(cart, owner, { items: items(2) })) : create(owner));
+  expect(result.error).toMatchObject({ errno: '40001' });
 });
 
 for (const first of ['erase', 'edit']) test(`匿名化与 Cart 编辑交错，${first} 先执行都不能恢复已删除内容`, async () => {
@@ -352,3 +344,29 @@ test('Cart 表/凭据不向 API 角色开放，受信越界写入也由内容/�
   const [row] = await database`select bool_and(relrowsecurity) as rls from pg_class where oid in ('commerce.carts'::regclass,'commerce.cart_lines'::regclass,'public.customers'::regclass)`;
   expect(row.rls).toBe(true);
 });
+
+// Retained from the original review; grouped by business domain.
+test('anonymize_user：清 PII、删地址与 customer 域 metafield', async () => {
+    const u = await signup();
+    await checked(api('/rest/v1/addresses', { token: u.token, method: 'POST', body: TEST_ADDRESS }));
+    await checked(api('/rest/v1/metafields', {
+      token: admin.token, method: 'POST',
+      body: { owner_type: 'customer', owner_id: u.customerId, namespace: 'custom', key: 'vip', type: 'number', value: 1 },
+    }));
+
+    // 非 admin 拒绝
+    const deny = await rpc('anonymize_user', { p_user_id: u.userId }, u.token);
+    expect((deny.data as { message: string }).message).toBe('admin only');
+
+    const { data } = await rpc('anonymize_user', { p_user_id: u.userId }, admin.token);
+    expect(data).toMatchObject({ email: '' });
+    const customer = await api(`/rest/v1/customers?id=eq.${u.customerId}&select=email,full_name,phone,anonymized_at`, { service: true });
+    expect(customer.data).toEqual([{ email: null, full_name: '', phone: null, anonymized_at: expect.any(String) }]);
+
+    const { data: addrs } = await api(
+      `/rest/v1/addresses?customer_id=eq.${u.customerId}&select=id`, { service: true });
+    expect(addrs).toEqual([]);
+    const { data: mfs } = await api(
+      `/rest/v1/metafields?owner_type=eq.customer&owner_id=eq.${u.customerId}&select=id`, { service: true });
+    expect(mfs).toEqual([]);
+  });

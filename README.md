@@ -45,25 +45,21 @@ Cart 只保存可编辑购买意向，不锁价、不占库存；登录认领后
 
 - [API 速查](docs/api.md)：目录查询、结账流程、客户与管理命令。
 - [架构决策](docs/architecture-decisions.md)：金额、库存、权限、支付与退款不变量及演进边界。
-- [数据库开发](docs/database.md)：基线文件职责、修改和重建流程。
+- [数据库开发](docs/database.md)：基线文件职责、SQL 检查和历史审阅证据。
+- [测试指南](docs/testing.md)：运行/筛选/重跑、夹具清理与覆盖边界。
 - [支付与部署](supabase/functions/README.md)：渠道配置、Webhook、必需 Worker 和发布验证。
 - [.env.example](.env.example)：环境变量模板，不包含有效凭据。
 
 ## 开发检查
 
 ```bash
-bun run test              # 重置本地数据库后运行完整测试
-bun run db:lint           # public / private / commerce 函数与触发器检查
+bun run typecheck         # 无数据库的快速检查
+bun run test:unit         # 支付适配、共享逻辑与测试设施单测；不需要 Supabase
+bun run docs:check        # 本地 Markdown 文件链接检查
+bun run test              # 会清空本项目本地数据库，再执行完整测试
+bun run db:lint
 bun run types:check       # 数据库生成类型漂移检查
-bun run typecheck         # TypeScript 静态检查
-bun run types:generate    # 有意更新数据库类型时使用
 bun run stop
-```
-
-无数据库时可运行支付适配与共享逻辑的独立测试：
-
-```bash
-bun test tests/paypal-edge.test.ts tests/payment-shared.test.ts
 ```
 
 完整测试需要本地 Supabase；handler 回归使用真实 Auth/PostgreSQL，仅 mock 渠道 HTTP，并以事务屏障验证锁竞争。它们不能替代真实渠道 Sandbox 和部署后网关测试。

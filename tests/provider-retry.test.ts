@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf, type TestUser } from './helpers';
 import { checked, fixtureOrder, fixtureIntent, paymentFixture, settleIntent } from './payment-fixtures';
 import { testDatabase } from './database-concurrency';
-import { withRollback } from '../scripts/db-lint';
+import { withRollback } from '../scripts/lib/transactions';
 import { sha256Hex } from '../supabase/functions/_shared/provider-events';
 
 const database = testDatabase();

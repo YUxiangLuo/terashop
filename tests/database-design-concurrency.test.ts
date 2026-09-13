@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import type { TransactionSQL } from 'bun';
-import { testDatabase } from './database-concurrency';
+import { testDatabase, staleAfterCommit as runStale } from './database-concurrency';
 import { api, makeAdmin, rpc, signup, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, fixtureOrder, paymentFixture, type PaymentFixture } from './payment-fixtures';
 
@@ -17,19 +17,8 @@ async function actor(sql: TransactionSQL, user: TestUser) {
   await sql`select set_config('request.jwt.claims',${JSON.stringify({ sub: user.userId, role: 'authenticated' })},true)`;
 }
 
-// Establish an old snapshot, acknowledge another committed command, then resume.
-// The old command must fail, not merely wait and read the stale child collection.
-async function staleAfterCommit(run: (sql: TransactionSQL) => Promise<unknown>, commit: () => Promise<unknown>, isolation = 'repeatable read') {
-  const ready = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-  const stale = database.begin(async sql => {
-    await sql.unsafe(`set transaction isolation level ${isolation}`);
-    await sql`select count(*) from public.products`;
-    ready.resolve(); await release.promise;
-    return run(sql);
-  }).then(value => ({ value, error: null }), error => { ready.reject(error); return { value: null, error }; });
-  try { await ready.promise; await commit(); release.resolve(); return await stale; }
-  finally { release.resolve(); await stale; }
-}
+const staleAfterCommit = (run: (sql: TransactionSQL) => Promise<unknown>, commit: () => Promise<unknown>, isolation: 'repeatable read' | 'read committed' = 'repeatable read') =>
+  runStale(database, run, commit, isolation);
 
 for (const action of ['quote', 'order', 'adjust'] as const) test(`新 Quote 提交后，旧 RR 快照不能通过 ${action} 再消耗相同可用库存`, async () => {
   const f = await fixture(), first = await signup(), second = await signup();

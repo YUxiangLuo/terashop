@@ -76,4 +76,4 @@ PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard
 
 项目尚未部署，数据库改动通过修改基线并重建本地环境验证，见 [数据库开发](../../docs/database.md)。不维护旧 schema 或旧 handler 的升级兼容。
 首次发布时先初始化完整数据库，再部署匹配的函数与客户端；确认 Worker 已调度，完成真实渠道 Sandbox、JWT/验签和故障恢复演练。
-此后才固定已发布迁移并设计生产升级顺序。测试命令见 [项目 README](../../README.md)。
+此后才固定已发布迁移并设计生产升级顺序。测试命令与 mock 边界见 [测试指南](../../docs/testing.md)。

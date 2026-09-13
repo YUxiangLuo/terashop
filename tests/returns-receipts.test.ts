@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf as stockAt, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, paymentFixture, fixtureOrder, fixtureIntent, settleIntent, paymentEvent, type PaymentFixture, type FixtureOrder, type FixtureIntent } from './payment-fixtures';
-import { heldTransactionRace, testDatabase } from './database-concurrency';
+import { heldTransactionRace, staleAfterCommit, testDatabase } from './database-concurrency';
 
 interface Disposition { id: string; receipt_line_id: string; quantity: number; disposition: string; inventory_movement_id: number | null }
 interface Receipt { id: string; return_id: string; location_id: string; lines: Array<{ id: string; return_line_id: string; quantity: number; undisposed_quantity: number; dispositions: Disposition[] }> }
@@ -293,19 +293,15 @@ for (const action of ['authorize','receive','dispose']) test(`受控 ${action} �
 
 for (const action of ['authorize','receive','dispose']) test(`REPEATABLE READ 旧快照不能绕过 ${action} 已提交的数量占用`, async () => {
   const s = await shipped(1); const r = action==='authorize' ? undefined : await authorize(s); const receipt = action==='dispose' ? await receive(r!) : undefined;
-  const ready=Promise.withResolvers<void>(), release=Promise.withResolvers<void>();
-  const stale=database.begin(async tx => {
-    await tx`set transaction isolation level repeatable read`; await tx`select set_config('request.jwt.claims',${claims()},true)`;
-    await tx`select id from public.orders where id=${s.order.id}::uuid`; ready.resolve(); await release.promise;
+  const result = await staleAfterCommit(database, async tx => {
+    await tx`select set_config('request.jwt.claims',${claims()},true)`;
     if (action==='authorize') await tx`select public.create_return(${s.id}::uuid,${JSON.stringify(lineItems(s.order.itemId,1))}::text::jsonb,${crypto.randomUUID()})`;
     else if (action==='receive') await tx`select public.receive_return(${r!.id}::uuid,${location}::uuid,${JSON.stringify([{return_line_id:r!.lines[0].id,quantity:1}])}::text::jsonb,${crypto.randomUUID()})`;
     else await tx`insert into commerce.return_dispositions(receipt_line_id,receipt_id,order_id,quantity,disposition,idempotency_key,request_hash)
       values (${receipt!.lines[0].id}::uuid,${receipt!.id}::uuid,${s.order.id}::uuid,1,'restock',${crypto.randomUUID()},
         private.command_request_hash(jsonb_build_object('receipt_line_id',${receipt!.lines[0].id}::uuid,'quantity',1,'disposition','restock','note',null)))`;
-  }).then(()=>null,error=>{ready.reject(error);return error;});
-  try { await ready.promise; if(action==='authorize') await authorize(s); else if(action==='receive') await receive(r!); else await disposition(receipt!);
-    release.resolve(); expect(await stale).toMatchObject({errno:'40001'});
-  } finally {release.resolve();await stale;}
+  }, () => action === 'authorize' ? authorize(s) : action === 'receive' ? receive(r!) : disposition(receipt!));
+  expect(result.error).toMatchObject({ errno: '40001' });
 });
 
 test('处置与其他客户 Quote 共用确定的库存锁顺序，FK 锁兼容，不形成回库/报价死锁', async () => {
@@ -328,14 +324,12 @@ test('授权持订单锁时，撤销发货以 NOWAIT 失败，不形成子行→
 });
 
 test('撤销发货先提交时，旧 REPEATABLE READ 快照不能对已失效发货创建退货授权', async () => {
-  const s=await shipped(1); const ready=Promise.withResolvers<void>(), release=Promise.withResolvers<void>();
-  const stale=database.begin(async tx=>{
-    await tx`set transaction isolation level repeatable read`; await tx`select set_config('request.jwt.claims',${claims()},true)`;
-    await tx`select id from public.orders where id=${s.order.id}::uuid`; ready.resolve(); await release.promise;
+  const s = await shipped(1);
+  const result = await staleAfterCommit(database, async tx => {
+    await tx`select set_config('request.jwt.claims',${claims()},true)`;
     await tx`select public.create_return(${s.id}::uuid,${JSON.stringify(lineItems(s.order.itemId,1))}::text::jsonb,${crypto.randomUUID()})`;
-  }).then(()=>null,error=>{ready.reject(error);return error;});
-  try {await ready.promise;await checked(api(`/rest/v1/fulfillments?id=eq.${s.id}`,{service:true,method:'PATCH',body:{status:'cancelled'}}));release.resolve();expect(await stale).toMatchObject({errno:'40001'});}
-  finally {release.resolve();await stale;}
+  }, () => checked(api(`/rest/v1/fulfillments?id=eq.${s.id}`, { service: true, method: 'PATCH', body: { status: 'cancelled' } })));
+  expect(result.error).toMatchObject({ errno: '40001' });
 });
 
 test('事实不可修改/删除；完整指纹防止事后添行，空头/伪造库存流水/超量失败不留下部分事实', async () => {

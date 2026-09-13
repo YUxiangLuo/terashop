@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, fixtureIntent, paymentFixture, settleIntent } from './payment-fixtures';
-import { testDatabase } from './database-concurrency';
+import { testDatabase, waitForBlockedCommand } from './database-concurrency';
 
 const database = testDatabase();
 let admin: TestUser;
@@ -61,15 +61,7 @@ async function fixture() {
     const release = Promise.withResolvers<void>();
     const gateReady = Promise.withResolvers<number>();
     const refundReady = Promise.withResolvers<number>();
-    const waitBlockedBy = async (pid: number) => {
-      const deadline = Date.now() + 5000;
-      while (Date.now() < deadline) {
-        const [row] = await database`select exists(select 1 from pg_stat_activity where ${pid}::int=any(pg_blocking_pids(pid))) as blocked`;
-        if (row.blocked) return;
-        await Bun.sleep(5);
-      }
-      throw new Error('did not observe expected database lock barrier');
-    };
+    const waitBlockedBy = (pid: number) => waitForBlockedCommand(database, pid, 5000);
     try {
       // Test-only AFTER hook pauses the REAL refund after its first stock update.
       // No business function is replaced and no trigger/invariant is disabled.

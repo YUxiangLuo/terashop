@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, paymentFixture, fixtureIntent, settleIntent, paymentEvent, type PaymentFixture, type FixtureOrder } from './payment-fixtures';
-import { heldTransactionRace, testDatabase } from './database-concurrency';
+import { heldTransactionRace, staleAfterCommit, testDatabase } from './database-concurrency';
 import { paymentRequest, withPaymentProviderMock } from './payment-handler-harness';
 import { handlePayPalCreateRefund } from '../supabase/functions/paypal-create-refund/handler';
 
@@ -261,21 +261,18 @@ test('定价读取只对所有者/管理员/service 开放；支付意图或已�
 });
 
 for (const first of ['intent', 'pricing']) test(`${first} 提交后旧 REPEATABLE READ 快照不能交错创建意图/改定价明细`, async () => {
-  const order = await create(false); const ready = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-  const stale = database.begin(async tx => {
-    await tx`set transaction isolation level repeatable read`;
-    await tx`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`;
-    await tx`select total from public.orders where id=${order.id}::uuid`;
-    ready.resolve(); await release.promise;
-    if (first === 'intent') await tx`update commerce.order_discount_allocations set label='stale edit' where order_id=${order.id}::uuid`;
-    else await tx`select public.create_payment_intent_for_customer(${order.id}::uuid, ${buyer.userId}::uuid, 'paypal', ${crypto.randomUUID()})`;
-  }).then(() => null, error => { ready.reject(error); return error; });
+  const order = await create(false);
   try {
-    await ready.promise;
-    if (first === 'intent') await fixtureIntent(order, buyer);
-    else await database`update commerce.order_discount_allocations set label='committed edit' where order_id=${order.id}::uuid`;
-    release.resolve(); expect(await stale).toMatchObject({ errno: '40001' });
-  } finally { release.resolve(); await stale; await checked(rpc('cancel_order', { order_id: order.id }, buyer.token)); }
+    const result = await staleAfterCommit(database, async tx => {
+      await tx`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`;
+      if (first === 'intent') await tx`update commerce.order_discount_allocations set label='stale edit' where order_id=${order.id}::uuid`;
+      else await tx`select public.create_payment_intent_for_customer(${order.id}::uuid, ${buyer.userId}::uuid, 'paypal', ${crypto.randomUUID()})`;
+    }, async () => {
+      if (first === 'intent') await fixtureIntent(order, buyer);
+      else await database`update commerce.order_discount_allocations set label='committed edit' where order_id=${order.id}::uuid`;
+    });
+    expect(result.error).toMatchObject({ errno: '40001' });
+  } finally { await checked(rpc('cancel_order', { order_id: order.id }, buyer.token)); }
 });
 
 test('手工退款按商业行退净额和对应税；配送需显式选择，分次退税/净额严格守恒', async () => {
@@ -428,16 +425,10 @@ test('运费预留受控并发：竞争请求等待订单锁，不能超出已�
 });
 
 test('退款容量在 REPEATABLE READ 旧快照上也不能绕过新提交的预留', async () => {
-  const order = await paid(true); const ready = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-  const stale = database.begin(async tx => {
-    await tx`set transaction isolation level repeatable read`;
+  const order = await paid(true);
+  const result = await staleAfterCommit(database, async tx => {
     await tx`select set_config('request.jwt.claims', '{"role":"service_role"}', true)`;
-    await tx`select total from public.orders where id=${order.id}::uuid`;
-    ready.resolve(); await release.promise;
     await tx`select public.create_refund_request(${order.id}::uuid, ${admin.userId}::uuid, 'paypal', ${crypto.randomUUID()}, shipping_amount => 5)`;
-  }).then(() => null, error => { ready.reject(error); return error; });
-  try {
-    await ready.promise; await checked(requestRefund(order.id, { shipping_amount: 5 })); release.resolve();
-    expect(await stale).toMatchObject({ errno: '40001' });
-  } finally { release.resolve(); await stale; }
+  }, () => checked(requestRefund(order.id, { shipping_amount: 5 })));
+  expect(result.error).toMatchObject({ errno: '40001' });
 });

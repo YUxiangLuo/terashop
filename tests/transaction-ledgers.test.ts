@@ -1,6 +1,9 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { stockedProduct, type CatalogFixture } from './support/catalog';
+import { Cleanup } from './support/cleanup';
+import { fixtureOrder } from './payment-fixtures';
 import {
-  api, rpc, signup, makeAdmin, variantBySku, TEST_ADDRESS, installTestTax,
+  api, rpc, signup, makeAdmin, checked, TEST_ADDRESS, installTestTax,
   type TestUser,
 } from './helpers';
 
@@ -9,11 +12,8 @@ let buyer: TestUser;
 let stranger: TestUser;
 let mugId: string;
 
-let adjustmentOrderId: string;
-let paidOrderId: string;
-let paidOrderItemId: string;
-let paidPaymentId: string;
-let fulfillmentId: string;
+let product: CatalogFixture;
+const fixtures = new Cleanup();
 
 interface Ledger {
   order: {
@@ -72,22 +72,40 @@ async function ledger(orderId: string, token = buyer.token): Promise<Ledger> {
 }
 
 let removeTax: (() => Promise<void>) | undefined;
-afterAll(async () => { await removeTax?.(); });
+afterAll(async () => { try { await fixtures.run(); } finally { await removeTax?.(); } });
 beforeAll(async () => {
   removeTax = await installTestTax();
   admin = await signup();
-  buyer = await signup();
   stranger = await signup();
   await makeAdmin(admin.userId);
-  mugId = await variantBySku('MUG-350');
+  product = await stockedProduct(admin, { price: 9.9, cleanup: fixtures });
+  mugId = product.variantId;
 });
+beforeEach(async () => { buyer = await signup(); });
+const givenPendingOrder = () => fixtureOrder(product, buyer, 1, false);
+async function givenPaidOrder(fulfillment: 'none' | 'active' | 'cancelled' = 'none') {
+  const order = await fixtureOrder(product, buyer, 2, false);
+  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  const [payment] = await checked<Array<{ id: string }>>(api(`/rest/v1/payments?order_id=eq.${order.id}&select=id`, { service: true }));
+  let fulfillmentId: string | undefined;
+  if (fulfillment !== 'none') {
+    const result = await checked<{ id: string }>(rpc('create_fulfillment', {
+      order_id: order.id, items: [{ order_item_id: order.itemId, quantity: 1 }],
+    }, admin.token));
+    fulfillmentId = result.id;
+    if (fulfillment === 'cancelled') await checked(api(`/rest/v1/fulfillments?id=eq.${fulfillmentId}`, {
+      service: true, method: 'PATCH', body: { status: 'cancelled' },
+    }));
+  }
+  return { ...order, paymentId: payment.id, fulfillmentId };
+}
 
 describe('关系化订单账本', () => {
   test('订单金额自动双写 adjustment ledger，且只通过安全 DTO 暴露', async () => {
     const { data: created } = await rpc('create_order', {
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, buyer.token);
-    adjustmentOrderId = (created as { id: string }).id;
+    const adjustmentOrderId = (created as { id: string }).id;
 
     const value = await ledger(adjustmentOrderId);
     expect(value.balances.is_balanced).toBe(true);
@@ -138,6 +156,7 @@ describe('关系化订单账本', () => {
   });
 
   test('pending 订单重算税时追加差额，不改写已有 adjustment', async () => {
+    const { id: adjustmentOrderId } = await givenPendingOrder();
     await rpc('update_order_address', {
       order_id: adjustmentOrderId,
       address: { recipient_name: 'John', phone: '1', country: 'CA', line1: '1 Main St' },
@@ -152,6 +171,7 @@ describe('关系化订单账本', () => {
   });
 
   test('陌生人读不到订单账本', async () => {
+    const { id: adjustmentOrderId } = await givenPendingOrder();
     const { status, data } = await rpc('get_order_ledger', {
       order_id: adjustmentOrderId,
     }, stranger.token);
@@ -166,12 +186,7 @@ describe('支付交易与已支付快照', () => {
       items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
     }, buyer.token);
     const order = created as { id: string; total: number };
-    paidOrderId = order.id;
-
-    const { data: items } = await api(
-      `/rest/v1/order_items?order_id=eq.${paidOrderId}&select=id`, { token: buyer.token },
-    );
-    paidOrderItemId = (items as { id: string }[])[0].id;
+    const paidOrderId = order.id;
 
     await rpc('mark_order_paid', {
       order_id: paidOrderId, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
@@ -180,7 +195,7 @@ describe('支付交易与已支付快照', () => {
     const { data: payments } = await api(
       `/rest/v1/payments?order_id=eq.${paidOrderId}&select=id`, { service: true },
     );
-    paidPaymentId = (payments as { id: string }[])[0].id;
+    expect(payments).toHaveLength(1);
 
     const value = await ledger(paidOrderId);
     expect(value.transactions.length).toBe(1);
@@ -192,6 +207,7 @@ describe('支付交易与已支付快照', () => {
   });
 
   test('即使 service role 也不能改写已支付订单或 payment 金额', async () => {
+    const { id: paidOrderId, itemId: paidOrderItemId, paymentId: paidPaymentId } = await givenPaidOrder();
     const orderMutation = await api(`/rest/v1/orders?id=eq.${paidOrderId}`, {
       service: true, method: 'PATCH', body: { total: 0.01, tax_total: 0.01 },
     });
@@ -298,6 +314,7 @@ describe('支付交易与已支付快照', () => {
 
 describe('履约行、退款行与 Outbox', () => {
   test('履约 V2 幂等写入关系化 fulfillment_lines，并成为汇总依据', async () => {
+    const { id: paidOrderId, itemId: paidOrderItemId } = await givenPaidOrder();
     const key = `fulfillment-${crypto.randomUUID()}`;
     const trackingNumber = `SF-${crypto.randomUUID()}`;
     const body = {
@@ -310,7 +327,8 @@ describe('履约行、退款行与 Outbox', () => {
       rpc('create_fulfillment_v2', body, admin.token),
       rpc('create_fulfillment_v2', body, admin.token),
     ]);
-    fulfillmentId = (first.data as { id: string }).id;
+    expect(first.status).toBe(200);
+    const fulfillmentId = (first.data as { id: string }).id;
     expect((replay.data as { id: string }).id).toBe(fulfillmentId);
 
     const mismatch = await rpc('create_fulfillment_v2', {
@@ -334,6 +352,7 @@ describe('履约行、退款行与 Outbox', () => {
   });
 
   test('取消履约后按关系化行重算订单，保留不可变履约事实', async () => {
+    const { id: paidOrderId, itemId: paidOrderItemId, fulfillmentId } = await givenPaidOrder('active');
     const cancelled = await api(`/rest/v1/fulfillments?id=eq.${fulfillmentId}`, {
       service: true, method: 'PATCH', body: { status: 'cancelled' },
     });
@@ -347,6 +366,7 @@ describe('履约行、退款行与 Outbox', () => {
   });
 
   test('按行退款生成 refund header/lines，并关联父 capture transaction', async () => {
+    const { id: paidOrderId, itemId: paidOrderItemId } = await givenPaidOrder('cancelled');
     const before = await ledger(paidOrderId);
     const capture = before.transactions.find((row) => row.kind === 'capture');
 
@@ -391,6 +411,7 @@ describe('履约行、退款行与 Outbox', () => {
   });
 
   test('Outbox 支持并发 claim、租约归属和幂等 complete', async () => {
+    await givenPendingOrder(); // Own an eligible event; do not rely on earlier tests.
     const customerClaim = await rpc('claim_outbox_events', {
       worker_id: 'customer', max_events: 1,
     }, buyer.token);

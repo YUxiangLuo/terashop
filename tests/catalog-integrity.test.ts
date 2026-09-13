@@ -1,7 +1,8 @@
 import { afterAll, expect, test } from 'bun:test';
 import type { TransactionSQL } from 'bun';
-import { withRollback } from '../scripts/db-lint';
-import { testDatabase } from './database-concurrency';
+import { withRollback } from '../scripts/lib/transactions';
+import { staleAfterCommit, testDatabase } from './database-concurrency';
+import { api } from './helpers';
 
 const database = testDatabase();
 afterAll(() => database.close());
@@ -181,25 +182,28 @@ for (const graph of ['product', 'category'] as const) {
     const [a, b] = [crypto.randomUUID(), crypto.randomUUID()];
     await database`insert into public.categories(id,slug,name) values (${a}::uuid,${a},'A'),(${b}::uuid,${b},'B')`;
     await database`update public.products set status='active' where id=${f.p}::uuid`;
-    const ready = Promise.withResolvers<void>();
-    const release = Promise.withResolvers<void>();
-    const stale = database.begin(async sql => {
-      await sql`set transaction isolation level repeatable read`;
-      await sql`select count(*) from public.products`; // establish the old snapshot
-      ready.resolve(); await release.promise;
-      if (graph === 'product') await sql`update public.variant_option_values set option_value_id=${f.green}::uuid where variant_id=${f.b}::uuid and option_value_id=${f.blue}::uuid`;
-      else await sql`update public.categories set parent_id=${a}::uuid where id=${b}::uuid`;
-    }).then(() => null, error => { ready.reject(error); return error; });
     try {
-      await ready.promise;
-      if (graph === 'product') await database`update public.variant_option_values set option_value_id=${f.green}::uuid where variant_id=${f.a}::uuid and option_value_id=${f.red}::uuid`;
-      else await database`update public.categories set parent_id=${b}::uuid where id=${a}::uuid`;
-      release.resolve();
-      expect(await stale).toMatchObject({ errno: '40001' });
+      const result = await staleAfterCommit(database, async sql => {
+        if (graph === 'product') await sql`update public.variant_option_values set option_value_id=${f.green}::uuid where variant_id=${f.b}::uuid and option_value_id=${f.blue}::uuid`;
+        else await sql`update public.categories set parent_id=${a}::uuid where id=${b}::uuid`;
+      }, async () => {
+        if (graph === 'product') await database`update public.variant_option_values set option_value_id=${f.green}::uuid where variant_id=${f.a}::uuid and option_value_id=${f.red}::uuid`;
+        else await database`update public.categories set parent_id=${b}::uuid where id=${a}::uuid`;
+      });
+      expect(result.error).toMatchObject({ errno: '40001' });
     } finally {
-      release.resolve(); await stale;
       await database`delete from public.products where id in (${f.p}::uuid,${f.q}::uuid)`;
       await database`delete from public.categories where id in (${a}::uuid,${b}::uuid)`;
     }
   });
 }
+
+// Retained from the original review; grouped by business domain.
+test('分类不允许自环', async () => {
+    const id = crypto.randomUUID();
+    const { data } = await api('/rest/v1/categories', {
+      service: true, method: 'POST',
+      body: { id, slug: `self-loop-${id}`, name: '自环', parent_id: id },
+    });
+    expect((data as { code: string }).code).toBe('23514');  // check_violation
+  });

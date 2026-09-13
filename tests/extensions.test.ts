@@ -1,5 +1,7 @@
-import { describe, test, expect, beforeAll } from 'bun:test';
-import { api, rpc, signup, makeAdmin, variantBySku, TEST_ADDRESS, type TestUser } from './helpers';
+import { describe, test, expect, beforeAll, beforeEach, afterAll, afterEach } from 'bun:test';
+import { api, rpc, signup, makeAdmin, variantBySku, TEST_ADDRESS, checked, type TestUser } from './helpers';
+import { stockedProduct } from './support/catalog';
+import { Cleanup } from './support/cleanup';
 
 let admin: TestUser;
 let userA: TestUser;
@@ -7,10 +9,9 @@ let userB: TestUser;
 
 beforeAll(async () => {
   admin = await signup();
-  userA = await signup();
-  userB = await signup();
   await makeAdmin(admin.userId);
 });
+beforeEach(async () => { [userA, userB] = await Promise.all([signup(), signup()]); });
 
 describe('Metafields', () => {
   test('商品 metafield 公开可读（含定义）', async () => {
@@ -146,11 +147,15 @@ describe('Metaobjects', () => {
 
 describe('商品评价', () => {
   let productId: string;
-
-  beforeAll(async () => {
-    const { data } = await api('/rest/v1/products?slug=eq.ceramic-mug-350&select=id');
-    productId = (data as unknown as { id: string }[])[0].id;
+  const fixtures = new Cleanup();
+  beforeAll(async () => { productId = (await stockedProduct(admin, { cleanup: fixtures })).productId; });
+  afterAll(() => fixtures.run());
+  afterEach(async () => {
+    await checked(api(`/rest/v1/product_reviews?product_id=eq.${productId}&customer_id=eq.${userA.customerId}`, { service: true, method: 'DELETE' }));
   });
+  const pendingReview = () => checked(api('/rest/v1/product_reviews', {
+    token: userA.token, method: 'POST', body: { product_id: productId, rating: 5, title: '好用' },
+  }));
 
   test('顾客发表评价 → pending，公开不可见', async () => {
     const { status } = await api('/rest/v1/product_reviews', {
@@ -168,6 +173,7 @@ describe('商品评价', () => {
   });
 
   test('每客每商品只能评一条', async () => {
+    await pendingReview();
     const { data } = await api('/rest/v1/product_reviews', {
       token: userA.token,
       method: 'POST',
@@ -177,6 +183,7 @@ describe('商品评价', () => {
   });
 
   test('顾客不能自己审核通过（列级权限），修改内容后回落 pending', async () => {
+    await pendingReview();
     // 试图直接改 status → 权限拒绝
     const hack = await api(`/rest/v1/product_reviews?product_id=eq.${productId}`, {
       token: userA.token,
@@ -229,4 +236,77 @@ describe('商品评价', () => {
     });
     expect((data as { code: string }).code).toBe('23514'); // check_violation
   });
+});
+
+// Retained from the original review; grouped by business domain.
+describe('Metafield 值与定义校验', () => {
+  const resources = new Cleanup(), namespace = `probe_${crypto.randomUUID().replaceAll('-', '')}`;
+  let mugId: string;
+  beforeAll(async () => { mugId = await variantBySku('MUG-350'); });
+  afterEach(() => resources.run());
+  test('metafield：list_text 元素类型校验', async () => {
+    const { data } = await api('/rest/v1/metafields', {
+      service: true, method: 'POST',
+      body: { owner_type: 'shop', owner_id: '00000000-0000-0000-0000-000000000000',
+              namespace, key: 'bad_list', type: 'list_text', value: [1, 2, true] },
+    });
+    expect((data as { message: string }).message).toContain('elements must be strings');
+  });
+
+  test('metafield：date 格式校验', async () => {
+    const bad = await api('/rest/v1/metafields', {
+      service: true, method: 'POST',
+      body: { owner_type: 'shop', owner_id: '00000000-0000-0000-0000-000000000000',
+              namespace, key: 'bad_date', type: 'date', value: 'not-a-date' },
+    });
+    expect((bad.data as { message: string }).message).toContain('invalid value');
+
+    resources.defer(() => checked(api(`/rest/v1/metafields?namespace=eq.${namespace}&key=eq.good_date`, { service: true, method: 'DELETE' })));
+    const ok = await api('/rest/v1/metafields', {
+      service: true, method: 'POST',
+      body: { owner_type: 'shop', owner_id: '00000000-0000-0000-0000-000000000000',
+              namespace, key: 'good_date', type: 'date', value: '2026-01-01' },
+    });
+    expect(ok.status).toBe(201);
+    expect(Array.isArray(ok.data)).toBe(true);
+  });
+
+  test('metafield：definition.validations 真正执行（min/max/choices）', async () => {
+    resources.defer(() => checked(api(`/rest/v1/metafield_definitions?namespace=eq.${namespace}`, { service: true, method: 'DELETE' })));
+    resources.defer(() => checked(api(`/rest/v1/metafields?namespace=eq.${namespace}`, { service: true, method: 'DELETE' })));
+    await checked(api('/rest/v1/metafield_definitions?select=id', {
+      service: true, method: 'POST',
+      body: { owner_type: 'variant', namespace, key: 'score', name: '评分',
+              type: 'number', validations: { min: 0, max: 10 } },
+    }));
+
+    const over = await api('/rest/v1/metafields', {
+      service: true, method: 'POST',
+      body: { owner_type: 'variant', owner_id: mugId, namespace, key: 'score', type: 'number', value: 15 },
+    });
+    expect((over.data as { message: string }).message).toContain('must be <= 10');
+
+    const ok = await api('/rest/v1/metafields', {
+      service: true, method: 'POST',
+      body: { owner_type: 'variant', owner_id: mugId, namespace, key: 'score', type: 'number', value: 8 },
+    });
+    expect(Array.isArray(ok.data)).toBe(true);
+
+    // choices 白名单
+    await api('/rest/v1/metafield_definitions', {
+      service: true, method: 'POST',
+      body: { owner_type: 'product', namespace, key: 'color_note', name: '颜色备注',
+              type: 'text', validations: { choices: ['红', '蓝'] } },
+    });
+    const { data: prod } = await api('/rest/v1/products?slug=eq.ceramic-mug-350&select=id');
+    const productId = (prod as { id: string }[])[0].id;
+    const offList = await api('/rest/v1/metafields', {
+      service: true, method: 'POST',
+      body: { owner_type: 'product', owner_id: productId, namespace, key: 'color_note', type: 'text', value: '绿' },
+    });
+    expect((offList.data as { message: string }).message).toContain('must be one of');
+
+    // Cleanup removes this fixture's values before its definitions.
+  });
+
 });

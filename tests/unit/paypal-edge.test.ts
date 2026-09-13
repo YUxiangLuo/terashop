@@ -20,7 +20,7 @@ import {
   validatePayPalOrder,
   validatePayPalRefund,
   verifyPayPalWebhook,
-} from '../supabase/functions/_shared/paypal';
+} from '../../supabase/functions/_shared/paypal';
 
 beforeEach(() => resetPayPalTokenCacheForTest());
 
