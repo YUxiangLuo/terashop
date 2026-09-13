@@ -1,6 +1,7 @@
 import { describe, test, expect, beforeAll, afterAll, afterEach } from 'bun:test';
 import { Cleanup } from './support/cleanup';
 import { promotionFixture } from './support/promotions';
+import { stockedProduct } from './support/catalog';
 import { api, rpc, signup, variantBySku, shippingByName, stockOf, TEST_ADDRESS, installTestTax, checked, type TestUser } from './helpers';
 
 // seed 促销：
@@ -219,6 +220,54 @@ describe('预览 price_checkout', () => {
     expect(Number(cableLine.discount_total)).toBeCloseTo(4.9);
     const kbLine = p.lines.find((l) => l.sku === 'KB87-RED')!;
     expect(Number(kbLine.discount_total)).toBeCloseTo(0);
+  });
+});
+
+describe('买赠资格与赠品单位互斥', () => {
+  test('相同 selected 集合与 same_as_apply 等价，属性拆行不放大赠品', async () => {
+    const a = await stockedProduct(user, { price: 100, trackInventory: false, cleanup: resources });
+    for (const { buy, get, cases } of [
+      { buy: 1, get: 1, cases: [[1, 0], [2, 100], [3, 100]] },
+      { buy: 2, get: 1, cases: [[2, 0], [3, 100], [5, 100], [6, 200]] },
+      { buy: 1, get: 2, cases: [[2, 0], [3, 200], [5, 200], [6, 400]] },
+    ])
+    for (const getScope of ['same_as_apply', 'selected']) {
+      const code = `OVERLAP-${crypto.randomUUID()}`;
+      const id = await createPromo({ name: code, code, type: 'buy_x_get_y',
+        params: { buy, get }, apply_scope: 'selected', get_scope: getScope });
+      for (const role of getScope === 'selected' ? ['apply', 'get'] : ['apply']) {
+        await checked(api('/rest/v1/promotion_targets', { service: true, method: 'POST',
+          body: { promotion_id: id, role, ...(role === 'apply' ? { product_id: a.productId } : { variant_id: a.variantId }) } }));
+      }
+      for (const [quantity, discount] of cases) {
+        for (const split of [false, true]) {
+          const items = split ? Array.from({ length: quantity }, (_, i) => ({
+            variant_id: a.variantId, quantity: 1, attributes: { label: String(i) },
+          })) : [{ variant_id: a.variantId, quantity }];
+          const result = await checked<PriceResult>(preview(items, { discount_code: code }));
+          expect(result.discount_total).toBe(discount);
+        }
+      }
+    }
+  });
+
+  test('部分重叠先保留购买资格，不因便宜的交集赠品牺牲可赠数量', async () => {
+    const a = await stockedProduct(user, { price: 100, trackInventory: false, cleanup: resources });
+    const b = await stockedProduct(user, { price: 150, trackInventory: false, cleanup: resources });
+    const code = `PARTIAL-${crypto.randomUUID()}`;
+    const id = await createPromo({ name: code, code, type: 'buy_x_get_y',
+      params: { buy: 1, get: 1 }, apply_scope: 'selected', get_scope: 'selected' });
+    await checked(api('/rest/v1/promotion_targets', { service: true, method: 'POST', body: [
+      { promotion_id: id, role: 'apply', variant_id: a.variantId },
+      { promotion_id: id, role: 'get', variant_id: a.variantId },
+      { promotion_id: id, role: 'get', variant_id: b.variantId },
+    ] }));
+    for (const [aq, bq, discount] of [[1, 0, 0], [1, 1, 150], [2, 2, 300], [3, 1, 250]]) {
+      const items = [{ variant_id: a.variantId, quantity: aq },
+        ...(bq ? [{ variant_id: b.variantId, quantity: bq }] : [])];
+      const result = await checked<PriceResult>(preview(items, { discount_code: code }));
+      expect(result.discount_total).toBe(discount);
+    }
   });
 });
 

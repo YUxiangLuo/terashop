@@ -206,8 +206,8 @@ POST /rest/v1/rpc/update_cart
 
 1. `price_checkout` 预览价格（匿名可用），不占库存，也不保证之后价格不变。
 2. 取得注册或匿名会话、填写 Customer 联系邮箱后，`create_checkout_quote` 生成报价并预占库存；使用 token Cart 时先认领，再调用 `checkout_cart`。
-3. `create_order_from_quote` 再次校验价格，建立待支付订单，继续持有预占。
-4. 调用渠道支付入口；渠道确认成功后，数据库原子扣库存并推进订单。
+3. `create_order_from_quote` 再次校验价格；正金额订单待支付并继续持有预占，零元订单直接原子消费预占、扣库存并返回 `financial_status:"paid"`。
+4. 仅待支付的正金额订单调用渠道支付入口；渠道确认成功后，数据库原子扣库存并推进订单。零元订单不创建支付意图或资金流水，也无需管理员确认。
 
 ```http
 POST /rest/v1/rpc/create_checkout_quote
@@ -368,7 +368,11 @@ POST /rest/v1/rpc/receive_return
 
 商品百分比及买赠的 `promotions.apply_scope` 为 `all`（默认）或 `selected`；买赠的 `get_scope` 为 `same_as_apply`（默认）或 `selected`。定向活动应以 selected 或 inactive 创建，再配置目标，避免先公开全店优惠。INSERT `promotion_targets` 自动将对应范围收窄为 selected，删除最后一条仍匹配零商品；扩大范围须先删除对应目标，再显式 PATCH scope。规则、范围与目标一起进入交易快照。整单百分比/固定金额与免邮仍按原有整单语义执行，不借此改变算法或增加条件 DSL。
 
+买赠内 buy/get 不得占用同一件商品；selected 集合重叠也需保留购买单位，优先最大可赠数量，再选择最便宜的可行赠品。相同集合的买一赠一，1/2/3 件分别赠 0/1/1 件；属性拆行不改变结果。
+
 `metafields` 继续写 owner_type / owner_id / type / value，未知类型拒绝；任意 JSON 使用 `type:"json"`。响应中的 `owner_*_id` 是不可直写的生成 FK 路由；商品、变体、分类删除会级联清理其 metafields。Customer/Order 不可删除及匿名化的既有合同不变。
+
+同一 owner_type/namespace/key 的定义和值并发修改可能返回 `55P03` / `40001`；重试整个编辑请求，不只重试其中某条 SQL。无定义的值仍允许写入且默认私有，新建定义也必须与既有值类型一致。
 
 `metafield_definitions.access` 默认 `admin`：
 
@@ -386,7 +390,7 @@ POST /rest/v1/rpc/receive_return
 
 以下命令各只有一个公开签名，不保留版本后缀或非幂等重载；需要先展示报价再确认下单时采用上面的 Quote 流程。
 
-- `create_order`：必填 `items`、`idempotency_key`，地址等参数与 Quote 一致。单事务创建并转换 15 分钟 Quote，只预占、不扣 `on_hand`；支付成功才扣减，发货不再扣减。`on_hand` 表示未售出的库存余额，不是实物在库数。未付款取消/超时仅释放预占，统一由 `expire_checkout_quotes` 处理到期。
+- `create_order`：必填 `items`、`idempotency_key`，地址等参数与 Quote 一致。单事务创建并转换 15 分钟 Quote；正金额订单只预占，支付成功才扣 `on_hand`，零元订单直接原子标记 paid 并扣减。发货不再扣减。`on_hand` 表示未售出的库存余额，不是实物在库数。未付款取消/超时仅释放预占，统一由 `expire_checkout_quotes` 处理到期。
 - 下单重试返回原订单当前状态，不新建 Quote、不延长期限。其幂等范围与显式报价独立；取消/过期后同键重试仍返回原订单，需要重新结账时使用新键。
 - `create_fulfillment`：必填 `order_id`、`items`、`idempotency_key`；所有订单均须先付款，返回履约 DTO，行明细通过订单详情或账本读取。
 - `mark_order_paid`：`order_id`、`provider:"manual"`；仅手工收款，线上意图仍可扣款时禁止使用。

@@ -888,13 +888,22 @@ begin
   if new.attempts < old.attempts then
     raise exception 'outbox attempts cannot decrease';
   end if;
+  if new.retry_start is distinct from old.retry_start and not (
+    old.status = 'exhausted' and new.status = 'pending'
+    and new.retry_start = old.attempts and new.attempts = old.attempts
+    and exists (select 1 from commerce.outbox_redrives r
+      where r.event_id = old.event_id and r.attempts = old.attempts)
+  ) then raise exception 'outbox retry budget requires an audited redrive'; end if;
   if to_jsonb(new) = to_jsonb(old) then return new; end if;
   if old.status = 'published' and to_jsonb(new) is distinct from to_jsonb(old) then
     raise exception 'published outbox events are immutable';
   end if;
   if new.status <> old.status and not (
     (old.status in ('pending', 'failed') and new.status = 'processing')
-    or (old.status = 'processing' and new.status in ('published', 'failed'))
+    or (old.status = 'processing' and new.status in ('published', 'failed', 'exhausted'))
+    or (old.status = 'failed' and new.status = 'exhausted')
+    or (old.status = 'exhausted' and new.status = 'pending' and new.retry_start = old.attempts
+      and new.retry_start > old.retry_start)
   ) then
     raise exception 'invalid outbox transition: % -> %', old.status, new.status;
   end if;
@@ -1264,7 +1273,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.refund_order(order_id uuid, items jsonb DEFAULT NULL::jsonb, amount numeric DEFAULT NULL::numeric, reason text DEFAULT NULL::text, restock boolean DEFAULT false, provider text DEFAULT 'manual'::text, shipping_amount numeric DEFAULT NULL) RETURNS public.orders
+CREATE FUNCTION private.refund_order(order_id uuid, items jsonb DEFAULT NULL::jsonb, amount numeric DEFAULT NULL::numeric, reason text DEFAULT NULL::text, restock boolean DEFAULT false, provider text DEFAULT 'manual'::text, shipping_amount numeric DEFAULT NULL) RETURNS uuid
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1363,7 +1372,7 @@ begin
           jsonb_build_object('amount', v_amount, 'reason', reason,
                              'restock', restock, 'items', items));
 
-  return v_order;
+  return v_refund_id;
 end;
 $$;
 
@@ -1703,10 +1712,22 @@ begin
     raise exception 'lease_seconds must be between 30 and 3600';
   end if;
 
+  -- The final crashed lease must leave processing even though it cannot be
+  -- claimed again. Bounded SKIP LOCKED sweeping also handles failed fixtures.
+  with exhausted as (
+    select e.id from commerce.outbox_events e
+    where e.attempts - e.retry_start >= 25 and
+      (e.status = 'failed' or (e.status = 'processing' and e.lease_expires_at <= clock_timestamp()))
+    order by e.id for update skip locked limit max_events
+  )
+  update commerce.outbox_events e set status = 'exhausted',
+    locked_at = null, locked_by = null, lease_token = null, lease_expires_at = null
+  from exhausted x where e.id = x.id;
+
   with candidates as (
     select e.id
     from commerce.outbox_events e
-    where e.attempts < 25 and (
+    where e.attempts - e.retry_start < 25 and (
       (e.status in ('pending', 'failed') and e.available_at <= clock_timestamp())
       or (e.status = 'processing' and e.lease_expires_at <= clock_timestamp())
     )
@@ -1747,11 +1768,12 @@ begin
     raise exception 'succeeded is required';
   end if;
   update commerce.outbox_events e
-  set status = case when succeeded then 'published' else 'failed' end,
+  set status = case when succeeded then 'published'
+                   when e.attempts - e.retry_start >= 25 then 'exhausted' else 'failed' end,
       published_at = case when succeeded then now() else null end,
       available_at = case when succeeded then e.available_at
                           else now() + make_interval(
-                            secs => least(3600, power(2, least(e.attempts, 10))::integer)
+                            secs => least(3600, power(2, least(e.attempts - e.retry_start, 10))::integer)
                           ) end,
       last_error = case when succeeded then null else left(error_message, 4000) end,
       locked_at = null, locked_by = null, lease_token = null, lease_expires_at = null
@@ -1761,6 +1783,36 @@ begin
     and e.lease_token = complete_outbox_event.lease_token
     and e.lease_expires_at > clock_timestamp();
   return found;
+end;
+$$;
+
+CREATE FUNCTION public.redrive_outbox_event(event_id uuid, expected_attempt integer, worker_id text, reason text) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_event commerce.outbox_events; v_redrive commerce.outbox_redrives;
+begin
+  if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
+  if expected_attempt is null or expected_attempt < 25
+    or coalesce(length(btrim(worker_id)),0) not between 1 and 200
+    or coalesce(length(btrim(reason)),0) not between 1 and 4000 then
+    raise exception 'expected_attempt, worker_id and reason are required';
+  end if;
+  select * into v_event from commerce.outbox_events e
+    where e.event_id = redrive_outbox_event.event_id for update;
+  if not found then return false; end if;
+  select * into v_redrive from commerce.outbox_redrives r
+    where r.event_id = v_event.event_id and r.attempts = expected_attempt;
+  if found then
+    if (v_redrive.worker_id,v_redrive.reason) is distinct from (btrim(worker_id),btrim(reason)) then
+      raise exception 'redrive attempt was used with different parameters';
+    end if;
+    return true;
+  end if;
+  if v_event.status <> 'exhausted' or v_event.attempts <> expected_attempt then return false; end if;
+  insert into commerce.outbox_redrives(event_id,attempts,worker_id,reason)
+    values(v_event.event_id,v_event.attempts,btrim(worker_id),btrim(reason));
+  update commerce.outbox_events e set status = 'pending', retry_start = e.attempts,
+    available_at = clock_timestamp() where e.event_id = v_event.event_id;
+  return true;
 end;
 $$;
 
@@ -1974,7 +2026,6 @@ declare
   v_request_hash text;
   v_response jsonb;
   v_record commerce.command_idempotency;
-  v_before_refunds uuid[];
   v_refund_id uuid;
   v_order public.orders;
 begin
@@ -2006,19 +2057,12 @@ begin
     return private.storefront_order_json(v_order);
   end if;
 
-  select coalesce(array_agg(r.id), '{}'::uuid[]) into v_before_refunds
-  from commerce.refunds r where r.order_id = refund_order.order_id;
-  v_order := private.refund_order(
+  v_refund_id := private.refund_order(
     order_id, v_items, amount, reason, restock, v_provider, shipping_amount
   );
-  perform private.refresh_order_fulfillment(v_order.id);
+  perform private.refresh_order_fulfillment(order_id);
   select * into v_order from public.orders o where o.id = refund_order.order_id;
   v_response := private.storefront_order_json(v_order);
-  select r.id into v_refund_id from commerce.refunds r
-  where r.order_id = refund_order.order_id
-    and not (r.id = any(v_before_refunds))
-  order by r.created_at desc, r.id desc limit 1;
-  if not found then raise exception 'refund ledger was not recorded'; end if;
 
   insert into commerce.command_idempotency
     (scope, subject_id, idempotency_key, request_hash, resource_type, resource_id)

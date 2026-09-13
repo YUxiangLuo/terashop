@@ -123,7 +123,7 @@ test('已创建订单的对外订单号不可修改，包括零元已付订单',
     await sql`update public.products set status='active' where id=${f.p}::uuid`;
     await sql`select set_config('request.jwt.claims',${JSON.stringify({ sub: admin.userId, role: 'authenticated' })},true)`;
     const [row] = await sql`select public.create_order(jsonb_build_array(jsonb_build_object('variant_id',${f.v}::uuid,'quantity',1)),${crypto.randomUUID()},address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) o`;
-    await sql`select public.mark_order_paid(${row.o.id}::uuid)`;
+    expect(row.o.financial_status).toBe('paid');
     await sql`update public.orders set order_number=default where id=${row.o.id}::uuid`;
   })).rejects.toThrow('order identity and number are immutable');
 });

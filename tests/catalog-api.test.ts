@@ -69,6 +69,26 @@ test('Storefront DTO 不随调用者升权；Admin DTO 独立验证身份并包�
   expect(await checked(command('get_storefront_product', { product_id: id }))).toBeNull();
 });
 
+test('停用变体图片在旧表、旧视图和新 Storefront 入口遵守同一公开边界', async () => {
+  await withRollback(database, async sql => {
+    const p = await product(sql), hidden = crypto.randomUUID(), category = crypto.randomUUID();
+    await sql`insert into public.categories(id,slug,name) values(${category}::uuid,${category},'image visibility')`;
+    await sql`insert into public.product_categories(product_id,category_id) values(${p.id}::uuid,${category}::uuid)`;
+    await sql`insert into public.product_variants(id,product_id,price,is_active) values(${hidden}::uuid,${p.id}::uuid,1,false)`;
+    await sql`insert into public.product_images(product_id,variant_id,url,position) values
+      (${p.id}::uuid,${hidden}::uuid,'hidden',0),(${p.id}::uuid,null,'visible',1)`;
+    for (const user of [undefined, buyer, admin]) {
+      await actor(sql,user);
+      expect(await sql<{ url: string }[]>`select url from public.product_images where product_id=${p.id}::uuid order by position`)
+        .toEqual(user === admin ? [{ url: 'hidden' }, { url: 'visible' }] : [{ url: 'visible' }]);
+      expect((await sql`select primary_image from public.product_listing where id=${p.id}::uuid`)[0].primary_image).toBe('visible');
+      expect((await sql`select public.list_storefront_products(1,null,${category}::uuid) dto`)[0].dto.items[0].primary_image).toBe('visible');
+      expect((await sql`select public.get_storefront_product(${p.id}::uuid) dto`)[0].dto.images.map((i: { url: string })=>i.url))
+        .toEqual(['visible']);
+    }
+  });
+});
+
 test('商品列表按 UUID 游标分页并精确过滤分类；非法 page_size 拒绝', async () => {
   await withRollback(database, async sql => {
     const category = crypto.randomUUID();

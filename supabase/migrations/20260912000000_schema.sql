@@ -59,6 +59,18 @@ INSERT INTO private.category_tree_guard DEFAULT VALUES;
 ALTER TABLE private.category_tree_guard ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.category_tree_guard FROM PUBLIC, anon, authenticated, service_role;
 
+-- A key may exist before its optional public definition. Keep a real row
+-- version for both writers so REPEATABLE READ cannot validate stale metadata.
+CREATE TABLE private.metafield_key_guards (
+  owner_type text NOT NULL,
+  namespace text NOT NULL,
+  key text NOT NULL,
+  revision bigint NOT NULL DEFAULT 1,
+  PRIMARY KEY (owner_type, namespace, key)
+);
+ALTER TABLE private.metafield_key_guards ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.metafield_key_guards FROM PUBLIC, anon, authenticated, service_role;
+
 CREATE FUNCTION private.valid_tax_context(p_context jsonb) RETURNS boolean
     LANGUAGE sql IMMUTABLE STRICT SET search_path TO '' AS $$
   select coalesce(jsonb_typeof(p_context) = 'object' and case p_context ->> 'status'
@@ -513,6 +525,7 @@ CREATE TABLE commerce.outbox_events (
     idempotency_key text NOT NULL,
     status text DEFAULT 'pending'::text NOT NULL,
     attempts integer DEFAULT 0 NOT NULL,
+    retry_start integer DEFAULT 0 NOT NULL CHECK (retry_start BETWEEN 0 AND attempts),
     available_at timestamp with time zone DEFAULT now() NOT NULL,
     locked_at timestamp with time zone,
     locked_by text,
@@ -530,7 +543,17 @@ CREATE TABLE commerce.outbox_events (
     CONSTRAINT outbox_events_attempts_check CHECK ((attempts >= 0)),
     CONSTRAINT outbox_events_event_type_check CHECK ((length(btrim(event_type)) > 0)),
     CONSTRAINT outbox_events_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text)),
-    CONSTRAINT outbox_events_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'published'::text, 'failed'::text])))
+    CONSTRAINT outbox_events_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'processing'::text, 'published'::text, 'failed'::text, 'exhausted'::text]))),
+    CONSTRAINT outbox_events_exhausted_check CHECK (status <> 'exhausted' OR attempts - retry_start >= 25)
+);
+
+CREATE TABLE commerce.outbox_redrives (
+    event_id uuid NOT NULL,
+    attempts integer NOT NULL,
+    worker_id text NOT NULL CHECK (length(btrim(worker_id)) BETWEEN 1 AND 200),
+    reason text NOT NULL CHECK (length(btrim(reason)) BETWEEN 1 AND 4000),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (event_id, attempts)
 );
 
 CREATE TABLE commerce.payment_transactions (
@@ -1562,6 +1585,20 @@ ALTER TABLE commerce.return_dispositions ENABLE ROW LEVEL SECURITY;
 
 CREATE INDEX checkout_quote_lines_inventory_idx ON commerce.checkout_quote_lines USING btree (variant_id, location_id, quote_id) WHERE track_inventory;
 CREATE INDEX checkout_quotes_active_idx ON commerce.checkout_quotes USING btree (expires_at, id) WHERE (status = ANY (ARRAY['open'::text, 'converted'::text]));
+
+-- Transactional working set; immutable quote lines remain the historical source.
+CREATE TABLE commerce.inventory_reservations (
+    quote_line_id uuid PRIMARY KEY REFERENCES commerce.checkout_quote_lines(id),
+    quote_id uuid NOT NULL REFERENCES commerce.checkout_quotes(id),
+    variant_id uuid NOT NULL,
+    location_id uuid NOT NULL,
+    quantity integer NOT NULL CHECK (quantity > 0),
+    expires_at timestamptz NOT NULL
+);
+CREATE INDEX inventory_reservations_inventory_idx ON commerce.inventory_reservations
+    (variant_id, location_id, expires_at) INCLUDE (quantity, quote_id);
+CREATE INDEX inventory_reservations_quote_idx ON commerce.inventory_reservations (quote_id);
+ALTER TABLE commerce.inventory_reservations ENABLE ROW LEVEL SECURITY;
 CREATE INDEX orders_payment_expiry_idx ON public.orders (payment_expires_at, id) WHERE status = 'open' AND financial_status = 'pending';
 CREATE INDEX orders_customer_pending_idx ON public.orders (customer_id, payment_expires_at) WHERE status = 'open' AND financial_status = 'pending';
 CREATE INDEX checkout_quotes_customer_idx ON commerce.checkout_quotes USING btree (customer_id, created_at DESC);
@@ -1593,6 +1630,7 @@ CREATE INDEX addresses_customer_idx ON public.addresses USING btree (customer_id
 CREATE UNIQUE INDEX addresses_one_default_per_customer_idx ON public.addresses USING btree (customer_id) WHERE is_default;
 ALTER TABLE commerce.carts ADD FOREIGN KEY (shipping_method_id) REFERENCES public.shipping_methods(id) ON DELETE RESTRICT;
 ALTER TABLE commerce.cart_lines ADD FOREIGN KEY (variant_id) REFERENCES public.product_variants(id) ON DELETE RESTRICT;
+ALTER TABLE commerce.outbox_redrives ADD FOREIGN KEY (event_id) REFERENCES commerce.outbox_events(event_id) ON DELETE RESTRICT;
 ALTER TABLE commerce.order_shipping_lines
   ADD FOREIGN KEY (order_id) REFERENCES public.orders(id) ON DELETE RESTRICT,
   ADD FOREIGN KEY (shipping_method_id) REFERENCES public.shipping_methods(id) ON DELETE RESTRICT;
@@ -1671,6 +1709,7 @@ ALTER TABLE commerce.command_idempotency ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.fulfillment_lines ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.order_adjustments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.outbox_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE commerce.outbox_redrives ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.payment_intents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.payment_provider_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.payment_transactions ENABLE ROW LEVEL SECURITY;

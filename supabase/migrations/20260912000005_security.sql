@@ -4,15 +4,7 @@ begin;
 -- Storefront view
 
 CREATE VIEW public.product_listing AS
- WITH active_reservations AS MATERIALIZED (
-         SELECT ql.variant_id,
-            ql.location_id,
-            (sum(ql.quantity))::integer AS reserved
-           FROM (commerce.checkout_quote_lines ql
-             JOIN commerce.checkout_quotes q ON ((q.id = ql.quote_id)))
-          WHERE (ql.track_inventory AND (q.status = ANY (ARRAY['open'::text, 'converted'::text])) AND (q.expires_at > now()))
-          GROUP BY ql.variant_id, ql.location_id
-        ), default_location AS MATERIALIZED (
+ WITH default_location AS MATERIALIZED (
          SELECT l.id
            FROM public.locations l
           WHERE (l.is_default AND l.is_active)
@@ -38,18 +30,20 @@ CREATE VIEW public.product_listing AS
          LIMIT 1))::numeric AS compare_at_from,
     ( SELECT i.url
            FROM public.product_images i
-          WHERE (i.product_id = p.id)
+          WHERE i.product_id = p.id AND (i.variant_id IS NULL OR EXISTS (
+            SELECT 1 FROM public.product_variants v WHERE v.id = i.variant_id AND v.is_active))
           ORDER BY i."position", i.id
          LIMIT 1) AS primary_image,
     ( SELECT array_agg(c.slug ORDER BY c.slug) AS array_agg
            FROM (public.product_categories pc
              JOIN public.categories c ON ((c.id = pc.category_id)))
           WHERE ((pc.product_id = p.id) AND c.is_active)) AS categories,
-    COALESCE(( SELECT bool_or(((NOT v.track_inventory) OR ((COALESCE(il.on_hand, 0) - COALESCE(ar.reserved, 0)) > 0))) AS bool_or
-           FROM (((public.product_variants v
+    COALESCE(( SELECT bool_or(((NOT v.track_inventory) OR ((COALESCE(il.on_hand, 0) - (
+             SELECT COALESCE(sum(r.quantity), 0) FROM commerce.inventory_reservations r
+             WHERE r.variant_id = v.id AND r.location_id = dl.id AND r.expires_at > now())) > 0))) AS bool_or
+           FROM ((public.product_variants v
              LEFT JOIN default_location dl ON (true))
              LEFT JOIN public.inventory_levels il ON (((il.variant_id = v.id) AND (il.location_id = dl.id))))
-             LEFT JOIN active_reservations ar ON (((ar.variant_id = v.id) AND (ar.location_id = dl.id))))
           WHERE ((v.product_id = p.id) AND v.is_active)), false) AS in_stock
    FROM public.products p
   WHERE (status = 'active'::text);
@@ -68,7 +62,11 @@ CREATE TRIGGER cart_lines_no_truncate BEFORE TRUNCATE ON commerce.cart_lines FOR
 CREATE TRIGGER checkout_quote_lines_immutable BEFORE DELETE OR UPDATE ON commerce.checkout_quote_lines FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
 CREATE CONSTRAINT TRIGGER checkout_quote_lines_match_header AFTER INSERT OR DELETE OR UPDATE ON commerce.checkout_quote_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_checkout_quote_totals();
 CREATE TRIGGER checkout_quote_lines_no_truncate BEFORE TRUNCATE ON commerce.checkout_quote_lines FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
-CREATE TRIGGER checkout_quote_lines_reservation_validate BEFORE INSERT ON commerce.checkout_quote_lines FOR EACH ROW EXECUTE FUNCTION private.validate_checkout_quote_line_reservation();
+CREATE TRIGGER checkout_quote_lines_reservation_validate AFTER INSERT ON commerce.checkout_quote_lines FOR EACH ROW EXECUTE FUNCTION private.validate_checkout_quote_line_reservation();
+CREATE TRIGGER checkout_quotes_reservation_release AFTER UPDATE OF status ON commerce.checkout_quotes FOR EACH ROW EXECUTE FUNCTION private.release_inventory_reservations();
+CREATE TRIGGER inventory_reservations_validate BEFORE INSERT OR DELETE ON commerce.inventory_reservations FOR EACH ROW EXECUTE FUNCTION private.validate_inventory_reservation();
+CREATE TRIGGER inventory_reservations_no_update BEFORE UPDATE ON commerce.inventory_reservations FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
+CREATE TRIGGER inventory_reservations_no_truncate BEFORE TRUNCATE ON commerce.inventory_reservations FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER checkout_quotes_enqueue_outbox AFTER INSERT OR UPDATE OF status ON commerce.checkout_quotes FOR EACH ROW EXECUTE FUNCTION private.checkout_quote_to_outbox();
 CREATE TRIGGER checkout_quotes_no_truncate BEFORE TRUNCATE ON commerce.checkout_quotes FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE CONSTRAINT TRIGGER checkout_quotes_require_lines AFTER INSERT ON commerce.checkout_quotes DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_checkout_quote_totals();
@@ -82,6 +80,8 @@ CREATE TRIGGER order_adjustments_append_only BEFORE DELETE OR UPDATE ON commerce
 CREATE TRIGGER order_adjustments_no_truncate BEFORE TRUNCATE ON commerce.order_adjustments FOR EACH STATEMENT EXECUTE FUNCTION private.protect_audit_row();
 CREATE TRIGGER outbox_events_no_truncate BEFORE TRUNCATE ON commerce.outbox_events FOR EACH STATEMENT EXECUTE FUNCTION private.protect_outbox_event();
 CREATE TRIGGER outbox_events_protect BEFORE DELETE OR UPDATE ON commerce.outbox_events FOR EACH ROW EXECUTE FUNCTION private.protect_outbox_event();
+CREATE TRIGGER outbox_redrives_immutable BEFORE DELETE OR UPDATE ON commerce.outbox_redrives FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
+CREATE TRIGGER outbox_redrives_no_truncate BEFORE TRUNCATE ON commerce.outbox_redrives FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER payment_intents_capture_marker_immutable BEFORE UPDATE OF provider_capture_requested_at ON commerce.payment_intents FOR EACH ROW EXECUTE FUNCTION private.protect_capture_request_marker();
 CREATE TRIGGER payment_intents_enqueue_outbox AFTER INSERT OR UPDATE OF status ON commerce.payment_intents FOR EACH ROW EXECUTE FUNCTION private.payment_intent_to_outbox();
 CREATE TRIGGER payment_intents_no_delete BEFORE DELETE ON commerce.payment_intents FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
@@ -311,7 +311,9 @@ CREATE POLICY "product_categories: public read published" ON public.product_cate
 CREATE POLICY "product_images: admin write" ON public.product_images USING (public.is_admin());
 CREATE POLICY "product_images: public read published" ON public.product_images FOR SELECT USING ((public.is_admin() OR (EXISTS ( SELECT 1
    FROM public.products p
-  WHERE ((p.id = product_images.product_id) AND (p.status = 'active'::text))))));
+  WHERE ((p.id = product_images.product_id) AND (p.status = 'active'::text)))
+  AND (variant_id IS NULL OR EXISTS (SELECT 1 FROM public.product_variants v
+    WHERE v.id = product_images.variant_id AND v.is_active)))));
 CREATE POLICY "product_option_values: admin write" ON public.product_option_values USING (public.is_admin());
 CREATE POLICY "product_option_values: public read published" ON public.product_option_values FOR SELECT USING ((public.is_admin() OR (EXISTS ( SELECT 1
    FROM (public.product_options po
@@ -467,6 +469,7 @@ REVOKE ALL ON FUNCTION public.cancel_refund_request(refund_request_id uuid, acto
 REVOKE ALL ON FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.claim_outbox_events(worker_id text, max_events integer, lease_seconds integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_outbox_event(event_id uuid, worker_id text, lease_token uuid, succeeded boolean, error_message text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.redrive_outbox_event(uuid,integer,text,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_checkout_quote(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text, ttl_seconds integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_fulfillment(order_id uuid, items jsonb, idempotency_key text, carrier text, tracking_number text, tracking_url text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_order(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) FROM PUBLIC;
@@ -534,6 +537,7 @@ GRANT ALL ON FUNCTION public.cancel_refund_request(refund_request_id uuid, actor
 GRANT ALL ON FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text) TO service_role;
 GRANT ALL ON FUNCTION public.claim_outbox_events(worker_id text, max_events integer, lease_seconds integer) TO service_role;
 GRANT ALL ON FUNCTION public.complete_outbox_event(event_id uuid, worker_id text, lease_token uuid, succeeded boolean, error_message text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.redrive_outbox_event(uuid,integer,text,text) TO service_role;
 GRANT ALL ON FUNCTION public.create_checkout_quote(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text, ttl_seconds integer) TO authenticated;
 GRANT ALL ON FUNCTION public.create_fulfillment(order_id uuid, items jsonb, idempotency_key text, carrier text, tracking_number text, tracking_url text) TO authenticated;
 GRANT ALL ON FUNCTION public.create_order(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) TO authenticated;

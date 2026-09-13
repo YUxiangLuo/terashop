@@ -280,7 +280,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     }
   });
 
-  test('0 元订单可标记 paid，但不会产生 0 元 transaction', async () => {
+  test('0 元客户订单直接 paid，但不会产生 0 元 transaction', async () => {
     const suffix = crypto.randomUUID();
     const { data: products } = await api('/rest/v1/products?slug=eq.ceramic-mug-350&select=id');
     const productId = (products as { id: string }[])[0].id;
@@ -302,11 +302,9 @@ describe('关键完整性：订单、支付、履约与退款', () => {
       const { data: created } = await rpc('create_order', {
         idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
       }, owner.token);
-      const order = created as { id: string; total: number };
+      const order = created as { id: string; total: number; financial_status: string };
       expect(Number(order.total)).toBe(0);
-
-      const { data: paid } = await rpc('mark_order_paid', { order_id: order.id }, admin.token);
-      expect((paid as { financial_status: string }).financial_status).toBe('paid');
+      expect(order.financial_status).toBe('paid');
 
       const { data: ledger } = await rpc('get_order_ledger', { order_id: order.id }, owner.token);
       expect((ledger as { transactions: unknown[] }).transactions).toEqual([]);

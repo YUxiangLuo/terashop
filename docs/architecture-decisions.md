@@ -35,6 +35,8 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 `create_order` 在单事务中创建并转换 15 分钟 Quote，不再提前扣库存；所有结账由 `expire_checkout_quotes` 统一过期。订单及意图的付款期限不可延长，转单沿用报价期限。
 `inventory_movements` 只记录真实 on_hand 变化；取消/退款以原始负流水为回补依据，不依赖变体当前的库存配置。所有订单必须先付款再履约，避免未付款却已出库的订单无法安全过期。
 
+有效预占从内部 `commerce.inventory_reservations` 工作集读取，不再扫描历史 Quote 行。报价行 AFTER INSERT 在取得 Quote/库存锁、校验额度后写入工作集；转单保留，completed/cancelled/expired 的 AFTER trigger 删除，保存点/事务回滚同时恢复。工作行必须匹配不可变报价行，禁止修改、提前删除或 TRUNCATE，不向 API 角色授权。查询仍检查 expires_at，Worker 延迟不延长预占；Worker 负责清理过期工作行，数据库 autovacuum 负责回收死元组，二者均须监控。历史快照和物理流水保持原义，工作集不是第二套可编辑库存账本。
+
 每次预占行 INSERT 都更新相应库存行的 `reservation_revision`，但不改 on_hand、不记物理流水。单纯行锁不能防止 REPEATABLE READ 旧快照漏看其他客户的预占；真实版本写冲突要求调用方重试整笔事务。每条新增履约事实也写父订单版本，即使连续部分履约没有改变状态投影，RPC 与受信 INSERT 都不能绕过。
 
 库存统一按 `(variant_id, location_id)` 取锁；退款在分摊前锁全部原库存。未付款取消/过期不产生库存流水。结账的变体锁使用 `NO KEY UPDATE`，避免与库存流水 FK 的 `KEY SHARE` 形成反向等待；不能先锁库存再取得 Quote 锁。
@@ -51,6 +53,8 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 免邮只记录实际收益：已满额包邮时不占独占资格，零收益独占免邮被跳过；最早的可叠加免邮可在后续优惠使金额跌破包邮线时延后生效，但不能穿透独占商品优惠。
 
 商品百分比/买赠使用持久化 `apply_scope=all/selected`，买赠的赠送集合使用 `get_scope=same_as_apply/selected`。插入目标自动收窄；删除最后一个目标仍是 selected 空集合，不扩大为全店或回退同款买赠。扩大范围须先删除对应目标，再显式重设 scope；创建定向活动应从 selected 或 inactive 开始，不能先公开全店活动再分请求补目标。目标变更写父促销版本并使用 NOWAIT；规则、scope、目标从同一 SQL 快照读取并进入 hash。整单优惠/免邮保留原有整单语义，本次不扩展目标 DSL。
+
+同一买赠内，购买资格与赠品必须占用不同实物单位；selected 的 apply/get 集合即使经商品或分类间接重叠，也不能让赠品同时满足 buy。先求最大可行赠品数量，再按单价/UUID 选择最便宜赠品，同时保留交集中的购买数量预算。相同集合与 same_as_apply 一致，买一赠一的 1/2/3 件分别赠 0/1/1 件。其他促销的叠加仍按原 priority 和剩余金额规则处理。
 
 当前已保存实际应用顺序、规则/目标快照与关系化分摊；它们不是可编辑促销的发布版本。
 版本化发布、候选组合选择和条件 DSL 仍是后续设计，不是已实现能力；替换当前贪心引擎前须双算验证。
@@ -76,6 +80,8 @@ Quote 流程采用 `on_hand - active reserved = available`：报价预占、转�
 核心账本 append-only，外键采用 `ON DELETE RESTRICT`；不得把模型/账本同步拆成两个网络请求。
 订单、履约和手工退款分别只公开 `create_order`、`create_fulfillment`、`refund_order`，通过必填幂等键、请求指纹与事务内幂等记录支持重试。不保留版本后缀、兼容别名或非幂等公开重载；履约和退款的内部写入由 private 函数承载。
 
+手工退款内部命令直接返回本次写入的退款 UUID，公开包装将该 UUID 绑定到幂等记录；不能按 created_at 或事务开始时间猜测“最新退款”。同单并发的不同请求分别绑定自己的资源，重放不再次退款。
+
 ## ADR-009：支付信任边界与 Outbox
 
 支付创建/捕获和 Worker RPC 仅授予 service role，浏览器不得持有该凭据。
@@ -85,6 +91,8 @@ PayPal 通过 OAuth2 调官方 postback API 验证 transmission headers；验签
 PayPal Capture declined 后终结当前意图并允许新建 Order。客户端 PaymentIntent 幂等键按 `(order_id, provider, idempotency_key)` 隔离；渠道仍使用本地意图 UUID，不直接复用客户提供的键。
 
 Outbox 存储每次领取确定的 `lease_expires_at` 与随机 `lease_token`。重领不能用新调用者的 lease_seconds 缩短旧期限；complete 必须同时匹配 event、worker、token 且未过期。消费者仍须幂等，租约 fencing 不提供外部副作用的 exactly-once。
+
+Outbox 每个自动重试窗口最多领取 25 次；最后一次失败立即进入 exhausted，最后一次租约过期由 claim 的有界清理进入 exhausted。仅 service 可调用 `redrive_outbox_event(event_id,expected_attempt,worker_id,reason)`，在匹配的耗尽点开启新窗口并追加不可变审计；保留 event_id 和累计 attempts，退避从新窗口重新计算。相同耗尽点与操作者/原因的重放是无副作用成功，不能重置后续处理；内容不同或非耗尽状态拒绝。详见[恢复流程](../supabase/functions/README.md)。
 
 PayPal Capture POST 前必须调用 `prepare_paypal_capture`，按 intent → quote → order 顺序复核归属、金额、订单及预占，并持久化捕获标记。
 普通取消不能穿透该标记，网络错误不清除它；重试先查询渠道，再复用原意图 UUID 作为幂等键。
@@ -103,6 +111,8 @@ Inbox 只保存原始事件的 SHA-256 与 allowlist 归一化字段，不保存
 真实成功 capture/refund 先写不可删除的 `provider_money_movements`，再匹配内部交易；金额冲突、订单取消或预占失效时标记 `action_required` 并写 Outbox，不能丢弃资金、伪造库存或静默复活订单。
 超出 USD 结账能力的成功资金仍按 PayPal 返回的十进制金额保存并对账，不能推进 USD 订单。
 `40P01` / `40001` / `55P03` 等瞬时数据库错误不等同商业冲突：保留资金事实，将 Inbox 留在 received / transient_database_error，按 `next_attempt_at` 指数退避重试本地入账（2–256 秒，Worker 自动重试最多处理 25 次），不重复发出渠道收退款；重试耗尽必须告警。
+
+Inbox 的 25 次限制仅约束自动 Worker，不封死可信事件再次入箱。排除故障后可重投原 provider/event_id、hash 和完整归一化 envelope，再次运行本地处理；累计次数与原事件身份保留，金额流水仍幂等。不能更换事件 ID、伪造 hash 或重发渠道扣款来恢复本地账本。
 
 ### PayPal
 
@@ -190,6 +200,8 @@ Receipt 不立即增加可售量，未处置数量只是该退货的待验收余
 
 Metafield 类型使用封闭 CHECK，未知类型拒绝；任意 JSON 必须显式选择 `json`。输入仍为 owner_type / owner_id，五个生成的 owner_*_id 列只负责路由真实外键，不接受客户端赋值。商品、变体、分类删除由 FK 级联清理对应扩展值；Customer / Order 的不可删除保护与匿名化合同不变。父对象删除与旧快照写入的并发正确性由 PostgreSQL RI 保证，EXISTS 检查只提供可读错误。
 
+定义与值的类型校验共用 `(owner_type,namespace,key)` 事务锁，范围跨同类 owner，而非单个 owner_id。竞争返回 55P03，内部持久 key guard 的真实版本写入让旧 REPEATABLE READ 快照以 40001 失败；调用方重试整笔事务。无定义的值仍允许写入，但并发新增定义也受同一保护；guard 在内容删除后保留，不能因暂时没有定义/值而删除并失去旧快照防护。
+
 shop 继续沿用单店约定。历史 owner 引用实验、性能计数及重建回归见 [归档设计复审](reviews/76cba7b.md)。
 
 ## ADR-020：显式目录读合同与扩展可见性
@@ -197,6 +209,8 @@ shop 继续沿用单店约定。历史 owner 引用实验、性能计数及重�
 Storefront 与 Admin 商品列表/详情使用不同 public RPC，输出显式 DTO；无需为了命名分层复制数据库或交易逻辑。Storefront 的发布/字段过滤不随调用者角色扩大，管理员预览也不得得到私有数据。Admin 入口先验证管理员/service 身份，详情可返回成本、草稿及内部扩展。现有底表 API 暂保留授权；商品、订单和客户管理已有基础查询合同，但不代表全部 API 已分层或底表已封闭。
 
 列表使用有界 UUID keyset 分页和精确分类过滤，先限定候选商品再计算默认仓可用量；不复用全店预占聚合，也不承诺库存快照、跨页一致性或已完成生产性能验证。详情只返回活跃变体、其可见图片和启用分类，库存口径与结账共享有效预占函数。
+
+旧 product_listing 也按目标变体索引查询预占工作集，不再物化全店预占。旧视图、匿名/客户 product_images 表读取与 Storefront DTO 均隐藏停用变体图片；管理员的底表读取仍允许管理这些图片，Storefront 输出则不随管理员身份扩大。
 
 Admin 列表独立使用 `(updated_at DESC,id DESC)` 复合索引和游标，按状态、精确分类、名称或 SKU 字面子串筛选；后台可见停用分类及变体。摘要只聚合当前页全部变体的价格范围和数量，不取完整详情、库存或精确总数。游标保留微秒时间戳但不提供跨请求快照，并发编辑可能把未读行移到已翻过范围；编辑前重读详情并沿用 revision 检查。基础子串搜索不引入全文索引或相关性引擎，低命中率搜索成本仍随目录规模增长。
 
@@ -241,6 +255,8 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 选择简化库存模型：`on_hand` 是未售出的库存余额，`available = on_hand - active reserved`。报价预占、转单继续持有、付款消费预占并扣减，发货不再扣减；不引入实物在库/已售未发货 `committed` 账本。
 
 `create_order` 是创建并转换 Quote 的幂等便捷入口，两步同事务，失败整体回滚；内部随机 Quote key 与调用方显式报价的 key 无关联。该命令使用独立 `order.create` 幂等范围、规范化请求指纹和当前订单 DTO 重放，成功重试不新增 Quote、不延长期限、不重复预占或占用促销。客户端按业务需要选择便捷下单或显式 Quote 流程，两者都支持安全重试。
+
+完整转单校验后若 total=0，客户命令在同一事务消费预占并将 financial_status 设为 paid、填写 paid_at，Quote 变为 completed。无需管理员或支付渠道，不创建 PaymentIntent 或虚构 capture；促销用量、库存、事件和幂等身份只落一次。零价格与全额优惠同样适用，过期/改价报价仍拒绝。
 
 删除即时扣库实现及 `expire_unpaid_orders`；统一调度 `expire_checkout_quotes`。取消或超时仅释放未付款预占，支付结果未知时保留原有捕获保护和迟到资金对账规则。支付账本/履约双表示的收敛不包含在本次改动中。
 

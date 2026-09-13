@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, afterEach, describe, expect, test } from 'bun:test';
 import { stockedProduct, archiveProduct, type CatalogFixture } from './support/catalog';
 import { Cleanup } from './support/cleanup';
+import { promotionFixture } from './support/promotions';
 import {
   api, rpc, signup, makeAdmin, stockOf, checked, TEST_ADDRESS,
   type TestUser,
@@ -173,6 +174,41 @@ describe('Checkout Quote 与库存预占', () => {
 });
 
 describe('Quote 转单与支付确认', () => {
+  for (const quoted of [false, true]) for (const discounted of [false, true])
+  test(`客户零元订单原子完成且不生成资金流水（quote=${quoted},discount=${discounted}）`, async () => {
+    const f = await stockedProduct(admin, { price: discounted ? 10 : 0, onHand: 5, cleanup });
+    const code = discounted ? `FREE-${crypto.randomUUID()}` : undefined;
+    const promo = code ? await promotionFixture(cleanup, { name: code, code, type: 'order_percentage',
+      params: { percent: 100 }, priority: 0 }) : undefined;
+    const key = crypto.randomUUID();
+    const quote = quoted ? await checked<QuoteResult>(createQuote(f,buyerA,1,key,{ discount_code: code })) : null;
+    if (quote) expect(await availability(f.variantId)).toMatchObject({ on_hand: 5, reserved: 1 });
+    const create = () => quoted
+      ? rpc('create_order_from_quote', { quote_id: quote!.id }, buyerA.token)
+      : rpc('create_order', { idempotency_key: key, items: [{ variant_id: f.variantId, quantity: 1 }],
+        address: TEST_ADDRESS, discount_code: code }, buyerA.token);
+    const first = await checked<{ id: string; total: number; financial_status: string }>(create());
+    expect(first).toMatchObject({ total: 0, financial_status: 'paid' });
+    expect(await checked(create())).toMatchObject({ id: first.id, financial_status: 'paid' });
+    expect(await availability(f.variantId)).toMatchObject({ on_hand: 4, reserved: 0, available: 4 });
+    expect(await checked(rpc('get_order_ledger', { order_id: first.id },buyerA.token)))
+      .toMatchObject({ transactions: [], balances: { captured: 0, refunded: 0, is_balanced: true } });
+    expect(await checked<{ delta: number }[]>(api(`/rest/v1/inventory_movements?order_id=eq.${first.id}&select=delta`, { service: true })))
+      .toEqual([{ delta: -1 }]);
+    if (promo) expect(await checked<{ used_count: number }[]>(api(`/rest/v1/promotions?id=eq.${promo}&select=used_count`, { service: true })))
+      .toEqual([{ used_count: 1 }]);
+    expect(await checked(rpc('get_order_checkout_quote', { order_id: first.id },buyerA.token)))
+      .toMatchObject({ status: 'completed' });
+  });
+
+  test('已过期零元 Quote 不允许转单或消费库存', async () => {
+    const f = await stockedProduct(admin, { price: 0, onHand: 5, cleanup });
+    const quote = await checked<QuoteResult>(createQuote(f,buyerA,1,undefined,{ ttl_seconds: 60 }));
+    await checked(rpc('expire_checkout_quotes', { max_quotes: 500, as_of: new Date(Date.now()+120_000).toISOString() },undefined,true));
+    expect((await rpc('create_order_from_quote', { quote_id: quote.id },buyerA.token)).status).toBe(400);
+    expect(await availability(f.variantId)).toMatchObject({ on_hand: 5, reserved: 0, available: 5 });
+  });
+
   test('转单不扣库存；支付捕获原子消费预占且重放不重复扣减', async () => {
     const quoted = await createQuote(paymentStock, buyerA, 2);
     expect(quoted.status).toBe(200);

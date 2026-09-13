@@ -367,6 +367,57 @@ describe('支付交易与已支付快照', () => {
 });
 
 describe('履约行、退款行与 Outbox', () => {
+  test('Outbox 最后一次租约过期进入 exhausted；受控重投保留身份、累计次数和审计', async () => {
+    await withRollback(database, async tx => {
+      await tx`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+      const exhausted = crypto.randomUUID(), retryable = crypto.randomUUID(), oldToken = crypto.randomUUID();
+      for (const [id, event, attempts] of [[-2, exhausted, 25], [-1, retryable, 24]] as const) {
+        await tx`insert into commerce.outbox_events
+          (id,event_id,aggregate_type,aggregate_id,event_type,idempotency_key,status,attempts,locked_at,locked_by,lease_token,lease_expires_at)
+          overriding system value values (${id},${event}::uuid,'test',${event}::uuid,'test',${event},'processing',${attempts},
+          clock_timestamp()-interval '2 minutes','old',${oldToken}::uuid,clock_timestamp()-interval '1 minute')`;
+      }
+      const [claim] = await tx`select public.claim_outbox_events('new',1,30) as result`;
+      expect(claim.result).toMatchObject([{ event_id: retryable, attempt: 25 }]);
+      const [state] = await tx`select status,attempts from commerce.outbox_events where event_id=${exhausted}::uuid`;
+      expect(state).toEqual({ status: 'exhausted', attempts: 25 });
+      const [late] = await tx`select public.complete_outbox_event(${exhausted}::uuid,'old',${oldToken}::uuid,true) as result`;
+      expect(late.result).toBe(false);
+      const [failed] = await tx`select public.complete_outbox_event(${retryable}::uuid,'new',${claim.result[0].lease_token}::uuid,false,'last failure') as result`;
+      expect(failed.result).toBe(true);
+      expect((await tx`select status from commerce.outbox_events where event_id=${retryable}::uuid`)[0].status).toBe('exhausted');
+      for (let i = 0; i < 2; i++) {
+        const [redrive] = await tx`select public.redrive_outbox_event(${exhausted}::uuid,25,'operator','dependency restored') as result`;
+        expect(redrive.result).toBe(true);
+      }
+      const [next] = await tx`select public.claim_outbox_events('new',1,30) as result`;
+      expect(next.result).toMatchObject([{ event_id: exhausted, attempt: 26 }]);
+      expect(next.result[0].lease_token).not.toBe(oldToken);
+      expect((await tx`select public.complete_outbox_event(${exhausted}::uuid,'new',${next.result[0].lease_token}::uuid,true) as result`)[0].result).toBe(true);
+      await tx`select public.redrive_outbox_event(${exhausted}::uuid,25,'operator','dependency restored')`;
+      expect((await tx`select status,attempts,retry_start from commerce.outbox_events where event_id=${exhausted}::uuid`)[0])
+        .toEqual({ status: 'published', attempts: 26, retry_start: 25 });
+      expect(await tx<{ worker_id: string; reason: string }[]>`select worker_id,reason from commerce.outbox_redrives where event_id=${exhausted}::uuid`)
+        .toEqual([{ worker_id: 'operator', reason: 'dependency restored' }]);
+      await tx`savepoint invalid_redrive`;
+      await expect(Promise.resolve(tx`select public.redrive_outbox_event(${exhausted}::uuid,25,'operator','different reason')`))
+        .rejects.toThrow('redrive attempt was used with different parameters');
+      await tx`rollback to savepoint invalid_redrive`;
+      await expect(Promise.resolve(tx`update commerce.outbox_events set retry_start=25 where event_id=${retryable}::uuid`))
+        .rejects.toThrow('outbox retry budget requires an audited redrive');
+      await tx`rollback to savepoint invalid_redrive`;
+      expect((await tx`select public.redrive_outbox_event(${retryable}::uuid,26,'operator','wrong attempt') result`)[0].result).toBe(false);
+      await tx`select public.redrive_outbox_event(${retryable}::uuid,25,'operator','dependency restored')`;
+      const [redriven] = await tx`select public.claim_outbox_events('new',1,30) result`;
+      expect(redriven.result).toMatchObject([{ event_id: retryable, attempt: 26 }]);
+      await tx`select public.complete_outbox_event(${retryable}::uuid,'new',${redriven.result[0].lease_token}::uuid,false,'retry failed')`;
+      expect((await tx`select status,extract(epoch from available_at-now())::int delay from commerce.outbox_events
+        where event_id=${retryable}::uuid`)[0]).toEqual({ status: 'failed', delay: 2 });
+    });
+    expect((await rpc('redrive_outbox_event', { event_id: crypto.randomUUID(), expected_attempt: 25,
+      worker_id: 'customer', reason: 'not authorized' }, buyer.token)).status).toBe(403);
+  });
+
   test('履约幂等写入关系化 fulfillment_lines，并成为汇总依据', async () => {
     const { id: paidOrderId, itemId: paidOrderItemId } = await givenPaidOrder();
     const key = `fulfillment-${crypto.randomUUID()}`;

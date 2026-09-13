@@ -20,6 +20,59 @@ async function actor(sql: TransactionSQL, user: TestUser) {
 const staleAfterCommit = (run: (sql: TransactionSQL) => Promise<unknown>, commit: () => Promise<unknown>, isolation: 'repeatable read' | 'read committed' = 'repeatable read') =>
   runStale(database, run, commit, isolation);
 
+for (const isolation of ['read committed', 'repeatable read'] as const)
+for (const mode of ['change-definition', 'create-definition', 'definition-first'] as const)
+test(`Metafield 类型关系串行化：${mode} / ${isolation}`, async () => {
+  const namespace = `race-${crypto.randomUUID()}`, owner = crypto.randomUUID();
+  try {
+    if (mode === 'change-definition') await database`insert into public.metafield_definitions(owner_type,namespace,key,name,type)
+      values('shop',${namespace},'x','x','text')`;
+    await database.begin(async first => {
+      await first.unsafe(`set transaction isolation level ${isolation}`);
+      if (mode === 'definition-first') await first`insert into public.metafield_definitions(owner_type,namespace,key,name,type)
+        values('shop',${namespace},'x','x','number')`;
+      else await first`insert into public.metafields(owner_type,owner_id,namespace,key,type,value)
+        values('shop',${owner}::uuid,${namespace},'x','text','"text"')`;
+      // The first statement has completed but remains uncommitted.
+      const error = await database.begin(async second => {
+        await second.unsafe(`set transaction isolation level ${isolation}`);
+        await second`set local lock_timeout='2s'`;
+        if (mode === 'change-definition') await second`update public.metafield_definitions set type='number' where namespace=${namespace}`;
+        else if (mode === 'create-definition') await second`insert into public.metafield_definitions(owner_type,namespace,key,name,type)
+          values('shop',${namespace},'x','x','number')`;
+        else await second`insert into public.metafields(owner_type,owner_id,namespace,key,type,value)
+          values('shop',${owner}::uuid,${namespace},'x','text','"text"')`;
+      }).then(() => null, error => error);
+      expect(error).toMatchObject({ errno: '55P03', message: 'metafield key is being modified; retry transaction' });
+    });
+    expect(await database`select m.id from public.metafields m join public.metafield_definitions d
+      using(owner_type,namespace,key) where m.namespace=${namespace} and m.type<>d.type`).toHaveLength(0);
+  } finally {
+    await database`delete from public.metafields where namespace=${namespace}`;
+    await database`delete from public.metafield_definitions where namespace=${namespace}`;
+  }
+});
+
+for (const exists of [false, true]) test(`Metafield 定义提交后旧 RR 快照拒绝写入旧类型（已有定义=${exists}）`, async () => {
+  const namespace = `stale-${crypto.randomUUID()}`;
+  try {
+    if (exists) await database`insert into public.metafield_definitions(owner_type,namespace,key,name,type)
+      values('shop',${namespace},'x','x','text')`;
+    const result = await staleAfterCommit(async sql => {
+      await sql`insert into public.metafields(owner_type,owner_id,namespace,key,type,value)
+        values('shop',${crypto.randomUUID()}::uuid,${namespace},'x','text','"text"')`;
+    }, async () => {
+      if (exists) await database`update public.metafield_definitions set type='number' where namespace=${namespace}`;
+      else await database`insert into public.metafield_definitions(owner_type,namespace,key,name,type)
+        values('shop',${namespace},'x','x','number')`;
+    });
+    expect(result.error).toMatchObject({ errno: '40001' });
+  } finally {
+    await database`delete from public.metafields where namespace=${namespace}`;
+    await database`delete from public.metafield_definitions where namespace=${namespace}`;
+  }
+});
+
 for (const action of ['quote', 'order', 'adjust'] as const) test(`新 Quote 提交后，旧 RR 快照不能通过 ${action} 再消耗相同可用库存`, async () => {
   const f = await fixture(), first = await signup(), second = await signup();
   await checked(rpc('adjust_inventory', { variant_id: f.variantId, delta: -99 }, admin.token));

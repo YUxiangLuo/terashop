@@ -323,15 +323,12 @@ CREATE FUNCTION private.active_reserved_quantity(p_variant_id uuid, p_location_i
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO ''
     AS $$
-  select coalesce(sum(ql.quantity), 0)::integer
-  from commerce.checkout_quote_lines ql
-  join commerce.checkout_quotes q on q.id = ql.quote_id
-  where ql.variant_id = p_variant_id
-    and ql.location_id = p_location_id
-    and ql.track_inventory
-    and q.status in ('open', 'converted')
-    and q.expires_at > now()
-    and (p_exclude_quote_id is null or q.id <> p_exclude_quote_id);
+  select coalesce(sum(r.quantity), 0)::integer
+  from commerce.inventory_reservations r
+  where r.variant_id = p_variant_id
+    and r.location_id = p_location_id
+    and r.expires_at > now()
+    and (p_exclude_quote_id is null or r.quote_id <> p_exclude_quote_id);
 $$;
 
 CREATE FUNCTION private.assert_checkout_quote_totals() RETURNS trigger
@@ -996,6 +993,10 @@ declare
   v_get integer;
   v_get_pct numeric;
   v_free integer;
+  v_get_qty integer;
+  v_get_only_qty integer;
+  v_rounds integer;
+  v_overlap_budget integer;
   v_get_role text;
   v_fs public.promotions;
   v_deferred_fs public.promotions;
@@ -1163,16 +1164,27 @@ begin
       where private.line_in_scope(v_snapshot, 'apply', l.variant_id, l.product_id, l.category_ids);
       v_get_role := case when v_snapshot ->> 'get_scope' = 'selected' then 'get' else 'apply' end;
       if v_get_role = 'get' then
-        v_free := least(
-          (floor(v_scope_qty / v_buy))::int * v_get,
-          (select coalesce(sum(l.quantity), 0) from _price_lines l
-           where private.line_in_scope(v_snapshot, 'get', l.variant_id, l.product_id, l.category_ids))
-        );
+        select coalesce(sum(l.quantity), 0), coalesce(sum(l.quantity) filter (
+          where not private.line_in_scope(v_snapshot, 'apply', l.variant_id, l.product_id, l.category_ids)), 0)
+        into v_get_qty, v_get_only_qty from _price_lines l
+        where private.line_in_scope(v_snapshot, 'get', l.variant_id, l.product_id, l.category_ids);
+        -- Reserve distinct purchase units before choosing the cheapest gifts.
+        -- Cart quantities bound this search to at most 100 rounds. A selected
+        -- scope can overlap through products/categories, not only target IDs.
+        v_rounds := v_scope_qty / v_buy;
+        loop
+          v_free := least(v_rounds * v_get, v_get_qty);
+          exit when v_rounds * v_buy + greatest(0, v_free - v_get_only_qty) <= v_scope_qty;
+          v_rounds := v_rounds - 1;
+        end loop;
+        v_overlap_budget := v_scope_qty - ((v_free + v_get - 1) / v_get) * v_buy;
       else
         v_free := (floor(v_scope_qty / (v_buy + v_get)))::int * v_get;
+        v_overlap_budget := v_free;
       end if;
       for v_line in
-        select l.variant_id, l.unit_price, sum(l.quantity)::integer quantity, sum(l.discount_total) discount_total
+        select l.variant_id, l.unit_price, sum(l.quantity)::integer quantity, sum(l.discount_total) discount_total,
+          bool_or(private.line_in_scope(v_snapshot, 'apply', l.variant_id, l.product_id, l.category_ids)) overlaps_apply
         from _price_lines l
         where private.line_in_scope(v_snapshot, v_get_role, l.variant_id, l.product_id, l.category_ids)
         group by l.variant_id, l.unit_price
@@ -1183,11 +1195,13 @@ begin
         v_unit_disc := round(v_line.unit_price * v_get_pct / 100, 2);
         if v_unit_disc > 0 and v_room > 0 then
           v_take := least(v_free, v_line.quantity, floor(v_room / v_unit_disc)::int);
+          if v_line.overlaps_apply then v_take := least(v_take, v_overlap_budget); end if;
           if v_take > 0 then
             v_disc := v_take * v_unit_disc;
             perform private.allocate_price_discount(v_disc, v_line.variant_id);
             v_amount := v_amount + v_disc;
             v_free := v_free - v_take;
+            if v_line.overlaps_apply then v_overlap_budget := v_overlap_budget - v_take; end if;
           end if;
         end if;
       end loop;
@@ -1584,7 +1598,7 @@ declare
   v_reserved integer;
 begin
   select * into v_quote from commerce.checkout_quotes q
-  where q.id = new.quote_id;
+  where q.id = new.quote_id for update;
   if not found or v_quote.status <> 'open' or v_quote.expires_at <= now() then
     raise exception 'reservation line requires an active open quote';
   end if;
@@ -1610,6 +1624,41 @@ begin
     if v_on_hand - v_reserved < new.quantity then
       raise exception 'reservation line exceeds available stock';
     end if;
+    -- Validate and materialize together in AFTER INSERT, including bulk inserts.
+    insert into commerce.inventory_reservations(quote_line_id, quote_id, variant_id, location_id, quantity, expires_at)
+    values (new.id, new.quote_id, new.variant_id, new.location_id, new.quantity, v_quote.expires_at);
+  end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.release_inventory_reservations() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if new.status in ('completed', 'cancelled', 'expired') then
+    delete from commerce.inventory_reservations where quote_id = new.id;
+  end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.validate_inventory_reservation() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if tg_op = 'DELETE' then
+    if exists (select 1 from commerce.checkout_quotes q where q.id = old.quote_id and q.status in ('open', 'converted')) then
+      raise exception 'active inventory reservation cannot be deleted';
+    end if;
+    return old;
+  end if;
+  if not exists (
+    select 1 from commerce.checkout_quote_lines l join commerce.checkout_quotes q on q.id = l.quote_id
+    where l.id = new.quote_line_id and l.track_inventory and q.status in ('open', 'converted')
+      and (l.quote_id, l.variant_id, l.location_id, l.quantity, q.expires_at)
+        = (new.quote_id, new.variant_id, new.location_id, new.quantity, new.expires_at)
+    for no key update of q
+  ) then
+    raise exception 'inventory reservation must match an active quote line';
   end if;
   return new;
 end;
@@ -1963,6 +2012,15 @@ begin
                              'promotions', v_price -> 'promotions',
                              'checkout_quote_id', v_quote.id,
                              'inventory_reserved', true));
+  if v_order.total = 0 then
+    -- No provider or synthetic capture is needed. Conversion already owns the
+    -- quote/inventory locks and has revalidated the complete pricing snapshot.
+    perform private.consume_order_reservation(v_order.id);
+    update public.orders set financial_status = 'paid', paid_at = now()
+      where id = v_order.id returning * into v_order;
+    insert into public.order_events(order_id,actor_id,type,data)
+      values(v_order.id,auth.uid(),'payment_received',jsonb_build_object('amount',0,'free_order',true));
+  end if;
   return private.storefront_order_json(v_order);
 end;
 $$;

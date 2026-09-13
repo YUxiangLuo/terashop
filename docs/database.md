@@ -46,5 +46,6 @@ bun run docs:check
 
 - [基点 b7bac3f 的八项审阅](reviews/b7bac3f.md)：退款发送竞态、库存顺序、生命周期、金额、Outbox、权限、幂等。
 - [基点 76cba7b 的设计复审](reviews/76cba7b.md)：促销 scope、RR 旧快照、owner FK、订单号、校验次数和查询边界。
+- [基点 ca5a4ca 的外部 Review 复核](reviews/ca5a4ca.md)：买赠集合重叠、重试耗尽与恢复、退款资源关联、Metafield 并发、图片可见性、零元订单和预占工作集。
 
 报告按提交归档，不滚动改写历史测试数量或本机计时。所有客户下单已统一为 Quote 预占流程（ADR-024），支付已统一为 payment_transactions（ADR-025）；履约 JSON/关系表仍有真实调用与回归，后续收敛须单独修改业务链路。

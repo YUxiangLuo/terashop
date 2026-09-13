@@ -56,11 +56,26 @@ for (const sqlstate of ['40P01', '40001', '55P03']) test(`${mode} 遇到 ${sqlst
     await tx`select public.retry_payment_provider_events(200)`;
     const [waiting] = await tx`select attempts,next_attempt_at>clock_timestamp() as backed_off from commerce.payment_provider_events where provider_event_id=${eventId}`;
     expect(waiting).toMatchObject({ attempts: 1, backed_off: true });
+    if (sqlstate === '55P03') {
+      for (let attempt = 2; attempt <= 25; attempt++) {
+        await tx`update commerce.payment_provider_events set next_attempt_at=clock_timestamp()-interval '1 second' where provider_event_id=${eventId}`;
+        await tx`select public.retry_payment_provider_events(200)`;
+      }
+      expect((await tx`select attempts from commerce.payment_provider_events where provider_event_id=${eventId}`)[0].attempts).toBe(25);
+    }
     await tx`select set_config('test.refund_sqlstate','',true)`;
     await tx`update commerce.payment_provider_events set next_attempt_at=clock_timestamp()-interval '1 second' where provider_event_id=${eventId}`;
     await tx`select public.retry_payment_provider_events(200)`;
+    if (sqlstate === '55P03') {
+      expect((await tx`select status,attempts from commerce.payment_provider_events where provider_event_id=${eventId}`)[0])
+        .toEqual({ status: 'received', attempts: 25 });
+      // Exhaustion stops the worker, not an authenticated replay of the exact envelope.
+      for (let replay = 0; replay < 2; replay++) await tx`select public.ingest_payment_provider_event(
+        'paypal',${eventId},'api_response',${`paypal.${mode}.api_result`},${reference},false,now(),
+        ${await sha256Hex(JSON.stringify(data))},${JSON.stringify(data)}::text::jsonb)`;
+    }
     const [done] = await tx`select status,outcome,attempts from commerce.payment_provider_events where provider_event_id=${eventId}`;
-    expect(done).toMatchObject({ status: 'processed', outcome: request ? 'refunded' : 'captured', attempts: 2 });
+    expect(done).toMatchObject({ status: 'processed', outcome: request ? 'refunded' : 'captured', attempts: sqlstate === '55P03' ? 26 : 2 });
     const [money] = await tx`select reconciliation_status,last_error from commerce.provider_money_movements where provider_reference=${reference}`;
     expect(money).toMatchObject({ reconciliation_status: 'matched', last_error: null });
     await tx`select private.process_payment_provider_event(id) from commerce.payment_provider_events where provider_event_id=${eventId}`;

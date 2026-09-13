@@ -359,11 +359,27 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.lock_metafield_key(p_owner text, p_namespace text, p_key text) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  -- Callers may already hold a definition/value row or a catalog/customer lock.
+  -- Fail rather than waiting backwards for another key writer's parent lock.
+  if not pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended(
+    'metafield:' || jsonb_build_array(p_owner,p_namespace,p_key)::text, 0)) then
+    raise exception using errcode = '55P03', message = 'metafield key is being modified; retry transaction';
+  end if;
+  insert into private.metafield_key_guards as g(owner_type,namespace,key)
+    values(p_owner,p_namespace,p_key)
+    on conflict (owner_type,namespace,key) do update set revision = g.revision + 1;
+end;
+$$;
+
 CREATE FUNCTION private.enforce_metafield_definition_compatibility() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
 begin
+  perform private.lock_metafield_key(new.owner_type,new.namespace,new.key);
   if exists (
     select 1
     from public.metafields m
@@ -385,6 +401,7 @@ CREATE FUNCTION private.enforce_metafield_integrity() RETURNS trigger
 declare
   v_definition_type text;
 begin
+  perform private.lock_metafield_key(new.owner_type,new.namespace,new.key);
   select d.type into v_definition_type
   from public.metafield_definitions d
   where d.owner_type = new.owner_type

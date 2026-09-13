@@ -65,10 +65,17 @@ Webhook 入箱后处理失败返回 500；已识别的瞬时数据库故障保�
 | Edge `paypal-reconcile-refunds` | `{"max_events":20}` | 每分钟；同一请求最短轮询间隔 5 分钟 |
 | RPC `claim_outbox_events` | `{"worker_id":"worker-1","max_events":50,"lease_seconds":300}` | 循环领取，副作用消费者必须幂等 |
 | RPC `complete_outbox_event` | `{"event_id":"<uuid>","worker_id":"worker-1","lease_token":"<claim 返回的 uuid>","succeeded":true}` | 消费后确认；失败传 false 与 `error_message` |
+| RPC `redrive_outbox_event` | `{"event_id":"<uuid>","expected_attempt":25,"worker_id":"operator-1","reason":"依赖已恢复，工单号…"}` | 人工确认原因并排除故障后重投；不自动无限重试 |
 
 交易过期只需调度 `expire_checkout_quotes`，每次最多处理 500 个对象，使用 SKIP LOCKED；旧 `expire_unpaid_orders` 已移除。未付款窗口到期前普通取消仍受不明 Capture 保护，到期 Worker 释放预占不代表渠道资金已失败，迟到成功继续进入对账。
 Cart 到期立即拒绝凭据访问，但物理清理依赖 `purge_expired_carts`；独立调用并监控积压，不取消关联 Quote/订单或改库存。终态 Cart 的行属性保留到清理，Quote/订单历史属性不在 Cart 清理范围。
 Outbox claim 返回 `attempt`、`lease_token` 和 `lease_expires_at`；过期、旧 token、错误 owner 的 complete 返回 false。处理时长超过租约需调整下次领取配置；相同 worker_id 不能替代租约 token，消费者仍须按 event_id 幂等。
+
+Outbox 每个自动窗口最多领取 25 次。最后一次处理失败进入 exhausted；最后一次租约到期后，后续 claim 会有界清理该状态。部署方用受信数据库只读监控 `commerce.outbox_events` 的 exhausted、超期 processing 及积压年龄；该表不对 PostgREST 开放。恢复时读取当前累计 attempts 作为 expected_attempt，调用 redrive；保留事件 ID、payload、累计次数，追加 `commerce.outbox_redrives` 审计并开启新 25 次窗口。相同 event/expected_attempt/worker/reason 的重放返回 true，不改变后续 processing/published 状态；不同内容或不匹配状态拒绝。禁止直接清零 attempts、修改 payload 或换 event_id 重发。
+
+Inbox 自动重试达到 25 次后停止，事件不会因此丢失。排除故障后，从受信数据库取原 `commerce.payment_provider_events` 的 provider、provider_event_id、source、event_type、object_reference、livemode、occurred_at、payload_hash、data，通过 service-only `ingest_payment_provider_event` 原样重投；已有事件保留累计次数并重跑本地处理。也可让渠道通过已验签的 Webhook 重送同一原始事件。不能以重新抓取的不同 JSON 伪造旧 hash、改事件身份或再发 Capture/Refund POST。先在本地/渠道 Sandbox 演练重投成功、重复重投不重复入账，再为生产操作者开放流程。
+
+库存预占工作表的终态清理由 Quote Worker 驱动；即使 Worker 延迟，查询也按 expires_at 排除已到期预占。监控 Worker 积压及数据库 autovacuum/死元组，不能将历史报价增长转化为工作表长期膨胀。
 
 关注 `payment.reconciliation_required`、`paypal.refund_reconciliation_requested`，告警失败/重试耗尽的 Inbox、Outbox、unmatched / action-required 资金和退款延迟。
 不明 Capture / Refund 必须重试或对账；不得先手工收款或重新申请退款再猜测线上资金结果。未绑定且发出超过一小时的退款会停止 POST 重试，额度继续保留；需人工核实渠道结果，再用可信 Refund ID 绑定并 GET 恢复，不能换新键盲退。上线仍须核实真实渠道的幂等保留期。

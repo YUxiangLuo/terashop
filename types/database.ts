@@ -1932,6 +1932,15 @@ export type Database = {
         }
         Returns: Json
       }
+      redrive_outbox_event: {
+        Args: {
+          event_id: string
+          expected_attempt: number
+          reason: string
+          worker_id: string
+        }
+        Returns: boolean
+      }
       refund_order: {
         Args: {
           amount?: number
