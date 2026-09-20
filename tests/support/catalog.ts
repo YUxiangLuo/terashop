@@ -32,7 +32,7 @@ export async function stockedProduct(admin: TestUser, options: CatalogOptions = 
     await checked(api(`/rest/v1/products?id=eq.${productId}`, { service: true, method: 'PATCH', body: { status: 'active' } }));
     const onHand = options.onHand ?? 100;
     if (onHand && options.trackInventory !== false) await checked(command('adjust_inventory', {
-      variant_id: variantId, delta: onHand, reason: 'restock', note: 'test fixture',
+      idempotency_key: crypto.randomUUID(), variant_id: variantId, delta: onHand, reason: 'restock', note: 'test fixture',
     }, admin.token));
     return { productId, variantId, sku, slug };
   } catch (error) {

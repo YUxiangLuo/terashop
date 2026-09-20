@@ -35,14 +35,14 @@ async function filled(owner?: TestUser, extra: object = {}): Promise<Cart> {
 
 test('注册生成独立客户；同邮箱后台客户不被认领，联系邮箱不决定权限或角色', async () => {
   const email = `identity-${crypto.randomUUID()}@test.com`;
-  const offline = await checked<Customer>(rpc('create_customer', { email, full_name: 'Offline customer' }, admin.token));
+  const offline = await checked<Customer>(rpc('create_customer', { idempotency_key: crypto.randomUUID(), email, full_name: 'Offline customer' }, admin.token));
   const owner = await signup(email);
   expect(owner.customerId).not.toBe(owner.userId); expect(owner.customerId).not.toBe(offline.id);
   expect(await customer(owner)).toMatchObject({ auth_user_id: owner.userId, email });
   expect(offline.auth_user_id).toBeNull();
   expect(await checked<Customer[]>(api(`/rest/v1/customers?id=eq.${offline.id}`, { token: owner.token }))).toEqual([]);
-  expect((await rpc('create_customer', { email }, owner.token)).status).toBe(400);
-  const another = await checked<Customer>(rpc('create_customer', { email }, admin.token));
+  expect((await rpc('create_customer', { idempotency_key: crypto.randomUUID(), email }, owner.token)).status).toBe(403);
+  const another = await checked<Customer>(rpc('create_customer', { idempotency_key: crypto.randomUUID(), email }, admin.token));
   expect(another.id).not.toBe(offline.id);
 });
 
@@ -108,7 +108,7 @@ test('客户匿名化清联系信息、地址、metafield 和 Cart，不删除�
   const owner = await signup(); const cart = await filled(owner, { address: TEST_ADDRESS, note: 'private note', items: items(1, { name: 'private text' }) });
   await checked(api('/rest/v1/addresses', { token: owner.token, method: 'POST', body: TEST_ADDRESS }));
   await checked(api('/rest/v1/metafields', { token: admin.token, method: 'POST', body: { owner_type: 'customer', owner_id: owner.customerId, namespace: 'contact', key: 'text', type: 'text', value: 'private' } }));
-  const order = await fixtureOrder(fixture, owner); await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  const order = await fixtureOrder(fixture, owner); await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   const erased = await checked<Customer>(rpc('anonymize_customer', { customer_id: owner.customerId }, admin.token));
   expect(erased).toMatchObject({ email: null, full_name: '', phone: null, anonymized_at: expect.any(String) });
   expect(await database`select id from commerce.carts where id=${cart.id}::uuid`).toHaveLength(0);
@@ -187,12 +187,12 @@ for (const authenticated of [false, true]) test(`${authenticated ? '登录' : '�
 test('Cart 不预占库存、不锁价：缺货可保留意向，转 Quote 失败原子回滚', async () => {
   const owner = await signup(); const stock = await stockOf(fixture.sku); const cart = await filled(owner, { items: items(3), address: TEST_ADDRESS });
   expect(await stockOf(fixture.sku)).toBe(stock);
-  await checked(rpc('adjust_inventory', { variant_id: fixture.variantId, delta: 2 - stock, reason: 'adjust' }, admin.token));
+  await checked(rpc('adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: fixture.variantId, delta: 2 - stock, reason: 'adjust' }, admin.token));
   try {
     expect((await rpc('checkout_cart', { cart_id: cart.id, expected_version: cart.version }, owner.token)).status).toBe(400);
     expect(await checked<Cart>(get(cart, owner))).toMatchObject({ status: 'active', version: cart.version, quote_id: null });
     expect(await database`select id from commerce.checkout_quotes where customer_id=${owner.customerId}::uuid`).toHaveLength(0);
-  } finally { await checked(rpc('adjust_inventory', { variant_id: fixture.variantId, delta: stock - 2, reason: 'adjust' }, admin.token)); }
+  } finally { await checked(rpc('adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: fixture.variantId, delta: stock - 2, reason: 'adjust' }, admin.token)); }
 });
 
 test('预览使用当前目录价格，Cart 不存金额；生成 Quote 后继续使用原报价的失效/重计价规则', async () => {
@@ -226,7 +226,7 @@ for (const online of [false, true]) test(`Cart → Quote → ${online ? 'PayPal'
   expect(quote.lines.map(l => l.line_key)).toEqual(cart.lines.map(l => l.line_key));
   const order = await checked<{ id: string; total: number; currency: string }>(rpc('create_order_from_quote', { quote_id: quote.id }, owner.token));
   if (online) await settleIntent(await fixtureIntent({ ...order, itemId: quote.lines[0].id, quoteId: quote.id }, owner));
-  else await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  else await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   expect(await stockOf(fixture.sku)).toBe(stock - 2);
   const lines = await checked<Array<{ id: string }>>(api(`/rest/v1/order_items?order_id=eq.${order.id}&select=id`, { token: owner.token }));
   expect(lines.map(l => l.id).sort()).toEqual(quote.lines.map(l => l.id).sort());

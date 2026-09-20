@@ -157,7 +157,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
       items: [{ variant_id: mugId, quantity: 1 }], address: TEST_ADDRESS,
     }, customer.token);
     const order = created as { id: string; total: number };
-    await rpc('mark_order_paid', { order_id: order.id }, admin.token);
+    await rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token);
 
     const { data } = await rpc('update_order_address', {
       order_id: order.id,
@@ -213,7 +213,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
       idempotency_key: crypto.randomUUID(), items: [{ variant_id: keyboardId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const order = created as { id: string; total: number };
-    await rpc('mark_order_paid', { order_id: order.id }, admin.token);
+    await rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token);
 
     const { data: lines } = await api(
       `/rest/v1/order_items?order_id=eq.${order.id}&select=id,refunded_quantity`,
@@ -246,7 +246,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
     let before = await stockOf('CABLE-1M');
     if (before < 2) {
       await rpc('adjust_inventory', {
-        variant_id: cableId, delta: 5 - before, reason: 'restock', note: '退款测试补货',
+        idempotency_key: crypto.randomUUID(), variant_id: cableId, delta: 5 - before, reason: 'restock', note: '退款测试补货',
       }, admin.token);
       before = await stockOf('CABLE-1M');
     }
@@ -255,7 +255,7 @@ describe('关键完整性：订单、支付、履约与退款', () => {
       idempotency_key: crypto.randomUUID(), items: [{ variant_id: cableId, quantity: 1 }], address: TEST_ADDRESS,
     }, owner.token);
     const orderId = (created as { id: string }).id;
-    await rpc('mark_order_paid', { order_id: orderId }, admin.token);
+    await rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: orderId }, admin.token);
     const { data: lines } = await api(`/rest/v1/order_items?order_id=eq.${orderId}&select=id`, {
       token: owner.token,
     });
@@ -323,7 +323,7 @@ describe('关键完整性：并发、库存和审计', () => {
     let before = await stockOf('CABLE-1M');
     if (before < 2) {
       await rpc('adjust_inventory', {
-        variant_id: cableId, delta: 5 - before, reason: 'restock', note: '完整性测试补货',
+        idempotency_key: crypto.randomUUID(), variant_id: cableId, delta: 5 - before, reason: 'restock', note: '完整性测试补货',
       }, admin.token);
       before = await stockOf('CABLE-1M');
     }

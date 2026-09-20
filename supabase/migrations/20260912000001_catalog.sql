@@ -58,12 +58,38 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.create_customer(email text DEFAULT NULL, full_name text DEFAULT '', phone text DEFAULT NULL) RETURNS public.customers
+CREATE FUNCTION public.create_customer(idempotency_key text, email text DEFAULT NULL, full_name text DEFAULT '', phone text DEFAULT NULL) RETURNS public.customers
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_customer public.customers;
+declare
+  v_customer public.customers;
+  v_subject_id constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
+  v_key text := btrim(idempotency_key);
+  v_email text := nullif(btrim(email), '');
+  v_hash text;
+  v_record commerce.command_idempotency;
 begin
-  if not public.is_admin() and auth.role() is distinct from 'service_role' then raise exception 'admin only'; end if;
-  insert into public.customers(email, full_name, phone) values (nullif(btrim(email), ''), full_name, phone) returning * into v_customer;
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode = '42501', message = 'admin only';
+  end if;
+  if coalesce(v_key, '') = '' or length(v_key) > 200 then
+    raise exception using errcode = '22023', message = 'idempotency_key is required and must be at most 200 characters';
+  end if;
+  v_hash := private.command_request_hash(jsonb_build_object('email',v_email,'full_name',full_name,'phone',phone));
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('customer.create:' || v_subject_id || ':' || v_key, 0));
+  select * into v_record from commerce.command_idempotency c
+    where c.scope = 'customer.create' and c.subject_id = v_subject_id and c.idempotency_key = v_key;
+  if found then
+    if v_record.request_hash <> v_hash then
+      raise exception using errcode = 'PT409', message = 'idempotency key was used with different customer parameters';
+    end if;
+    -- Re-read rather than caching PII: edits and anonymization survive retries.
+    select * into v_customer from public.customers where id = v_record.resource_id;
+    if not found then raise exception using errcode = 'PT404', message = 'idempotency resource no longer exists'; end if;
+    return v_customer;
+  end if;
+  insert into public.customers(email, full_name, phone) values (v_email, full_name, phone) returning * into v_customer;
+  insert into commerce.command_idempotency(scope,subject_id,idempotency_key,request_hash,resource_type,resource_id)
+    values ('customer.create',v_subject_id,v_key,v_hash,'customer',v_customer.id);
   return v_customer;
 end;
 $$;
@@ -609,22 +635,45 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.adjust_inventory(variant_id uuid, delta integer, reason text DEFAULT 'adjust'::text, note text DEFAULT NULL::text, location_id uuid DEFAULT NULL::uuid) RETURNS public.inventory_levels
+CREATE FUNCTION public.adjust_inventory(variant_id uuid, delta integer, idempotency_key text, reason text DEFAULT 'adjust'::text, note text DEFAULT NULL::text, location_id uuid DEFAULT NULL::uuid) RETURNS public.inventory_levels
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
 declare
   v_location_id uuid;
   v_level public.inventory_levels;
+  v_subject_id constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
+  v_key text := btrim(idempotency_key);
+  v_hash text;
+  v_record commerce.command_idempotency;
 begin
   if not public.is_admin() then
-    raise exception 'admin only';
+    raise exception using errcode = '42501', message = 'admin only';
+  end if;
+  if coalesce(v_key, '') = '' or length(v_key) > 200 then
+    raise exception using errcode = '22023', message = 'idempotency_key is required and must be at most 200 characters';
   end if;
   if delta is null or delta = 0 then
-    raise exception 'delta must be a non-zero integer';
+    raise exception using errcode = '22023', message = 'delta must be a non-zero integer';
   end if;
-  if reason not in ('restock', 'adjust') then
-    raise exception 'reason must be restock or adjust';
+  if reason is null or reason not in ('restock', 'adjust') then
+    raise exception using errcode = '22023', message = 'reason must be restock or adjust';
+  end if;
+
+  -- Hash the requested location, but bind the resolved warehouse on first success.
+  v_hash := private.command_request_hash(jsonb_build_object(
+    'variant_id',variant_id,'delta',delta,'reason',reason,'note',note,'location_id',location_id));
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('inventory.adjust:' || v_subject_id || ':' || v_key, 0));
+  select * into v_record from commerce.command_idempotency c
+    where c.scope = 'inventory.adjust' and c.subject_id = v_subject_id and c.idempotency_key = v_key;
+  if found then
+    if v_record.request_hash <> v_hash then
+      raise exception using errcode = 'PT409', message = 'idempotency key was used with different inventory parameters';
+    end if;
+    select * into v_level from public.inventory_levels il
+      where il.variant_id = v_record.resource_id and il.location_id = v_record.resource_location_id;
+    if not found then raise exception using errcode = 'PT404', message = 'idempotency resource no longer exists'; end if;
+    return v_level;
   end if;
 
   v_location_id := coalesce(
@@ -653,6 +702,8 @@ begin
   values (adjust_inventory.variant_id, v_location_id, adjust_inventory.delta,
           v_level.on_hand, adjust_inventory.reason, auth.uid(), note);
 
+  insert into commerce.command_idempotency(scope,subject_id,idempotency_key,request_hash,resource_type,resource_id,resource_location_id)
+    values ('inventory.adjust',v_subject_id,v_key,v_hash,'inventory_level',variant_id,v_location_id);
   return v_level;
 end;
 $$;

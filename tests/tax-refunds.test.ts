@@ -124,7 +124,7 @@ describe('修复：退款闭环', () => {
     orderId = (o as { id: string }).id;
     const { data: items } = await api(`/rest/v1/order_items?order_id=eq.${orderId}&select=id`, { token: owner.token });
     orderItemId = (items as { id: string }[])[0].id;
-    await checked(rpc('mark_order_paid', { order_id: orderId, provider: 'manual' }, admin.token));
+    await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: orderId, provider: 'manual' }, admin.token));
   });
 
   test('非 admin 不能退款', async () => {
@@ -192,7 +192,7 @@ describe('修复：退款闭环', () => {
       idempotency_key: crypto.randomUUID(), items: [{ variant_id: mugId, quantity: 2 }], address: TEST_ADDRESS,
     }, u.token);
     const oid = (o as { id: string }).id;
-    await rpc('mark_order_paid', { order_id: oid }, admin.token);
+    await rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: oid }, admin.token);
     const { data: items } = await api(`/rest/v1/order_items?order_id=eq.${oid}&select=id`, { token: u.token });
 
     await rpc('refund_order', { idempotency_key: crypto.randomUUID(),

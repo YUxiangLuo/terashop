@@ -20,7 +20,7 @@ const fulfill = (order: FixtureOrder, quantity: number, tracking = 'SF001') => r
 }, admin.token);
 async function givenOrder({ paid = false, fulfilled = 0 } = {}) {
   const order = await fixtureOrder(product, customer, 3, false);
-  if (paid) await checked(rpc('mark_order_paid', { order_id: order.id, provider: 'manual' }, admin.token));
+  if (paid) await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id, provider: 'manual' }, admin.token));
   if (fulfilled) await checked(fulfill(order, fulfilled));
   return order;
 }
@@ -42,9 +42,9 @@ describe('权限边界', () => {
   test('非 admin 不能 mark_order_paid / create_fulfillment / adjust_inventory', async () => {
     const order = await givenOrder();
     for (const [name, body] of [
-      ['mark_order_paid', { order_id: order.id }],
+      ['mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }],
       ['create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: [{ order_item_id: order.itemId, quantity: 1 }] }],
-      ['adjust_inventory', { variant_id: product.variantId, delta: 10 }],
+      ['adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: product.variantId, delta: 10 }],
     ] as const) expect((await rpc(name, body, customer.token)).data).toMatchObject({ message: 'admin only' });
   });
   test('非 admin 不能写商品/折扣/运费', async () => {
@@ -68,7 +68,7 @@ describe('发货（履约）', () => {
   test('mark_order_paid → paid + capture transaction + 事件', async () => {
     const order = await givenOrder();
     expect(await checked(rpc('mark_order_paid', {
-      order_id: order.id, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
+      idempotency_key: crypto.randomUUID(), order_id: order.id, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
     }, admin.token))).toMatchObject({ financial_status: 'paid' });
     const ledger = await checked<{ transactions: Array<Record<string, unknown>> }>(rpc(
       'get_order_ledger', { order_id: order.id }, customer.token,
@@ -119,7 +119,7 @@ describe('支付标记与订单完成', () => {
   });
   test('重复标记支付被拒绝', async () => {
     const order = await givenOrder({ paid: true });
-    expect((await rpc('mark_order_paid', { order_id: order.id }, admin.token)).data)
+    expect((await rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token)).data)
       .toMatchObject({ message: expect.stringContaining('not pending') });
   });
   test('已支付订单不能走 cancel，只能退款流程', async () => {
@@ -146,7 +146,7 @@ describe('库存管理', () => {
   test('adjust_inventory 入库并记流水', async () => {
     const before = await stockOf(product.sku);
     expect(await checked(rpc('adjust_inventory', {
-      variant_id: product.variantId, delta: 10, reason: 'restock', note: '补货',
+      idempotency_key: crypto.randomUUID(), variant_id: product.variantId, delta: 10, reason: 'restock', note: '补货',
     }, admin.token))).toMatchObject({ on_hand: before + 10 });
     const rows = await checked<Array<Record<string, unknown>>>(api(
       `/rest/v1/inventory_movements?variant_id=eq.${product.variantId}&select=delta,on_hand_after,reason,note&order=id`, { service: true },
@@ -155,12 +155,12 @@ describe('库存管理', () => {
   });
   test('adjust_inventory 扣成负数被拒绝（约束兜底）', async () => {
     const before = await stockOf(product.sku);
-    expect((await rpc('adjust_inventory', { variant_id: product.variantId, delta: -99999, reason: 'adjust' }, admin.token)).data)
+    expect((await rpc('adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: product.variantId, delta: -99999, reason: 'adjust' }, admin.token)).data)
       .toMatchObject({ code: '23514' });
     expect(await stockOf(product.sku)).toBe(before);
   });
   test('delta 为 0 被拒绝', async () => {
-    expect((await rpc('adjust_inventory', { variant_id: product.variantId, delta: 0, reason: 'adjust' }, admin.token)).data)
+    expect((await rpc('adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: product.variantId, delta: 0, reason: 'adjust' }, admin.token)).data)
       .toMatchObject({ message: expect.stringContaining('non-zero') });
   });
 });

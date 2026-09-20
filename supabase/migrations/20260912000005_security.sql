@@ -185,7 +185,7 @@ CREATE TRIGGER categories_updated_at BEFORE UPDATE ON public.categories FOR EACH
 CREATE TRIGGER fulfillments_commercial_fields_immutable BEFORE DELETE OR UPDATE ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION private.protect_fulfillment_record();
 CREATE TRIGGER fulfillments_no_truncate BEFORE TRUNCATE ON public.fulfillments FOR EACH STATEMENT EXECUTE FUNCTION private.protect_fulfillment_record();
 CREATE TRIGGER fulfillments_order_paid BEFORE INSERT ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION private.prevent_unpaid_fulfillment();
-CREATE TRIGGER fulfillments_recalculate_order AFTER UPDATE OF status ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION private.recalculate_order_fulfillment();
+CREATE TRIGGER fulfillments_recalculate_order AFTER UPDATE OF status, carrier, tracking_number, tracking_url ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION private.recalculate_order_fulfillment();
 CREATE TRIGGER fulfillments_refund_cancellation_guard BEFORE UPDATE OF status ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION private.prevent_refunded_fulfillment_cancellation();
 CREATE TRIGGER fulfillments_sync_lines AFTER INSERT ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION private.sync_fulfillment_lines();
 CREATE TRIGGER fulfillments_updated_at BEFORE UPDATE ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -485,7 +485,7 @@ REVOKE ALL ON FUNCTION private.line_in_scope(jsonb, text, uuid, uuid, uuid[]) FR
 REVOKE ALL ON FUNCTION private.valid_tax_context(jsonb), private.calculate_checkout_tax(jsonb, jsonb, text),
   private.assert_pricing_breakdown(jsonb), private.order_pricing_json(uuid), private.store_order_tax_lines(uuid, uuid, uuid, jsonb),
   private.store_order_pricing(uuid, jsonb), private.protect_order_pricing(), public.get_order_pricing(uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.adjust_inventory(variant_id uuid, delta integer, reason text, note text, location_id uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.adjust_inventory(variant_id uuid, delta integer, idempotency_key text, reason text, note text, location_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.anonymize_user(p_user_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.assert_metaobject_exists(p_ref text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.bind_payment_intent_provider(payment_intent_id uuid, provider_reference text, provider_status text, amount numeric, currency text) FROM PUBLIC;
@@ -497,8 +497,10 @@ REVOKE ALL ON FUNCTION public.capture_payment_intent(payment_intent_id uuid, pro
 REVOKE ALL ON FUNCTION public.claim_outbox_events(worker_id text, max_events integer, lease_seconds integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_outbox_event(event_id uuid, worker_id text, lease_token uuid, succeeded boolean, error_message text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.redrive_outbox_event(uuid,integer,text,text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.list_admin_outbox_events(integer,text,uuid,text), public.list_admin_payment_provider_events(integer,text,uuid,jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_checkout_quote(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text, ttl_seconds integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_fulfillment(order_id uuid, items jsonb, idempotency_key text, carrier text, tracking_number text, tracking_url text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.update_fulfillment(uuid,bigint,jsonb,text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_order(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_order_from_quote(quote_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb, payment_method text) FROM PUBLIC;
@@ -518,7 +520,7 @@ REVOKE ALL ON FUNCTION public.handle_user_email_change() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.ingest_payment_provider_event(provider text, provider_event_id text, source text, event_type text, object_reference text, livemode boolean, occurred_at timestamp with time zone, payload_hash text, data jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.list_pending_paypal_captures(max_requests integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.list_pending_provider_refunds(provider text, max_requests integer) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.mark_order_paid(order_id uuid, provider text, provider_ref text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.mark_order_paid(order_id uuid, idempotency_key text, provider text, provider_ref text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.moderate_review(review_id uuid, status text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.normalize_promotion_code() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.prepare_paypal_refund(refund_request_id uuid, actor_id uuid) FROM PUBLIC;
@@ -554,7 +556,7 @@ GRANT ALL ON FUNCTION private.valid_country_codes(p_countries text[]) TO service
 GRANT EXECUTE ON FUNCTION private.valid_line_attributes(jsonb), private.checkout_line_key(uuid, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION private.valid_tax_context(jsonb) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_order_pricing(uuid) TO authenticated, service_role;
-GRANT ALL ON FUNCTION public.adjust_inventory(variant_id uuid, delta integer, reason text, note text, location_id uuid) TO service_role, authenticated;
+GRANT ALL ON FUNCTION public.adjust_inventory(variant_id uuid, delta integer, idempotency_key text, reason text, note text, location_id uuid) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.anonymize_user(p_user_id uuid) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.assert_metaobject_exists(p_ref text) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.bind_payment_intent_provider(payment_intent_id uuid, provider_reference text, provider_status text, amount numeric, currency text) TO service_role;
@@ -565,9 +567,11 @@ GRANT ALL ON FUNCTION public.cancel_refund_request(refund_request_id uuid, actor
 GRANT ALL ON FUNCTION public.capture_payment_intent(payment_intent_id uuid, provider_reference text, idempotency_key text) TO service_role;
 GRANT ALL ON FUNCTION public.claim_outbox_events(worker_id text, max_events integer, lease_seconds integer) TO service_role;
 GRANT ALL ON FUNCTION public.complete_outbox_event(event_id uuid, worker_id text, lease_token uuid, succeeded boolean, error_message text) TO service_role;
-GRANT EXECUTE ON FUNCTION public.redrive_outbox_event(uuid,integer,text,text) TO service_role;
+GRANT EXECUTE ON FUNCTION public.redrive_outbox_event(uuid,integer,text,text) TO service_role, authenticated;
+GRANT EXECUTE ON FUNCTION public.list_admin_outbox_events(integer,text,uuid,text), public.list_admin_payment_provider_events(integer,text,uuid,jsonb) TO authenticated;
 GRANT ALL ON FUNCTION public.create_checkout_quote(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text, ttl_seconds integer) TO authenticated;
 GRANT ALL ON FUNCTION public.create_fulfillment(order_id uuid, items jsonb, idempotency_key text, carrier text, tracking_number text, tracking_url text) TO authenticated;
+GRANT EXECUTE ON FUNCTION public.update_fulfillment(uuid,bigint,jsonb,text) TO authenticated;
 GRANT ALL ON FUNCTION public.create_order(items jsonb, idempotency_key text, address jsonb, address_id uuid, shipping_method_id uuid, discount_code text, note text) TO authenticated;
 GRANT ALL ON FUNCTION public.create_order_from_quote(quote_id uuid) TO authenticated;
 GRANT ALL ON FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb, payment_method text) TO service_role;
@@ -587,7 +591,7 @@ GRANT ALL ON FUNCTION public.ingest_payment_provider_event(provider text, provid
 GRANT ALL ON FUNCTION public.is_admin() TO anon, authenticated, service_role;
 GRANT ALL ON FUNCTION public.list_pending_paypal_captures(max_requests integer) TO service_role;
 GRANT ALL ON FUNCTION public.list_pending_provider_refunds(provider text, max_requests integer) TO service_role;
-GRANT ALL ON FUNCTION public.mark_order_paid(order_id uuid, provider text, provider_ref text) TO service_role, authenticated;
+GRANT ALL ON FUNCTION public.mark_order_paid(order_id uuid, idempotency_key text, provider text, provider_ref text) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.moderate_review(review_id uuid, status text) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.normalize_promotion_code() TO service_role;
 GRANT EXECUTE ON FUNCTION public.prepare_paypal_refund(refund_request_id uuid, actor_id uuid) TO service_role;
@@ -625,7 +629,7 @@ GRANT SELECT (id, order_number, customer_id, email, status, financial_status, fu
 GRANT UPDATE (admin_note) ON TABLE public.orders TO authenticated;
 REVOKE ALL ON FUNCTION private.customer_for_user(uuid), private.require_customer(), private.protect_customer(), private.anonymize_customer(uuid),
   private.lock_customer_content(uuid,boolean), private.guard_customer_content() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.current_customer_id(), public.create_customer(text,text,text), public.anonymize_customer(uuid) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.current_customer_id(), public.create_customer(text,text,text,text), public.anonymize_customer(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.current_customer_id() TO anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.cart_json(commerce.carts), private.access_cart(uuid,text), private.assert_cart_capacity(uuid),
   private.guard_cart_write(), private.assert_cart_lines() FROM PUBLIC;
@@ -637,7 +641,7 @@ GRANT EXECUTE ON FUNCTION public.create_cart(text,integer), public.get_cart(uuid
   public.update_cart(uuid,integer,jsonb,jsonb,uuid,text,text,text), public.abandon_cart(uuid,integer,text), public.preview_cart(uuid,text) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.list_carts(), public.claim_cart(uuid,integer,text), public.checkout_cart(uuid,integer) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.purge_expired_carts(integer,timestamptz) TO service_role;
-GRANT EXECUTE ON FUNCTION public.create_customer(text,text,text), public.anonymize_customer(uuid) TO authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.create_customer(text,text,text,text), public.anonymize_customer(uuid) TO authenticated, service_role;
 GRANT SELECT ON public.customers TO authenticated, service_role;
 GRANT UPDATE (email, full_name, phone) ON public.customers TO authenticated, service_role;
 GRANT UPDATE (rating, title, body) ON TABLE public.product_reviews TO authenticated;

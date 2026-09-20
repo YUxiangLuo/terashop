@@ -232,6 +232,7 @@ export type Database = {
           tracking_number: string
           tracking_url: string | null
           updated_at: string
+          version: number
         }
         Insert: {
           carrier?: string
@@ -245,6 +246,7 @@ export type Database = {
           tracking_number?: string
           tracking_url?: string | null
           updated_at?: string
+          version?: number
         }
         Update: {
           carrier?: string
@@ -258,6 +260,7 @@ export type Database = {
           tracking_number?: string
           tracking_url?: string | null
           updated_at?: string
+          version?: number
         }
         Relationships: [
           {
@@ -1500,6 +1503,7 @@ export type Database = {
       adjust_inventory: {
         Args: {
           delta: number
+          idempotency_key: string
           location_id?: string
           note?: string
           reason?: string
@@ -1653,7 +1657,12 @@ export type Database = {
         Returns: Json
       }
       create_customer: {
-        Args: { email?: string; full_name?: string; phone?: string }
+        Args: {
+          email?: string
+          full_name?: string
+          idempotency_key: string
+          phone?: string
+        }
         Returns: {
           anonymized_at: string | null
           auth_user_id: string | null
@@ -1821,6 +1830,24 @@ export type Database = {
         }
         Returns: Json
       }
+      list_admin_outbox_events: {
+        Args: {
+          after_id?: string
+          aggregate_id?: string
+          page_size?: number
+          status_filter?: string
+        }
+        Returns: Json
+      }
+      list_admin_payment_provider_events: {
+        Args: {
+          after_cursor?: Json
+          page_size?: number
+          resource_id?: string
+          status_filter?: string
+        }
+        Returns: Json
+      }
       list_admin_products: {
         Args: {
           after_cursor?: Json
@@ -1855,7 +1882,12 @@ export type Database = {
         Returns: Json
       }
       mark_order_paid: {
-        Args: { order_id: string; provider?: string; provider_ref?: string }
+        Args: {
+          idempotency_key: string
+          order_id: string
+          provider?: string
+          provider_ref?: string
+        }
         Returns: {
           admin_note: string | null
           billing_address: Json | null
@@ -1952,8 +1984,8 @@ export type Database = {
         Args: {
           event_id: string
           expected_attempt: number
-          reason: string
-          worker_id: string
+          reason?: string
+          worker_id?: string
         }
         Returns: boolean
       }
@@ -2025,6 +2057,15 @@ export type Database = {
           items: Json
           note?: string
           shipping_method_id?: string
+        }
+        Returns: Json
+      }
+      update_fulfillment: {
+        Args: {
+          changes: Json
+          expected_version: number
+          fulfillment_id: string
+          idempotency_key: string
         }
         Returns: Json
       }

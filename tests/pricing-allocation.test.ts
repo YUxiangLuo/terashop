@@ -190,7 +190,7 @@ test('Quote、转单、成功账本与退款沿用同一分币结果', async () 
       quote_id: quote.id,
     }, buyer.token));
     expect(order).toMatchObject({ total: 0.02, discount_total: 0.02 });
-    await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+    await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
     const lines = await checked<Array<{ id: string; discount_total: number; line_total: number }>>(api(
       `/rest/v1/order_items?order_id=eq.${order.id}&select=id,discount_total,line_total`, { token: buyer.token },
     ));

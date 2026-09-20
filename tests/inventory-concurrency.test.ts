@@ -47,7 +47,7 @@ async function fixture() {
     const refundItems = [{ order_item_id: low, quantity: 1 }, { order_item_id: high, quantity: 1 }];
     let refundEvent: { id: string; reference: string; hash: string; data: Record<string, unknown> } | null = null;
     if (mode === 'manual') {
-      await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+      await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
     } else if (mode === 'paypal') {
       await settleIntent(await fixtureIntent({ ...order, itemId: low, quoteId: null, total: 20, currency: 'USD' }, buyer));
       const request = await checked<{ id: string; amount: number; currency: string; parent_provider_reference: string }>(rpc('create_refund_request', {

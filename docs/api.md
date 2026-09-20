@@ -365,11 +365,12 @@ POST /rest/v1/rpc/receive_return
 | RPC | 权限 | 主要参数 / 限制 |
 | --- | --- | --- |
 | `current_customer_id` | 所有角色 | 当前活跃 Customer UUID 或 null |
-| `create_customer` | admin / service | 可选 `email`、`full_name`、`phone`；不附带登录权限 |
+| `create_customer` | admin / service | 必填 `idempotency_key`；可选 `email`、`full_name`、`phone`；不附带登录权限 |
 | `anonymize_customer` | admin / service | `customer_id`；不删除交易历史 |
 | `set_default_address` | 地址归属人 / admin / service | `address_id`、`make_default`（默认 true） |
 | `create_fulfillment` | admin | `order_id`、`items`、`idempotency_key`、可选物流信息 |
-| `adjust_inventory` | admin | `variant_id`、`delta`、`reason`、可选 `note` |
+| `update_fulfillment` | admin | `fulfillment_id`、`expected_version`、`changes`、`idempotency_key`；仅状态与物流字段 |
+| `adjust_inventory` | admin | 必填 `variant_id`、`delta`、`idempotency_key`；可选 `reason`（默认 adjust）、`note`、`location_id`（默认仓） |
 | `moderate_review` | admin | `review_id`、`status` |
 | `set_user_role` | admin | `user_id`、`role`；最后一名 admin 不可降级 |
 | `anonymize_user` | admin | `p_user_id` 为 Auth ID；匿名化关联客户，另清 profile PII 与审计 actor；不是完整账号删除 |
@@ -377,6 +378,10 @@ POST /rest/v1/rpc/receive_return
 地址内容可直接 PATCH，身份/归属/时间戳不可改；既有地址的默认值必须走 RPC。新建地址仍可传 `is_default=true`。
 普通客户创建评价只能为 pending，作者修改内容后重新待审。首次管理员由可信 SQL 引导，后续走角色 RPC。
 管理员与客户同属数据库 `authenticated` 角色；订单状态、支付、履约、库存等交易写入必须走受控命令，不能绕过流程直写表。
+
+`create_customer`、`adjust_inventory`、`mark_order_paid` 分别使用独立的店铺级幂等范围，不按管理员隔离。键去除首尾空白后必须为 1–200 字符；同一操作的网络重试必须复用原键及参数，不能每次生成新键。同键并发只提交一次副作用；业务写入与幂等记录同事务提交，失败不占用键。重放仍校验当前权限，并读取资源当前状态，而非返回历史响应快照。
+
+客户创建只规范化邮箱首尾空白及空串，不按邮箱合并客户；匿名化后的重放不会恢复或返回旧 PII。库存首次成功绑定实际仓库，之后默认仓变化不改变重放目标；省略仓库与显式指定仓库是不同请求。手工收款重放可返回已退款订单，不再次记账。这三个命令的键格式错误为 `22023`，同键参数冲突为 `PT409`，权限不足为 `42501`，已绑定资源不存在为 `PT404`；其他业务校验仍遵循各命令原有错误合同。
 
 ## 促销范围与扩展字段管理
 
@@ -402,13 +407,56 @@ POST /rest/v1/rpc/receive_return
 
 以下命令各只有一个公开签名，不保留版本后缀或非幂等重载；需要先展示报价再确认下单时采用上面的 Quote 流程。
 
-- `create_order`：必填 `items`、`idempotency_key`，地址等参数与 Quote 一致。单事务创建并转换 15 分钟 Quote，返回订单 DTO；付款、零元及过期语义与 [推荐结账流程](#推荐结账流程) 相同，库存定义见 [ADR-024](architecture-decisions.md#adr-024单一下单管线与简化库存语义)。
+- `create_order`：必填 `items`、`idempotency_key`，地址等参数与 Quote 一致。单事务创建并转换 15 分钟 Quote，返回订单 DTO；这是当前客户下单入口，不是管理员代客下单接口。付款、零元及过期语义与 [推荐结账流程](#推荐结账流程) 相同，库存定义见 [ADR-024](architecture-decisions.md#adr-024单一下单管线与简化库存语义)。
 - 下单重试返回原订单当前状态，不新建 Quote、不延长期限。其幂等范围与显式报价独立；取消/过期后同键重试仍返回原订单，需要重新结账时使用新键。
-- `create_fulfillment`：必填 `order_id`、`items`、`idempotency_key`；所有订单均须先付款，返回履约 DTO，行明细通过订单详情或账本读取。
-- `mark_order_paid`：`order_id`、`provider:"manual"`；仅手工收款，线上意图仍可扣款时禁止使用。
+- `create_fulfillment`：必填 `order_id`、`items`、`idempotency_key`；所有订单均须先付款，创建即 shipped，返回含 `version` 的履约 DTO，行明细通过订单详情或账本读取。
+- `update_fulfillment`：必填 `fulfillment_id`、`expected_version`、`changes`、`idempotency_key`；更新状态和物流信息，返回当前履约 DTO。详细合同见下文。
+- `mark_order_paid`：必填 `order_id`、`idempotency_key`，可选 `provider`（默认 manual）、`provider_ref`；仅手工收款记账，即使 provider 填 paypal 也不发起渠道 Capture，线上意图仍可扣款时禁止使用。
 - `refund_order`：必填 `order_id`、`idempotency_key`；同步手工/测试退款，不代表真实渠道已退款；不能穿透活跃异步退款请求。
 
-三个命令的 `idempotency_key` 去除首尾空白后必须为 1–200 字符。一次业务操作生成一个键，网络重试复用原键；相同键配不同请求指纹会报错。下单按客户隔离，履约和手工退款各使用店铺级命令范围；不同管理员重试同一操作应复用同一键。不要在每次网络重试时生成新键。
+上述命令的 `idempotency_key` 去除首尾空白后必须为 1–200 字符。一次业务操作生成一个键，网络重试复用原键；相同键配不同请求指纹会报错。下单按客户隔离，履约、手工收款和手工退款各使用独立店铺级命令范围；不同管理员重试同一操作应复用同一键。不要在每次网络重试时生成新键。
+
+`update_order_address` 不能修改正常 Quote 转单的地址快照；未付款改址需要取消并重新结账。RPC 位于 public schema 不代表管理员或匿名用户都有执行权限，客户端必须同时遵循授权与业务状态限制。
 
 金额口径：`order_items.total` 为毛额，`line_total` 为扣行折扣后的净额；`orders.discount_total` 只含商品折扣。
 免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payment_transactions.amount` 恒正，方向由 `kind` 表达。退款不等于退货收货：退款 `restock` 仅释放未发货取消量，已发货商品由实际收货后的 disposition 驱动回库。
+
+### 履约状态与物流更新
+
+`update_fulfillment` 仅允许管理员调用，不开放履约表直写权限。先读取创建响应、`get_order_ledger` 中的履约 DTO 或履约表的 `version`，再将其作为 `expected_version` 提交。
+
+```json
+{
+  "fulfillment_id": "<fulfillment UUID>",
+  "expected_version": 1,
+  "changes": { "carrier": "Example carrier", "tracking_number": "TRACK-123", "tracking_url": null },
+  "idempotency_key": "<one key per operation>"
+}
+```
+
+- `changes` 必须是非空对象，只允许 `status`、`carrier`、`tracking_number`、`tracking_url`；省略字段不变，只有 `tracking_url` 可传 null 清空，其余字段必须为字符串。商品行、订单归属、时间戳和版本不可由该命令写入。
+- 状态沿用现有状态机：pending → shipped/cancelled，shipped → delivered/cancelled；delivered/cancelled 不可回退。创建入口仍直接 shipped，不新增 pending 创建流程。终态允许修正物流信息。
+- 取消履约只重算订单履约状态，不退款、不自动回库。存在活跃退货授权、收货事实、商品行退款或活跃退款请求时，仍受原有取消保护约束；实际退货入库走 Return/Receipt/Disposition。
+- 每次实际 UPDATE 由数据库推进版本，service 直写也不例外；命令无变化时不 UPDATE、不递增版本、不发事件。版本冲突返回 `PT409`，应重新读取并确认修改意图，不能自动换版本覆盖。
+- service 直接修改状态或物流时，trigger 以 NOWAIT 获取父订单锁，避免与管理员命令反向等待；竞争返回 `55P03`，调用方应重试整个事务，失败不会留下版本或审计变化。
+- 店铺级 `fulfillment.update` 幂等范围独立于创建；同键参数冲突为 `PT409`。成功重放先校验权限，返回资源当前状态，不再校验旧版本、不重复写入。失败不占键；网络结果不明时必须复用原键、原版本和原参数。
+- 无效键、版本或字段形状返回 `22023`，资源不存在为 `PT404`，非管理员为 `42501`；状态机、退货与退款限制沿用原业务错误。状态事件与 `fulfillment_tracking_updated`（含修改前后物流字段、actor、版本）和 Outbox 在同一事务提交。物流 URL 是外部输入，不表示服务端已验证或抓取该地址。
+
+## 管理员运维查询与恢复
+
+以下查询使用管理员 JWT，不开放 commerce 表权限，也不授予 Worker 能力。非管理员返回 `42501`；页大小为 1–100，默认 20，无效页大小或状态为 `22023`。
+
+| RPC | 筛选与分页 | 返回 |
+| --- | --- | --- |
+| `list_admin_outbox_events` | `page_size`、`status_filter`（pending/processing/published/failed/exhausted）、可选 `aggregate_id`、`after_id`（text，正 bigint 字符串；无效或越界为 `22023`） | `{items,next_after_id}`；按内部 id 降序；id 和下一页游标为十进制字符串，原样传回，不经 JS Number 转换 |
+| `list_admin_payment_provider_events` | `page_size`、`status_filter`（received/processed/ignored/failed）、可选 `resource_id`、`after_cursor` | `{items,next_cursor}`；按 created_at/id 降序；游标为 `{created_at,id}` |
+
+游标为 null 表示末页。翻页需保持筛选条件；状态可能在两次请求间变化，这不是跨请求快照。监控刷新应从首页开始，不把分页游标当作增量消费 checkpoint。`resource_id` 是 Inbox 已关联的意图、交易、退款请求或外部资金记录 ID，不是订单 ID；尚未关联事件须不带此筛选查询。
+
+两类 DTO 仅返回事件身份、状态、累计尝试次数、处理时间和关联 ID；错误只给 `has_error`，不返回原始错误文本。Outbox 另含 retry_start、租约到期时间及最近重投审计，不返回 payload、幂等键、当前 worker 或 lease_token；Inbox 不返回 data、payload_hash、object_reference，`automatic_retry_exhausted` 仅在未终结且 attempts ≥ 25 时为 true。诊断原始内容仍须使用受信运维流程。
+
+管理员调用 `redrive_outbox_event` 时传 `event_id`、`expected_attempt`、`reason`，省略 `worker_id`。数据库将审计操作者设为 `admin:<Auth UUID>`，拒绝客户端指定身份；service 调用保持原合同，必须提供 worker_id。reason 去空白后为 1–4000 字符，不要放凭据或客户 PII。
+
+只允许在当前 exhausted 且累计 attempts 等于 expected_attempt 时开启新 25 次重试窗口。资源不存在或状态／次数不匹配返回 false；相同事件、耗尽次数、操作者及原因的成功重放返回 true，不重置后续 processing/published 状态。不同管理员或原因不能冒充同一次重放；每次调用重新验证权限。此操作只重新入队，不表示消息已成功投递。
+
+`claim_outbox_events`、`complete_outbox_event`、`retry_payment_provider_events` 和 `ingest_payment_provider_event` 仍为 service-only。Inbox 只开放查询，不提供管理员重跑资金记账入口；恢复步骤见 [支付运维](../supabase/functions/README.md#outbox-与-inbox-恢复)。

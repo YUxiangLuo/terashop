@@ -255,6 +255,7 @@ CREATE TABLE commerce.cart_lines (
 CREATE TABLE public.fulfillments (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     order_id uuid NOT NULL,
+    version bigint DEFAULT 1 NOT NULL CHECK (version > 0),
     status text DEFAULT 'shipped'::text NOT NULL,
     items jsonb NOT NULL,
     carrier text DEFAULT ''::text NOT NULL,
@@ -490,11 +491,14 @@ CREATE TABLE commerce.command_idempotency (
     request_hash text NOT NULL,
     resource_type text NOT NULL,
     resource_id uuid NOT NULL,
+    resource_location_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT command_idempotency_check CHECK ((((scope = 'order.create'::text) AND (resource_type = 'order'::text)) OR ((scope = 'fulfillment.create'::text) AND (resource_type = 'fulfillment'::text)) OR ((scope = 'order.refund'::text) AND (resource_type = 'refund'::text)))),
+    CONSTRAINT command_idempotency_check CHECK ((scope, resource_type) IN (
+      ('order.create', 'order'), ('fulfillment.create', 'fulfillment'), ('fulfillment.update', 'fulfillment'), ('order.refund', 'refund'),
+      ('customer.create', 'customer'), ('inventory.adjust', 'inventory_level'), ('order.pay', 'order'))),
+    CONSTRAINT command_idempotency_location_check CHECK ((scope = 'inventory.adjust') = (resource_location_id IS NOT NULL)),
     CONSTRAINT command_idempotency_idempotency_key_check CHECK (((length(btrim(idempotency_key)) >= 1) AND (length(btrim(idempotency_key)) <= 200))),
-    CONSTRAINT command_idempotency_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text)),
-    CONSTRAINT command_idempotency_scope_check CHECK ((scope = ANY (ARRAY['order.create'::text, 'fulfillment.create'::text, 'order.refund'::text])))
+    CONSTRAINT command_idempotency_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text))
 );
 
 CREATE TABLE commerce.fulfillment_lines (

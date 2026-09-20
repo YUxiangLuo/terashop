@@ -283,7 +283,7 @@ test('Storefront 库存只看默认仓并扣除 Quote 预占，取消后恢复�
     await actor(sql, buyer);
     await stock(false);
     await actor(sql, admin);
-    await sql`select public.adjust_inventory(${p.variant}::uuid,1,'restock')`;
+    await sql`select public.adjust_inventory(${p.variant}::uuid,1,${crypto.randomUUID()},'restock')`;
     await actor(sql, buyer);
     await stock(true);
     const [quote] = await sql`select public.create_checkout_quote(

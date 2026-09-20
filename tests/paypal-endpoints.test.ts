@@ -277,9 +277,9 @@ test(`重复手工 Capture 引用不能误关联外部退款：verified=${verifi
   const intent = verified ? await fixtureIntent(correct, buyer) : null;
   const capture = `CAPTURE${(intent?.id ?? crypto.randomUUID()).replaceAll('-', '')}`;
   // Insert the misleading ledger entry first, through the supported admin RPC.
-  await checked(rpc('mark_order_paid', { order_id: wrong.id, provider: 'paypal', provider_ref: capture }, admin.token));
+  await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: wrong.id, provider: 'paypal', provider_ref: capture }, admin.token));
   if (intent) await settleIntent(intent);
-  else await checked(rpc('mark_order_paid', { order_id: correct.id, provider: 'paypal', provider_ref: capture }, admin.token));
+  else await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: correct.id, provider: 'paypal', provider_ref: capture }, admin.token));
   expect(await database`select id from commerce.payment_transactions
     where provider='paypal' and kind='capture' and provider_reference=${capture}`).toHaveLength(2);
   const request = await checked<{ id: string }>(rpc('create_refund_request', { order_id: correct.id,

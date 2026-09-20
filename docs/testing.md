@@ -28,6 +28,12 @@ bun run test:current tests/admin.test.ts --rerun-each=2 --randomize --seed=6149
 
 保持 `--parallel=1`。默认仓、税率、管理员集合、全局 Worker 队列仍有共享状态；handler 测试还拦截全局 fetch/Deno。局部夹具隔离不等于整个套件可以并行。
 
+`tests/admin-retry.test.ts` 覆盖客户创建、库存调整和手工收款的同键跨管理员并发、参数冲突、权限与键长度校验，以及失败回滚、默认仓变化、客户匿名化和退款后的重放。并发用例实际等待数据库锁竞争，并断言资金、库存和事件只写一次；不是仅检查 HTTP 成功。
+
+`tests/fulfillment-update.test.ts` 覆盖履约状态／物流更新：同键及不同键并发、旧版本和旧 REPEATABLE READ 快照、service 写入版本保护、字段／权限校验、审计与 Outbox、退货取消保护、失败后同键重试及取消不回库。
+
+`tests/admin-operations.test.ts` 覆盖运维摘要分页、同时间戳游标、敏感字段排除、Inbox 自动重试次数边界，以及 Outbox 管理员身份绑定、并发重投审计和 Worker 状态保护；同时验证 Worker 命令不对管理员开放。
+
 ## Storefront 验证与演示数据
 
 `bun run storefront:build` 需要可访问的 Supabase，只读取公开目录；构建和 `storefront:check` 不等于浏览器验收。页面改动应在 `storefront:preview` 中检查桌面与手机布局、图片加载、排序、售罄禁用、购物袋数量和报价金额／到期恢复。当前没有自动化浏览器测试套件，注册回调与支付 UI 尚未实现；真实 PayPal 验收见 [接入合同](storefront-paypal.md#sandbox--上线验收仍待完成)。

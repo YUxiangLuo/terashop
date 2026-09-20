@@ -113,7 +113,7 @@ describe('Checkout Quote 与库存预占', () => {
     expect((stranger.data as { message: string }).message).toBe('checkout quote not found');
 
     const unsafeAdjustment = await rpc('adjust_inventory', {
-      variant_id: reserveStock.variantId, delta: -1, reason: 'adjust',
+      idempotency_key: crypto.randomUUID(), variant_id: reserveStock.variantId, delta: -1, reason: 'adjust',
     }, admin.token);
     expect(unsafeAdjustment.status).toBe(400);
     expect((unsafeAdjustment.data as { message: string }).message).toContain('reserved stock');
@@ -346,7 +346,7 @@ describe('Quote 转单与支付确认', () => {
     const converted = await rpc('create_order_from_quote', { quote_id: quote.id }, buyerA.token);
     const orderId = (converted.data as { id: string }).id;
     const paid = await rpc('mark_order_paid', {
-      order_id: orderId, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
+      idempotency_key: crypto.randomUUID(), order_id: orderId, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
     }, admin.token);
     expect(paid.status).toBe(200);
     expect(await availability(pricingStock.variantId)).toMatchObject({

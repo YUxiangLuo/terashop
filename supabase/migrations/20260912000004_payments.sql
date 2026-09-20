@@ -1673,6 +1673,49 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.list_admin_payment_provider_events(page_size integer DEFAULT 20, status_filter text DEFAULT NULL,
+    resource_id uuid DEFAULT NULL, after_cursor jsonb DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_time timestamptz; v_id uuid; v_items jsonb; v_next jsonb;
+begin
+  if not public.is_admin() then raise exception using errcode='42501', message='admin only'; end if;
+  if page_size is null or page_size not between 1 and 100
+    or (status_filter is not null and status_filter not in ('received','processed','ignored','failed')) then
+    raise exception using errcode='22023', message='invalid page_size or status_filter';
+  end if;
+  if after_cursor is not null then
+    if jsonb_typeof(after_cursor) is distinct from 'object'
+      or jsonb_typeof(after_cursor->'created_at') is distinct from 'string'
+      or jsonb_typeof(after_cursor->'id') is distinct from 'string'
+      or after_cursor-array['created_at','id']<>'{}'::jsonb then
+      raise exception using errcode='22023', message='cursor requires created_at and id';
+    end if;
+    v_time := (after_cursor->>'created_at')::timestamptz;
+    v_id := (after_cursor->>'id')::uuid;
+    if not isfinite(v_time) then raise exception using errcode='22023', message='cursor timestamp must be finite'; end if;
+  end if;
+  with candidates as materialized (
+    select e.* from commerce.payment_provider_events e
+    where (status_filter is null or e.status=status_filter)
+      and (list_admin_payment_provider_events.resource_id is null or e.resource_id=list_admin_payment_provider_events.resource_id)
+      and (v_time is null or (e.created_at,e.id)<(v_time,v_id))
+    order by e.created_at desc,e.id desc limit page_size+1
+  ), page as materialized (select * from candidates order by created_at desc,id desc limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'id',p.id,'provider',p.provider,'provider_event_id',p.provider_event_id,'source',p.source,
+    'event_type',p.event_type,'status',p.status,'livemode',p.livemode,
+    'resource_type',p.resource_type,'resource_id',p.resource_id,'attempts',p.attempts,
+    'automatic_retry_exhausted',p.status in ('received','failed') and p.attempts>=25,
+    'next_attempt_at',p.next_attempt_at,'processed_at',p.processed_at,
+    'occurred_at',p.occurred_at,'created_at',p.created_at,'has_error',p.last_error is not null
+  ) order by p.created_at desc,p.id desc),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then
+      (select jsonb_build_object('created_at',created_at,'id',id) from page order by created_at,id limit 1) end
+    into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 CREATE FUNCTION public.ingest_payment_provider_event(provider text, provider_event_id text, source text, event_type text, object_reference text, livemode boolean, occurred_at timestamp with time zone, payload_hash text, data jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -1803,14 +1846,33 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.mark_order_paid(order_id uuid, provider text DEFAULT 'manual'::text, provider_ref text DEFAULT NULL::text) RETURNS public.orders
+CREATE FUNCTION public.mark_order_paid(order_id uuid, idempotency_key text, provider text DEFAULT 'manual'::text, provider_ref text DEFAULT NULL::text) RETURNS public.orders
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
 declare
   v_order public.orders;
+  v_subject_id constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
+  v_key text := btrim(idempotency_key);
+  v_hash text;
+  v_record commerce.command_idempotency;
 begin
-  if not public.is_admin() then raise exception 'admin only'; end if;
+  if not public.is_admin() then raise exception using errcode = '42501', message = 'admin only'; end if;
+  if coalesce(v_key, '') = '' or length(v_key) > 200 then
+    raise exception using errcode = '22023', message = 'idempotency_key is required and must be at most 200 characters';
+  end if;
+  v_hash := private.command_request_hash(jsonb_build_object('order_id',order_id,'provider',provider,'provider_ref',provider_ref));
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('order.pay:' || v_subject_id || ':' || v_key, 0));
+  select * into v_record from commerce.command_idempotency c
+    where c.scope = 'order.pay' and c.subject_id = v_subject_id and c.idempotency_key = v_key;
+  if found then
+    if v_record.request_hash <> v_hash then
+      raise exception using errcode = 'PT409', message = 'idempotency key was used with different payment parameters';
+    end if;
+    select * into v_order from public.orders where id = v_record.resource_id;
+    if not found then raise exception using errcode = 'PT404', message = 'idempotency resource no longer exists'; end if;
+    return v_order;
+  end if;
   perform 1 from commerce.payment_intents i
   where i.order_id = mark_order_paid.order_id order by i.id for update;
   perform 1 from commerce.checkout_quotes q
@@ -1836,16 +1898,19 @@ begin
 
   perform private.consume_order_reservation(v_order.id);
   if v_order.total > 0 then
-    return private.mark_order_paid(v_order.id, provider, provider_ref);
+    v_order := private.mark_order_paid(v_order.id, provider, provider_ref);
+  else
+    update public.orders
+    set financial_status = 'paid', paid_at = now(),
+        status = case when fulfillment_status = 'fulfilled' then 'completed' else status end,
+        completed_at = case when fulfillment_status = 'fulfilled' then now() else completed_at end
+    where id = v_order.id returning * into v_order;
+    insert into public.order_events (order_id, actor_id, type, data)
+    values (v_order.id, auth.uid(), 'payment_received',
+            jsonb_build_object('provider', provider, 'amount', 0, 'free_order', true));
   end if;
-  update public.orders
-  set financial_status = 'paid', paid_at = now(),
-      status = case when fulfillment_status = 'fulfilled' then 'completed' else status end,
-      completed_at = case when fulfillment_status = 'fulfilled' then now() else completed_at end
-  where id = v_order.id returning * into v_order;
-  insert into public.order_events (order_id, actor_id, type, data)
-  values (v_order.id, auth.uid(), 'payment_received',
-          jsonb_build_object('provider', provider, 'amount', 0, 'free_order', true));
+  insert into commerce.command_idempotency(scope,subject_id,idempotency_key,request_hash,resource_type,resource_id)
+    values ('order.pay',v_subject_id,v_key,v_hash,'order',v_order.id);
   return v_order;
 end;
 $$;

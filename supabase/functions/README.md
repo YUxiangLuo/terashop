@@ -56,7 +56,7 @@ Webhook 入箱后处理失败返回 500；已识别的瞬时数据库故障保�
 ## 必需 Worker 与告警
 
 仓库提供以下入口；**调度及通用 Outbox 消费器需部署方实现**。RPC 路径为 `/rest/v1/rpc/<name>`，Edge Function 路径为 `/functions/v1/<name>`。
-全部为 POST，使用 `Authorization: Bearer <service-role-key>`；PostgREST 另需 `apikey`。
+下表均给出 service 调用方式：POST，使用 `Authorization: Bearer <service-role-key>`；PostgREST 另需 `apikey`。Outbox 人工重投另支持管理员 JWT，见恢复流程。
 
 | 任务 | 请求体 | 调度 |
 | --- | --- | --- |
@@ -88,6 +88,10 @@ Outbox claim 返回 `attempt`、`lease_token` 和 `lease_expires_at`；过期、
 Outbox 每个自动窗口最多领取 25 次。最后一次处理失败进入 exhausted；最后一次租约到期后，后续 claim 会有界清理该状态。部署方用受信数据库只读监控 `commerce.outbox_events` 的 exhausted、超期 processing 及积压年龄；该表不对 PostgREST 开放。恢复时读取当前累计 attempts 作为 expected_attempt，调用 redrive；保留事件 ID、payload、累计次数，追加 `commerce.outbox_redrives` 审计并开启新 25 次窗口。相同 event/expected_attempt/worker/reason 的重放返回 true，不改变后续 processing/published 状态；不同内容或不匹配状态拒绝。禁止直接清零 attempts、修改 payload 或换 event_id 重发。
 
 Inbox 自动重试达到 25 次后停止，事件不会因此丢失。排除故障后，从受信数据库取原 `commerce.payment_provider_events` 的 provider、provider_event_id、source、event_type、object_reference、livemode、occurred_at、payload_hash、data，通过 service-only `ingest_payment_provider_event` 原样重投；已有事件保留累计次数并重跑本地处理。也可让渠道通过已验签的 Webhook 重送同一原始事件。不能以重新抓取的不同 JSON 伪造旧 hash、改事件身份或再发 Capture/Refund POST。先在本地/渠道 Sandbox 演练重投成功、重复重投不重复入账，再为生产操作者开放流程。
+
+管理员可通过 `list_admin_outbox_events`、`list_admin_payment_provider_events` 读取分页运维摘要，无须 service key。摘要不含 payload/data、原始错误、hash 或 lease_token；完整筛选与游标合同见 [管理 API](../../docs/api.md#管理员运维查询与恢复)。
+
+管理员排除故障后可用自己的 JWT 调用 `redrive_outbox_event({event_id,expected_attempt,reason})`，不得传 worker_id；数据库以 `admin:<Auth UUID>` 固定审计身份。重投可能触发下游消费者，应由操作者确认，不作为 Agent 自动失败重试循环。相同操作者和原因可重放，不同操作者不能复用已有耗尽点的重投身份。领取、完成、Inbox 重跑和渠道资金接口仍为 service-only；管理员摘要不构成伪造或重新提交渠道事件的授权。
 
 ### 清理与告警
 

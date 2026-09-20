@@ -22,7 +22,7 @@ afterAll(async () => {
 
 test('较早事务后退款时，幂等键仍指向自身退款而非较晚事务的退款', async () => {
   const order = await fixtureOrder(fixture, buyer);
-  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   const keyA = crypto.randomUUID(), keyB = crypto.randomUUID();
   const claims = JSON.stringify({ role: 'authenticated', sub: admin.userId });
   await database.begin(async early => {

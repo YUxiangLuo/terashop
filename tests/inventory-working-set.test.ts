@@ -15,7 +15,7 @@ async function fixture(sql: TransactionSQL, stock = 100) {
   await sql`insert into public.product_variants(id,product_id,price) values(${v}::uuid,${p}::uuid,10)`;
   await sql`update public.products set status='active' where id=${p}::uuid`;
   await sql`select set_config('request.jwt.claims',${JSON.stringify({ sub: admin.userId, role: 'authenticated' })},true)`;
-  await sql`select public.adjust_inventory(${v}::uuid,${stock})`;
+  await sql`select public.adjust_inventory(${v}::uuid,${stock},${crypto.randomUUID()})`;
   const [level] = await sql`select location_id from public.inventory_levels where variant_id=${v}::uuid`;
   const [quote] = await sql`select public.create_checkout_quote(
     jsonb_build_array(jsonb_build_object('variant_id',${v}::uuid,'quantity',3)),${crypto.randomUUID()},
@@ -34,7 +34,7 @@ test('预占工作集跟随转单/付款/取消，回滚恢复，历史行保留
     await sql`rollback to savepoint cancel_quote`;
     const [converted] = await sql`select public.create_order_from_quote(${f.q}::uuid) o`;
     expect((await sql`select private.active_reserved_quantity(${f.v}::uuid,${f.location}::uuid) n`)[0].n).toBe(3);
-    await sql`select public.mark_order_paid(${converted.o.id}::uuid)`;
+    await sql`select public.mark_order_paid(${converted.o.id}::uuid,${crypto.randomUUID()})`;
     expect(await sql`select 1 from commerce.inventory_reservations where quote_id=${f.q}::uuid`).toHaveLength(0);
     expect(await sql`select 1 from commerce.checkout_quote_lines where quote_id=${f.q}::uuid`).toHaveLength(1);
     expect((await sql`select on_hand from public.inventory_levels where variant_id=${f.v}::uuid`)[0].on_hand).toBe(97);

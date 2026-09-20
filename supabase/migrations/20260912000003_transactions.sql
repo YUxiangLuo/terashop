@@ -733,6 +733,7 @@ CREATE FUNCTION private.fulfillment_json(p_fulfillment public.fulfillments) RETU
     AS $$
   select jsonb_build_object(
     'id', p_fulfillment.id, 'order_id', p_fulfillment.order_id,
+    'version', p_fulfillment.version,
     'status', p_fulfillment.status, 'carrier', p_fulfillment.carrier,
     'tracking_number', p_fulfillment.tracking_number,
     'tracking_url', p_fulfillment.tracking_url,
@@ -892,12 +893,18 @@ begin
   if tg_op in ('DELETE', 'TRUNCATE') then
     raise exception 'fulfillments are append-only';
   end if;
-  if (new.order_id, new.items, new.created_at)
-     is distinct from (old.order_id, old.items, old.created_at) then
+  if (new.id, new.order_id, new.items, new.created_at, new.version)
+     is distinct from (old.id, old.order_id, old.items, old.created_at, old.version) then
     raise exception 'fulfillment commercial fields are immutable';
   end if;
-  if new.status <> old.status then
+  new.version := old.version + 1;
+  if (new.status, new.carrier, new.tracking_number, new.tracking_url)
+     is distinct from (old.status, old.carrier, old.tracking_number, old.tracking_url) then
+    -- Direct writes already hold the fulfillment row; never wait backwards
+    -- for the order lock needed by the audit event's foreign key.
     perform 1 from public.orders where id=old.order_id for update nowait;
+  end if;
+  if new.status <> old.status then
     update public.orders set updated_at=now() where id=old.order_id;
     if new.status='shipped' and private.order_has_payment_hold(old.order_id) then
       raise exception 'order has an unresolved payment hold';
@@ -1042,6 +1049,14 @@ CREATE FUNCTION private.recalculate_order_fulfillment() RETURNS trigger
     SET search_path TO ''
     AS $$
 begin
+  if (new.carrier, new.tracking_number, new.tracking_url)
+     is distinct from (old.carrier, old.tracking_number, old.tracking_url) then
+    insert into public.order_events(order_id, actor_id, type, data)
+    values (new.order_id, auth.uid(), 'fulfillment_tracking_updated',
+      jsonb_build_object('fulfillment_id', new.id, 'version', new.version,
+        'before', jsonb_build_object('carrier', old.carrier, 'tracking_number', old.tracking_number, 'tracking_url', old.tracking_url),
+        'after', jsonb_build_object('carrier', new.carrier, 'tracking_number', new.tracking_number, 'tracking_url', new.tracking_url)));
+  end if;
   if new.status = old.status then return new; end if;
   perform private.refresh_order_fulfillment(new.order_id);
   insert into public.order_events (order_id, actor_id, type, data)
@@ -1880,13 +1895,56 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.redrive_outbox_event(event_id uuid, expected_attempt integer, worker_id text, reason text) RETURNS boolean
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_event commerce.outbox_events; v_redrive commerce.outbox_redrives;
+CREATE FUNCTION public.list_admin_outbox_events(page_size integer DEFAULT 20, status_filter text DEFAULT NULL,
+    aggregate_id uuid DEFAULT NULL, after_id text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next text; v_after_id bigint;
 begin
-  if auth.role() is distinct from 'service_role' then raise exception 'service role only'; end if;
+  if not public.is_admin() then raise exception using errcode='42501', message='admin only'; end if;
+  begin
+    v_after_id := after_id::bigint;
+  exception when invalid_text_representation or numeric_value_out_of_range then
+    raise exception using errcode='22023', message='after_id must be a positive bigint string';
+  end;
+  if page_size is null or page_size not between 1 and 100 or v_after_id < 1
+    or (status_filter is not null and status_filter not in ('pending','processing','published','failed','exhausted')) then
+    raise exception using errcode='22023', message='invalid page_size, status_filter or after_id';
+  end if;
+  with candidates as materialized (
+    select e.* from commerce.outbox_events e
+    where (status_filter is null or e.status=status_filter)
+      and (list_admin_outbox_events.aggregate_id is null or e.aggregate_id=list_admin_outbox_events.aggregate_id)
+      and (v_after_id is null or e.id<v_after_id)
+    order by e.id desc limit page_size+1
+  ), page as materialized (select * from candidates order by id desc limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'id',p.id::text,'event_id',p.event_id,'aggregate_type',p.aggregate_type,'aggregate_id',p.aggregate_id,
+    'event_type',p.event_type,'status',p.status,'attempts',p.attempts,'retry_start',p.retry_start,
+    'available_at',p.available_at,'lease_expires_at',p.lease_expires_at,'published_at',p.published_at,
+    'created_at',p.created_at,'has_error',p.last_error is not null,
+    'last_redrive',(select jsonb_build_object('attempts',r.attempts,'worker_id',r.worker_id,'reason',r.reason,'created_at',r.created_at)
+      from commerce.outbox_redrives r where r.event_id=p.event_id order by r.attempts desc limit 1)
+  ) order by p.id desc),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select min(id)::text from page) end
+    into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_after_id',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.redrive_outbox_event(event_id uuid, expected_attempt integer, worker_id text DEFAULT NULL, reason text DEFAULT NULL) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_event commerce.outbox_events; v_redrive commerce.outbox_redrives; v_worker text;
+begin
+  if auth.role()='service_role' then
+    v_worker := btrim(worker_id);
+  elsif public.is_admin() then
+    if worker_id is not null then raise exception using errcode='22023', message='admin must omit worker_id'; end if;
+    v_worker := 'admin:' || auth.uid()::text;
+  else
+    raise exception using errcode='42501', message='admin or service role only';
+  end if;
   if expected_attempt is null or expected_attempt < 25
-    or coalesce(length(btrim(worker_id)),0) not between 1 and 200
+    or coalesce(length(v_worker),0) not between 1 and 200
     or coalesce(length(btrim(reason)),0) not between 1 and 4000 then
     raise exception 'expected_attempt, worker_id and reason are required';
   end if;
@@ -1896,14 +1954,14 @@ begin
   select * into v_redrive from commerce.outbox_redrives r
     where r.event_id = v_event.event_id and r.attempts = expected_attempt;
   if found then
-    if (v_redrive.worker_id,v_redrive.reason) is distinct from (btrim(worker_id),btrim(reason)) then
+    if (v_redrive.worker_id,v_redrive.reason) is distinct from (v_worker,btrim(reason)) then
       raise exception 'redrive attempt was used with different parameters';
     end if;
     return true;
   end if;
   if v_event.status <> 'exhausted' or v_event.attempts <> expected_attempt then return false; end if;
   insert into commerce.outbox_redrives(event_id,attempts,worker_id,reason)
-    values(v_event.event_id,v_event.attempts,btrim(worker_id),btrim(reason));
+    values(v_event.event_id,v_event.attempts,v_worker,btrim(reason));
   update commerce.outbox_events e set status = 'pending', retry_start = e.attempts,
     available_at = clock_timestamp() where e.event_id = v_event.event_id;
   return true;
@@ -1957,6 +2015,63 @@ begin
   values ('fulfillment.create', v_subject_id, v_key, v_request_hash,
           'fulfillment', v_fulfillment.id);
   return v_response;
+end;
+$$;
+
+CREATE FUNCTION public.update_fulfillment(fulfillment_id uuid, expected_version bigint, changes jsonb, idempotency_key text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_subject constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
+  v_key text := btrim(idempotency_key);
+  v_hash text;
+  v_record commerce.command_idempotency;
+  v_fulfillment public.fulfillments;
+  v_order uuid;
+begin
+  if not public.is_admin() then raise exception using errcode='42501', message='admin only'; end if;
+  if coalesce(v_key, '')='' or length(v_key)>200 or expected_version is null or expected_version<1 then
+    raise exception using errcode='22023', message='valid idempotency_key and expected_version are required';
+  end if;
+  if changes is null or jsonb_typeof(changes)<>'object' or changes='{}'::jsonb then
+    raise exception using errcode='22023', message='changes must be a non-empty object';
+  end if;
+  if exists (select 1 from jsonb_each(changes) e where
+    e.key not in ('status','carrier','tracking_number','tracking_url')
+    or (jsonb_typeof(e.value)<>'string' and not (e.key='tracking_url' and e.value='null'::jsonb))) then
+    raise exception using errcode='22023', message='unsupported fulfillment field or value';
+  end if;
+  v_hash := private.command_request_hash(jsonb_build_object('fulfillment_id',fulfillment_id,
+    'expected_version',expected_version,'changes',changes));
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('fulfillment.update:' || v_subject || ':' || v_key,0));
+  select * into v_record from commerce.command_idempotency c
+    where c.scope='fulfillment.update' and c.subject_id=v_subject and c.idempotency_key=v_key;
+  if found then
+    if v_record.request_hash<>v_hash then
+      raise exception using errcode='PT409', message='idempotency key was used with different fulfillment parameters';
+    end if;
+    select * into v_fulfillment from public.fulfillments where id=v_record.resource_id;
+    if not found then raise exception using errcode='PT404', message='fulfillment not found'; end if;
+    return private.fulfillment_json(v_fulfillment);
+  end if;
+  select f.order_id into v_order from public.fulfillments f where f.id=fulfillment_id;
+  if not found then raise exception using errcode='PT404', message='fulfillment not found'; end if;
+  -- Match creation, refund and return commands: order before fulfillment.
+  perform 1 from public.orders where id=v_order for update;
+  select * into v_fulfillment from public.fulfillments f where f.id=fulfillment_id for update;
+  if v_fulfillment.version<>expected_version then
+    raise exception using errcode='PT409', message='fulfillment version conflict';
+  end if;
+  if exists (select 1 from jsonb_each(changes) e where e.value is distinct from to_jsonb(v_fulfillment)->e.key) then
+    update public.fulfillments f set
+      status=coalesce(changes->>'status',f.status),
+      carrier=coalesce(changes->>'carrier',f.carrier),
+      tracking_number=coalesce(changes->>'tracking_number',f.tracking_number),
+      tracking_url=case when changes ? 'tracking_url' then changes->>'tracking_url' else f.tracking_url end
+    where f.id=fulfillment_id returning * into v_fulfillment;
+  end if;
+  insert into commerce.command_idempotency(scope,subject_id,idempotency_key,request_hash,resource_type,resource_id)
+    values ('fulfillment.update',v_subject,v_key,v_hash,'fulfillment',v_fulfillment.id);
+  return private.fulfillment_json(v_fulfillment);
 end;
 $$;
 

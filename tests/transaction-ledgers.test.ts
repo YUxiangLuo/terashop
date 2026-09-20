@@ -92,7 +92,7 @@ beforeEach(async () => { buyer = await signup(); });
 const givenPendingOrder = () => fixtureOrder(product, buyer, 1, false);
 async function givenPaidOrder(fulfillment: 'none' | 'active' | 'cancelled' = 'none') {
   const order = await fixtureOrder(product, buyer, 2, false);
-  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   const payment = (await ledger(order.id)).transactions.find(transaction => transaction.kind === 'capture');
   if (!payment) throw new Error('paid order has no capture transaction');
   let fulfillmentId: string | undefined;
@@ -233,7 +233,7 @@ describe('支付交易与已支付快照', () => {
     const paidOrderId = order.id;
 
     await rpc('mark_order_paid', {
-      order_id: paidOrderId, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
+      idempotency_key: crypto.randomUUID(), order_id: paidOrderId, provider: 'manual', provider_ref: `cash-${crypto.randomUUID()}`,
     }, admin.token);
 
     const value = await ledger(paidOrderId);

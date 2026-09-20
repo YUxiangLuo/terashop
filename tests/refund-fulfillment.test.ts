@@ -42,7 +42,7 @@ const balance = (order: FixtureOrder): Promise<Balance> => checked(rpc('get_orde
 async function manualOrder(quantity: number, withShipping = false): Promise<FixtureOrder> {
   const order = await fixtureOrder(fixture, buyer, quantity, true,
     withShipping ? { shipping_method_id: await shippingByName('Standard shipping') } : {});
-  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   return order;
 }
 async function itemRefund(order: FixtureOrder, quantity: number): Promise<void> {

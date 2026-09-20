@@ -63,7 +63,7 @@ async function create(quoted = true, overrides: object = {}): Promise<FixtureOrd
 const paid = async (online = false, overrides: object = {}) => {
   const order = await create(true, overrides);
   if (online) await settleIntent(await fixtureIntent(order, buyer));
-  else await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  else await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   return order;
 };
 const requestRefund = (id: string, args: object) => rpc('create_refund_request', {

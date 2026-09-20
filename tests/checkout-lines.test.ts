@@ -225,7 +225,7 @@ for (const mode of ['quoted-manual', 'quoted-paypal', 'immediate'] as const) {
         service: true, method: 'PATCH', body: { attributes: { engraving: 'tampered' } },
       })).status).toBe(400);
       await settleIntent(intent); await settleIntent(intent);
-    } else await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+    } else await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
     expect(await stockOf(f.sku)).toBe(98);
     const [movement] = await database`select count(*)::int n, sum(delta)::int delta from public.inventory_movements where order_id=${order.id}::uuid and reason='order'`;
     expect(movement).toEqual({ n: 1, delta: -2 });
@@ -262,13 +262,13 @@ for (const mode of ['quoted-manual', 'quoted-paypal', 'immediate'] as const) {
 
 test('不同商业行不能各自绕过库存总量与 50 行上限，取消只回补一次', async () => {
   const f = await fixture(); const buyer = await signup();
-  await checked(rpc('adjust_inventory', { variant_id: f.variantId, delta: -99 }, admin.token));
+  await checked(rpc('adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: f.variantId, delta: -99 }, admin.token));
   for (const command of ['create_checkout_quote', 'create_order']) {
     expect((await rpc(command, { items: cart(f.variantId), address: TEST_ADDRESS,
       idempotency_key: crypto.randomUUID(),
     }, buyer.token)).status).toBe(400);
   }
-  await checked(rpc('adjust_inventory', { variant_id: f.variantId, delta: 99 }, admin.token));
+  await checked(rpc('adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: f.variantId, delta: 99 }, admin.token));
   const items = Array.from({ length: 51 }, (_, i) => ({ variant_id: f.variantId, quantity: 1, attributes: { engraving: String(i) } }));
   for (const command of ['create_checkout_quote', 'create_order']) expect((await rpc(command, {
     items, address: TEST_ADDRESS, idempotency_key: crypto.randomUUID(),

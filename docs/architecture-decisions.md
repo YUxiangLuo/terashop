@@ -22,7 +22,7 @@
 ## ADR-003：订单快照不可变
 
 所有客户订单均由 Quote 转单，商品、价格、税、运费和地址快照自建单起不可原地重算，trigger 同样约束 service role；退款字段仅由受控流程单向推进。未付款改址须取消后重新结账。
-后续商业变更必须由 Order Edit、Adjustment、补扣或退款事实表达，而不是覆盖原始记录。
+后续商业变更必须由独立事实表达，而不是覆盖原始记录。退款与相关 Adjustment 账本已实现；通用 Order Edit、任意调价和补扣接口尚未实现，不能据此假定已有可调用命令。
 所有订单（包括非 Quote 订单）必须有商品行；行毛额等于单价 × 数量，订单 subtotal / discount_total 等于行汇总。延迟约束在提交时校验，允许同一事务先头后行构建，但不允许分两个 HTTP 请求留下不完整订单；账本 `is_balanced` 也检查头行一致性。
 `order_number` 有 UNIQUE 约束，创建后与订单 ID 一样不可变，identity 不代替唯一性。整单校验通过隐藏的 `private.order_validation_queue` 按待检订单去重；触发时消费标记，强制校验后新改动重新排队，保存点回滚同时回滚标记，不以会话缓存跳过检查。
 
@@ -46,6 +46,8 @@
 可新履约数量 = 订购数量 − 活跃履约数量 − 已成功取消数量 − 活跃退款请求预留的取消数量。
 `get_order_fulfillment_balance` 向订单客户、管理员和 service role 返回安全数量 DTO；不可履约订单的 available 为零。
 金额型退款不推测商品取消量，但全额退款订单禁止新增履约；存在按行退款事实或活跃请求的履约不能再通过取消履约释放数量，应走退货/新订单流程。
+
+管理员通过 `update_fulfillment` 更新状态和物流，不能改商业行或归属。命令按订单 → 履约顺序取锁，以 `expected_version` 防止丢失更新；履约每次 UPDATE（包括 service 写入）由 trigger 推进版本，禁止调用者直接指定版本。命令的无变化请求不执行 UPDATE。独立店铺级幂等记录与更新同事务提交，重放返回当前 DTO 而不重新应用旧请求。物流变化通过 trigger 写前后值审计与 Outbox；状态变化沿用原状态机、取消保护及订单投影刷新。取消履约本身不代表退货入库或退款。
 
 ## ADR-005：促销计算
 
@@ -85,7 +87,9 @@
 `order_adjustments`、`payment_intents`、`payment_transactions`、`fulfillment_lines`、`refunds`、`refund_lines` 和退款金额组件在同一事务内保持一致。
 渠道退款先进入状态受限的 `refund_requests`，成功后才写成功账本。
 核心账本 append-only，外键采用 `ON DELETE RESTRICT`；不得把模型/账本同步拆成两个网络请求。
-订单、履约和手工退款分别只公开 `create_order`、`create_fulfillment`、`refund_order`，通过必填幂等键、请求指纹与事务内幂等记录支持重试。不保留版本后缀、兼容别名或非幂等公开重载；履约和退款的内部写入由 private 函数承载。
+订单创建、履约创建和手工退款分别只公开 `create_order`、`create_fulfillment`、`refund_order`，通过必填幂等键、请求指纹与事务内幂等记录支持重试。不保留版本后缀、兼容别名或非幂等公开重载；履约创建和退款的内部写入由 private 函数承载。
+
+`create_customer`、`adjust_inventory`、`mark_order_paid` 同样要求幂等键，各有独立店铺级范围。同键调用通过事务 advisory lock 串行化，业务写入与不可变幂等记录共同提交或回滚；参数冲突拒绝。重放先检查当前权限，再读取绑定资源当前状态，不缓存含 PII 的响应。库存绑定首次解析的仓库，客户匿名化和订单后续退款不会被重放覆盖。HTTP 调用使用默认 READ COMMITTED；更高隔离级别的事务调用者仍须处理事务冲突并重试整个事务。
 
 手工退款内部命令直接返回本次写入的退款 UUID，公开包装将该 UUID 绑定到幂等记录；不能按 created_at 或事务开始时间猜测“最新退款”。同单并发的不同请求分别绑定自己的资源，重放不再次退款。
 
@@ -100,6 +104,8 @@ PayPal Capture declined 后终结当前意图并允许新建 Order。客户端 P
 Outbox 存储每次领取确定的 `lease_expires_at` 与随机 `lease_token`。重领不能用新调用者的 lease_seconds 缩短旧期限；complete 必须同时匹配 event、worker、token 且未过期。消费者仍须幂等，租约 fencing 不提供外部副作用的 exactly-once。
 
 Outbox 自动重试有界，耗尽后仅允许受信人工重投。重投必须保留事件身份、累计次数和不可变审计；同一耗尽点的幂等重放不能重置后续处理。次数、请求参数与恢复步骤统一见 [Outbox 恢复](../supabase/functions/README.md#outbox-与-inbox-恢复)。
+
+管理员可读取 Outbox/Inbox 的分页安全摘要并重投耗尽 Outbox；数据库将重投操作者绑定当前 Auth UUID，不接受管理员提供 worker_id。相同耗尽点仍按操作者与原因校验重放，不扩展为无限自动重试。查询不暴露原始事件、错误内容或租约凭据；Inbox 处理可能记账，重投仍留在 service/验签渠道边界，不因增加管理查询而开放。
 
 PayPal Capture POST 前必须调用 `prepare_paypal_capture`，按 intent → quote → order 顺序复核归属、金额、订单及预占，并持久化捕获标记。
 普通取消不能穿透该标记，网络错误不清除它；重试先查询渠道，再复用原 Capture 操作键。

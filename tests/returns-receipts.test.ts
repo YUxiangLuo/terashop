@@ -33,7 +33,7 @@ async function shipped(quantity = 2, fulfilled = quantity, online = false): Prom
   const buyer = await signup(); const order = await fixtureOrder(fixture, buyer, quantity);
   let intent: FixtureIntent | undefined;
   if (online) { intent = await fixtureIntent(order, buyer); await settleIntent(intent); }
-  else await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  else await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   const shipment = await checked<{ id: string }>(rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: lineItems(order.itemId, fulfilled) }, admin.token));
   return { buyer, order, id: shipment.id, intent };
 }
@@ -76,7 +76,7 @@ test('相同 SKU 的商业行不混用；规范化拆行/重排重试保持同�
   const quote = await checked<{ id: string }>(rpc('create_checkout_quote', { idempotency_key: crypto.randomUUID(), address: TEST_ADDRESS,
     items: ['Alice','Bob'].map(name => ({ variant_id: fixture.variantId, quantity: 2, attributes: { name } })) }, buyer.token));
   const order = await checked<{ id: string }>(rpc('create_order_from_quote', { quote_id: quote.id }, buyer.token));
-  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   const lines = await checked<Array<{ id: string; attributes: { name: string } }>>(api(`/rest/v1/order_items?order_id=eq.${order.id}&select=id,attributes`, { token: buyer.token }));
   const f = await checked<{ id: string }>(rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: lines.map(l => ({ order_item_id: l.id, quantity: 2 })) }, admin.token));
   const partial = await checked<Return>(rpc('create_return', { fulfillment_id:f.id,items:lineItems(lines[0].id,1),idempotency_key:crypto.randomUUID() },admin.token));
@@ -232,7 +232,7 @@ test('零价商品仍可实际收货和回库，不通过虚构零金额退款�
   await checked(api(`/rest/v1/product_variants?id=eq.${free.variantId}`, { service:true, method:'PATCH', body:{price:0} }));
   const buyer=await signup();
   const order=await checked<{id:string}>(rpc('create_order',{idempotency_key:crypto.randomUUID(),address:TEST_ADDRESS,items:[{variant_id:free.variantId,quantity:1},{variant_id:fixture.variantId,quantity:1}]},buyer.token));
-  await checked(rpc('mark_order_paid',{order_id:order.id},admin.token));
+  await checked(rpc('mark_order_paid',{idempotency_key:crypto.randomUUID(),order_id:order.id},admin.token));
   const [line]=await checked<Array<{id:string}>>(api(`/rest/v1/order_items?order_id=eq.${order.id}&variant_id=eq.${free.variantId}&select=id`,{token:buyer.token}));
   const f=await checked<{id:string}>(rpc('create_fulfillment',{idempotency_key:crypto.randomUUID(),order_id:order.id,items:lineItems(line.id,1)},admin.token));
   expect((await rpc('refund_order',{ idempotency_key: crypto.randomUUID(),order_id:order.id,items:lineItems(line.id,1),restock:true},admin.token)).status).toBe(400);

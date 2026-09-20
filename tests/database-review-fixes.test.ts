@@ -202,7 +202,9 @@ for (const terminal of ['paid', 'cancelled', 'expired'] as const) {
         await verifyReplay();
       });
     } else {
-      await checked(rpc(terminal === 'paid' ? 'mark_order_paid' : 'cancel_order', { order_id: order.id }, admin.token));
+      await checked(terminal === 'paid'
+        ? rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token)
+        : rpc('cancel_order', { order_id: order.id }, admin.token));
       await verifyReplay();
     }
     expect(await checked(rpc('get_inventory_availability', { variant_id: f.variantId }, admin.token)))
@@ -280,7 +282,7 @@ test('便捷下单冻结订单行与头行，即使同一事务完整改价也�
     await tx`update public.order_items set unit_price=20,total=20 where id=${order.itemId}::uuid`;
     await tx`update public.orders set subtotal=20,total=20 where id=${order.id}::uuid`;
   })).rejects.toThrow('immutable');
-  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   const ledger = await checked<{ balances: { is_balanced: boolean; captured: number } }>(rpc('get_order_ledger', { order_id: order.id }, buyer.token));
   expect(ledger.balances.is_balanced).toBe(true);
   expect(ledger.balances.captured).toBe(10);

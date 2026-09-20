@@ -25,7 +25,7 @@ for (const isolation of ['read committed', 'repeatable read'] as const)
 for (const mode of ['insert', 'update'] as const)
 test(`直接账本写入不能超退：${mode} / ${isolation}`, async () => {
   const f = await fixture(), buyer = await signup(), order = await fixtureOrder(f, buyer, 1, false);
-  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   const id = crypto.randomUUID(), amount = order.total * 0.6;
   if (mode === 'update') await database`insert into commerce.payment_transactions(id,order_id,provider,kind,status,amount,currency)
     values (${id}::uuid,${order.id}::uuid,'manual','refund','pending',${amount},${order.currency})`;
@@ -117,11 +117,11 @@ for (const exists of [false, true]) test(`Metafield 定义提交后旧 RR 快照
 
 for (const action of ['quote', 'order', 'adjust'] as const) test(`新 Quote 提交后，旧 RR 快照不能通过 ${action} 再消耗相同可用库存`, async () => {
   const f = await fixture(), first = await signup(), second = await signup();
-  await checked(rpc('adjust_inventory', { variant_id: f.variantId, delta: -99 }, admin.token));
+  await checked(rpc('adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: f.variantId, delta: -99 }, admin.token));
   let quoteId: string | undefined;
   const result = await staleAfterCommit(async sql => {
     await actor(sql, action === 'adjust' ? admin : second);
-    if (action === 'adjust') return sql`select public.adjust_inventory(${f.variantId}::uuid,-1)`;
+    if (action === 'adjust') return sql`select public.adjust_inventory(${f.variantId}::uuid,-1,${crypto.randomUUID()})`;
     if (action === 'order') return (await sql`select public.create_order(jsonb_build_array(jsonb_build_object('variant_id',${f.variantId}::uuid,'quantity',1)),${crypto.randomUUID()},address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) o`)[0].o;
     return (await sql`select public.create_checkout_quote(jsonb_build_array(jsonb_build_object('variant_id',${f.variantId}::uuid,'quantity',1)),${crypto.randomUUID()},address=>${JSON.stringify(TEST_ADDRESS)}::text::jsonb) q`)[0].q;
   }, async () => {
@@ -142,7 +142,7 @@ for (const action of ['quote', 'order', 'adjust'] as const) test(`新 Quote 提�
 
 for (const direct of [false, true]) test(`连续部分履约无状态变化时，${direct ? '直接 INSERT' : 'RPC'} 也拒绝旧 RR 快照超发`, async () => {
   const f = await fixture(), buyer = await signup(), order = await fixtureOrder(f, buyer, 4, false);
-  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  await checked(rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token));
   const items = (quantity: number) => [{ order_item_id: order.itemId, quantity }];
   await checked(rpc('create_fulfillment', { idempotency_key: crypto.randomUUID(), order_id: order.id, items: items(1) }, admin.token));
   const result = await staleAfterCommit(async sql => {
@@ -157,7 +157,7 @@ for (const direct of [false, true]) test(`连续部分履约无状态变化时�
 
 test('READ COMMITTED 对照：新 Quote 后的第二次报价按最新预占拒绝', async () => {
   const f = await fixture(), first = await signup(), second = await signup();
-  await checked(rpc('adjust_inventory', { variant_id: f.variantId, delta: -99 }, admin.token));
+  await checked(rpc('adjust_inventory', { idempotency_key: crypto.randomUUID(), variant_id: f.variantId, delta: -99 }, admin.token));
   let id: string | undefined;
   try {
     const result = await staleAfterCommit(async sql => {

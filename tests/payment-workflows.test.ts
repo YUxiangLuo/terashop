@@ -329,7 +329,7 @@ describe('Manual payment with PayPal intents', () => {
             order_id: order.id, actor_id: buyer.userId, provider, idempotency_key: crypto.randomUUID(),
           }, undefined, true));
       const before = await stockOf(fixture.sku);
-      const paid = await rpc('mark_order_paid', { order_id: order.id }, admin.token);
+      const paid = await rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token);
       expect(paid.status).toBe(400);
       expect(paid.data).toMatchObject({ message: expect.stringContaining('online payment intent') });
       expect((await operations(order.id)).payment_intents[0].status).toBe(intent.status);
@@ -345,6 +345,6 @@ describe('Manual payment with PayPal intents', () => {
       status: 'declined', amount: intent.amount.toFixed(2), currency: intent.currency,
       order_reference: intent.provider_reference,
     })).toMatchObject({ outcome: 'failed' });
-    expect((await rpc('mark_order_paid', { order_id: order.id }, admin.token)).status).toBe(200);
+    expect((await rpc('mark_order_paid', { idempotency_key: crypto.randomUUID(), order_id: order.id }, admin.token)).status).toBe(200);
   });
 });
