@@ -25,8 +25,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(37);
-    expect(writeTools.length).toBe(86);
+    expect(readTools.length).toBe(38);
+    expect(writeTools.length).toBe(88);
     expect(readTools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(writeTools.find((tool) => tool.name === 'adjust_inventory')?.annotations).toMatchObject({
       readOnlyHint: false,
@@ -125,6 +125,12 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
       ['list_admin_metafields', { owner_type_filter: 'customer' }],
       ['list_admin_metaobjects', {}],
       ['list_admin_reviews', { rating_filter: 6 }],
+      ['update_order_admin_note', { order_id: id, changes: { admin_note: 'missing expected' } }],
+      [
+        'update_order_admin_note',
+        { order_id: id, changes: { expected_admin_note: null, admin_note: null, status: 'paid' } },
+      ],
+      ['list_admin_order_events', { order_id: id, after_id: 123 }],
       ['moderate_review', { review_id: id, status: 'approved' }],
       ['delete_review', { review_id: id }],
       ['delete_metaobject', { metaobject_id: id }],

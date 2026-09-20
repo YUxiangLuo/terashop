@@ -2014,6 +2014,15 @@ export type Database = {
         }
         Returns: Json
       }
+      list_admin_order_events: {
+        Args: {
+          after_id?: string
+          order_id: string
+          page_size?: number
+          type_filter?: string
+        }
+        Returns: Json
+      }
       list_admin_orders: {
         Args: {
           after_order_number?: number
@@ -2394,6 +2403,10 @@ export type Database = {
       }
       update_order_address: {
         Args: { address?: Json; address_id?: string; order_id: string }
+        Returns: Json
+      }
+      update_order_admin_note: {
+        Args: { changes: Json; order_id: string }
         Returns: Json
       }
       update_product: {

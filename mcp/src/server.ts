@@ -612,6 +612,32 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
   );
   rpc('get_admin_order', 'Read order details and internal note. Commercial snapshots are immutable.', order);
+  rpc(
+    'update_order_admin_note',
+    'Replace only the internal note after reading get_admin_order. changes requires expected_admin_note and admin_note, each string or null; null clears, empty string is distinct, no trimming. Database limits new text to 10000 characters. Atomic comparison checks current text, not edit history or order version (A→B→A is not detected). No note history or event is created. Never silently replace expected text on conflict or retry an uncertain write; reread first. Does not change customer note, price, payment or fulfillment.',
+    z.strictObject({
+      order_id: id,
+      changes: z.strictObject({
+        expected_admin_note: z.string().nullable(),
+        admin_note: z.string().nullable(),
+      }),
+    }),
+    true,
+  );
+  rpc(
+    'list_admin_order_events',
+    'Read one order timeline by descending bigint ID. IDs and cursors are decimal strings, never Number. Returns only id/order_id/actor_id/type/created_at, not raw event data or internal notes. actor_id is a nullable Auth UUID. Optional type is exact and case-sensitive; reset cursor on filter change. Empty does not prove order existence. No cross-page snapshot; allocation order is not commit order, so this is not a reliable event consumer. Use order detail and ledger for business facts.',
+    z.strictObject({
+      order_id: id,
+      page_size: pageSize,
+      after_id: z
+        .string()
+        .regex(/^[1-9][0-9]*$/)
+        .max(19)
+        .optional(),
+      type_filter: z.string().min(1).max(200).optional(),
+    }),
+  );
   rpc('get_order_pricing', 'Read historical pricing, discounts, shipping and tax snapshots.', order);
   rpc(
     'get_order_ledger',

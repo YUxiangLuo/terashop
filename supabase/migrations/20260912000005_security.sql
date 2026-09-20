@@ -767,6 +767,11 @@ REVOKE ALL ON FUNCTION private.bump_review_revision(), public.list_admin_reviews
 GRANT EXECUTE ON FUNCTION public.list_admin_reviews(integer,uuid,uuid,uuid,text,integer),
   public.get_admin_review(uuid), public.delete_review(uuid,integer) TO authenticated,service_role;
 
+REVOKE ALL ON FUNCTION public.update_order_admin_note(uuid,jsonb),
+  public.list_admin_order_events(uuid,integer,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.update_order_admin_note(uuid,jsonb),
+  public.list_admin_order_events(uuid,integer,text,text) TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;

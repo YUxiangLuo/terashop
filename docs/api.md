@@ -215,6 +215,18 @@ PATCH 省略保留，只允许显式字段，JSONB 文本最多 256 KiB。客户
 
 客户查询必须能解析出当前活跃 Customer，无会话、失去 Auth 关联或已匿名化均拒绝；有效游客会话可查询自己的订单。不能用请求体客户 ID 或 service role 无身份调用来冒充客户。管理员仍可按商业 Customer ID 查询匿名化客户的历史订单，此数据继续受订单保留政策约束。
 
+### 内部备注编辑与管理员事件时间线
+
+`update_order_admin_note(order_id, changes)` 仅 admin/service 可用，changes 必须且只能包含 `expected_admin_note` 和 `admin_note`，各为字符串或 JSON null。先用 `get_admin_order` 读取当前备注，再提交预期旧值及新值；null 清除，空串与 null 不同，不 trim。新值最多 10,000 个 PostgreSQL 字符，旧值不受新长度限制，以便清除历史长备注。
+
+命令取得订单 `FOR NO KEY UPDATE NOWAIT` 行锁，按当前备注文本比较后整体替换，不是追加。相同值不 UPDATE，成功返回 `{id,admin_note}`。这是**旧值比较，不是历史版本号**：A→B→A 不会被识别为冲突，不保护订单金额/状态快照。仅修改内部备注及既有 updated_at；不改客户备注、支付、履约、库存或金额。不创建备注历史、客户可读事件或 Outbox 消息。旧底表直写仍兼容，但不具备本命令的旧值比较保护。
+
+非法输入 `22023`、无权限 `42501`、订单不存在 `PT404`、旧值不符 `PT409`、行锁竞争 `55P03`、旧事务快照可能 `40001`。MCP 写工具须显式启用；结果不明先读当前备注，不能自动用新读到的值覆盖 expected 值或盲目重放。非幂等响应缓存接口。
+
+`list_admin_order_events(order_id, page_size=20, after_id?, type_filter?)` 仅 admin/service 可用，返回 `{items,next_cursor}`。按 bigint ID 倒序，页大小 1–100；id/next_cursor/after_id 全部为十进制字符串，不能转 Number，游标范围 1–9223372036854775807，不接受前导零。type 精确区分大小写、不 trim、不解释通配符，长度 1–200；与订单和游标条件按 AND 组合。末页游标 null，空列表不证明订单存在。
+
+事件项仅含 `id/order_id/actor_id/type/created_at`，actor_id 为可空 Auth UUID；**不返回任意 data 载荷**，不展开用户资料。事件类型也作为不可信文本处理；这不是支付成功判断或完整业务事实查询，仍应读取订单详情和专项账本。顺序是 ID 分配顺序，不是提交顺序，不提供跨页快照或可靠事件消费水位；更换类型筛选时清空游标。此 RPC 不改变旧事件底表的客户读取权限。
+
 ## 持久 Cart（可选）
 
 Cart 保存购买意向，不保存价格、锁价或占库存。可以为空，每个活跃 Cart 最多 50 条规范化商业行/100 件；同变体/属性合并，已有行 ID 在改数量时保留。停售/价格、库存、优惠资格在预览/转 Quote 时重新核验，不把 Cart 当可支付对象。

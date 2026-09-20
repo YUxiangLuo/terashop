@@ -2369,4 +2369,64 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.update_order_admin_note(order_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_order public.orders;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if order_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or not (changes ?& array['expected_admin_note','admin_note'])
+    or changes-array['expected_admin_note','admin_note']<>'{}'::jsonb
+    or jsonb_typeof(changes->'expected_admin_note') not in ('string','null')
+    or jsonb_typeof(changes->'admin_note') not in ('string','null')
+    or char_length(changes->>'admin_note')>10000 then
+    raise exception using errcode='22023', message='expected and new notes required; new note maximum 10000 characters';
+  end if;
+  select * into v_order from public.orders o where o.id=order_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='order not found'; end if;
+  if v_order.admin_note is distinct from (changes->>'expected_admin_note') then
+    raise exception using errcode='PT409', message='internal note changed';
+  end if;
+  if v_order.admin_note is distinct from (changes->>'admin_note') then
+    update public.orders o set admin_note=changes->>'admin_note' where o.id=order_id
+      returning * into v_order;
+  end if;
+  -- Do not copy internal text into customer-readable order events or the outbox.
+  return jsonb_build_object('id',v_order.id,'admin_note',v_order.admin_note);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_order_events(order_id uuid, page_size integer DEFAULT 20,
+    after_id text DEFAULT NULL, type_filter text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next text; v_after bigint;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if order_id is null or page_size is null or page_size not between 1 and 100
+    or (after_id is not null and (length(after_id)>19 or after_id !~ '^[1-9][0-9]*$'))
+    or (type_filter is not null and (char_length(type_filter) not between 1 and 200)) then
+    raise exception using errcode='22023', message='invalid order event filters';
+  end if;
+  begin v_after:=after_id::bigint;
+  exception when numeric_value_out_of_range then
+    raise exception using errcode='22023', message='invalid order event cursor';
+  end;
+  with candidates as materialized (
+    select e.id,e.order_id,e.actor_id,e.type,e.created_at from public.order_events e
+    where e.order_id=list_admin_order_events.order_id
+      and (v_after is null or e.id<v_after) and (type_filter is null or e.type=type_filter)
+    order by e.id desc limit page_size+1
+  ), page as materialized (select * from candidates order by id desc limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id::text,'order_id',p.order_id,
+    'actor_id',p.actor_id,'type',p.type,'created_at',p.created_at) order by p.id desc),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id::text from page order by id limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;
