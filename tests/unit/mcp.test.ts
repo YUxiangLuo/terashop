@@ -25,8 +25,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(20);
-    expect(writeTools.length).toBe(51);
+    expect(readTools.length).toBe(24);
+    expect(writeTools.length).toBe(55);
     expect(readTools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(writeTools.find((tool) => tool.name === 'adjust_inventory')?.annotations).toMatchObject({
       readOnlyHint: false,
@@ -66,6 +66,11 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
     for (const [name, args] of [
       ['redrive_outbox_event', { event_id: id, expected_attempt: 25, reason: 'test', worker_id: 'forged' }],
       ['list_admin_products', { page_size: 101 }],
+      ['get_admin_promotion', { promotion_id: id, service: true }],
+      ['list_admin_promotions', { type_filter: 'bogus' }],
+      ['list_admin_promotions', { code_only: 'true' }],
+      ['list_admin_promotion_targets', { promotion_id: id, role_filter: 'buy' }],
+      ['list_admin_discount_redemptions', {}],
       ['list_admin_inventory_movements', { after_id: 9007199254740992 }],
       ['list_admin_inventory_movements', { reason_filter: 'transfer' }],
       ...[0, -1, 1.5, 2147483648].map(

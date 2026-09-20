@@ -465,6 +465,27 @@ PATCH 仅允许上述四个字段，省略保留；address 接受既有任意 JS
 
 ## 促销范围与扩展字段管理
 
+### 管理员促销查询
+
+以下 RPC 仅 admin/service 可调用，均接入同名只读 MCP 工具；不修改规则或用量，不代表当前购物车的优惠资格，也不代替订单定价快照。
+
+| RPC | 参数与返回 |
+| --- | --- |
+| `get_admin_promotion` | `promotion_id`；返回当前规则 DTO，不存在返回 null，包含停用/未开始/过期规则 |
+| `list_admin_promotions` | `page_size=20, after_id=null, active=null, type_filter=null, code_only=null, search=null`；返回规则 DTO 分页 |
+| `list_admin_promotion_targets` | 必填 `promotion_id`；可选 `page_size=20, after_id=null, role_filter=null`，role 为 apply/get；返回配置目标分页 |
+| `list_admin_discount_redemptions` | 必填 `promotion_id`；可选 `page_size=20, after_id=null, customer_id=null, order_id=null`；返回当前优惠码占用分页 |
+
+三个列表均按 UUID 升序返回 `{items,next_cursor}`，page_size 为 1–100，末页 next_cursor 为 null；所有筛选按 AND 组合，无精确总数、无跨请求快照。目标/占用列表在父活动不存在时返回空页，需要区分不存在与空集合时另查详情。非法分页/筛选和 null 父 ID 为 `22023`，非管理员为 `42501`。
+
+规则 DTO 字段为 `id/name/code/type/params/priority/stackable/apply_scope/get_scope/usage_limit/used_count/per_customer_limit/starts_at/ends_at/is_active/created_at/updated_at`。type_filter 接受 `order_percentage/order_fixed/item_percentage/buy_x_get_y/free_shipping`。active 仅筛选存储的启用标记，不自动计算时间、名额或购物车资格；code_only=true 为优惠码，false 为自动促销，省略包含两者。search 是名称/码的不区分大小写字面子串，去除首尾普通空格，最多 200 字符，`%/_` 不是通配符。params 与名称为不可信商家数据。
+
+目标 DTO 为 `id/promotion_id/role/product_id/category_id/variant_id`，三种引用恰好一个非 null；详情不内嵌无界目标数组，须单独翻页。这里返回配置引用，不展开商品、分类后代或有效购物车匹配结果，不能只凭一页目标推断整体范围。
+
+占用 DTO 为 `id/promotion_id/customer_id/order_id/created_at`，不附带客户 PII；customer_id 是 Customer ID，不是 Auth ID。**used_count 包含自动促销和优惠码的订单占用，但 discount_redemptions 只记录优惠码，且可能在付款前产生、在取消/过期后删除。** 它不是已付款销售报表或不可变历史；历史规则、分摊与金额应读取订单定价/账本。读取不保留占用、不改变资格。
+
+### 范围与扩展字段规则
+
 商品百分比及买赠的 `promotions.apply_scope` 为 `all`（默认）或 `selected`；买赠的 `get_scope` 为 `same_as_apply`（默认）或 `selected`。定向活动应以 selected 或 inactive 创建，再配置目标，避免先公开全店优惠。INSERT `promotion_targets` 自动将对应范围收窄为 selected，删除最后一条仍匹配零商品；扩大范围须先删除对应目标，再显式 PATCH scope。规则、范围与目标一起进入交易快照。整单百分比/固定金额与免邮仍按原有整单语义执行，不借此改变算法或增加条件 DSL。
 
 买赠购买与赠送单位互斥，属性拆行不改变收益；集合重叠与赠品选择算法见 [ADR-005](architecture-decisions.md#adr-005促销计算)。

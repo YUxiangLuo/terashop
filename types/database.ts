@@ -1799,6 +1799,7 @@ export type Database = {
       get_admin_location: { Args: { location_id: string }; Returns: Json }
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
+      get_admin_promotion: { Args: { promotion_id: string }; Returns: Json }
       get_cart: {
         Args: { cart_id: string; guest_token?: string }
         Returns: Json
@@ -1859,6 +1860,16 @@ export type Database = {
         }
         Returns: Json
       }
+      list_admin_discount_redemptions: {
+        Args: {
+          after_id?: string
+          customer_id?: string
+          order_id?: string
+          page_size?: number
+          promotion_id: string
+        }
+        Returns: Json
+      }
       list_admin_inventory_movements: {
         Args: {
           after_id?: string
@@ -1915,6 +1926,26 @@ export type Database = {
           page_size?: number
           search?: string
           status_filter?: string
+        }
+        Returns: Json
+      }
+      list_admin_promotion_targets: {
+        Args: {
+          after_id?: string
+          page_size?: number
+          promotion_id: string
+          role_filter?: string
+        }
+        Returns: Json
+      }
+      list_admin_promotions: {
+        Args: {
+          active?: boolean
+          after_id?: string
+          code_only?: boolean
+          page_size?: number
+          search?: string
+          type_filter?: string
         }
         Returns: Json
       }

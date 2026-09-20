@@ -1837,4 +1837,103 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.admin_promotion_json(p public.promotions) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
+  select jsonb_build_object('id',p.id,'name',p.name,'code',p.code,'type',p.type,'params',p.params,
+    'priority',p.priority,'stackable',p.stackable,'apply_scope',p.apply_scope,'get_scope',p.get_scope,
+    'usage_limit',p.usage_limit,'used_count',p.used_count,'per_customer_limit',p.per_customer_limit,
+    'starts_at',p.starts_at,'ends_at',p.ends_at,'is_active',p.is_active,
+    'created_at',p.created_at,'updated_at',p.updated_at);
+$$;
+
+CREATE FUNCTION public.get_admin_promotion(promotion_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.admin_promotion_json(p) from public.promotions p where p.id=promotion_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_promotions(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    active boolean DEFAULT NULL, type_filter text DEFAULT NULL, code_only boolean DEFAULT NULL,
+    search text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or length(search)>200
+    or (type_filter is not null and type_filter not in
+      ('order_percentage','order_fixed','item_percentage','buy_x_get_y','free_shipping')) then
+    raise exception using errcode='22023', message='invalid promotion list filters';
+  end if;
+  with candidates as materialized (
+    select p as promotion,p.id from public.promotions p where (after_id is null or p.id>after_id)
+      and (active is null or p.is_active=active) and (type_filter is null or p.type=type_filter)
+      and (code_only is null or (p.code is not null)=code_only)
+      and (nullif(btrim(search),'') is null or strpos(lower(p.name),lower(btrim(search)))>0
+        or strpos(lower(p.code),lower(btrim(search)))>0)
+    order by p.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(private.admin_promotion_json(p.promotion) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_promotion_targets(promotion_id uuid, page_size integer DEFAULT 20,
+    after_id uuid DEFAULT NULL, role_filter text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if promotion_id is null or page_size is null or page_size not between 1 and 100
+    or (role_filter is not null and role_filter not in ('apply','get')) then
+    raise exception using errcode='22023', message='invalid promotion target filters';
+  end if;
+  with candidates as materialized (
+    select t.* from public.promotion_targets t where t.promotion_id=list_admin_promotion_targets.promotion_id
+      and (after_id is null or t.id>after_id) and (role_filter is null or t.role=role_filter)
+    order by t.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'promotion_id',p.promotion_id,'role',p.role,
+    'product_id',p.product_id,'category_id',p.category_id,'variant_id',p.variant_id) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_discount_redemptions(promotion_id uuid, page_size integer DEFAULT 20,
+    after_id uuid DEFAULT NULL, customer_id uuid DEFAULT NULL, order_id uuid DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if promotion_id is null or page_size is null or page_size not between 1 and 100 then
+    raise exception using errcode='22023', message='invalid redemption filters';
+  end if;
+  with candidates as materialized (
+    select r.* from public.discount_redemptions r where r.promotion_id=list_admin_discount_redemptions.promotion_id
+      and (after_id is null or r.id>after_id)
+      and (list_admin_discount_redemptions.customer_id is null or r.customer_id=list_admin_discount_redemptions.customer_id)
+      and (list_admin_discount_redemptions.order_id is null or r.order_id=list_admin_discount_redemptions.order_id)
+    order by r.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'promotion_id',p.promotion_id,
+    'customer_id',p.customer_id,'order_id',p.order_id,'created_at',p.created_at) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;

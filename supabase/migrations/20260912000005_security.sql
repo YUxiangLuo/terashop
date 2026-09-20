@@ -686,6 +686,15 @@ REVOKE ALL ON FUNCTION private.assert_inventory_transfer(), public.get_inventory
 GRANT EXECUTE ON FUNCTION public.get_inventory_transfer(uuid),
   public.transfer_inventory(uuid,uuid,uuid,integer,text,text) TO authenticated;
 
+REVOKE ALL ON FUNCTION private.admin_promotion_json(public.promotions), public.get_admin_promotion(uuid),
+  public.list_admin_promotions(integer,uuid,boolean,text,boolean,text),
+  public.list_admin_promotion_targets(uuid,integer,uuid,text),
+  public.list_admin_discount_redemptions(uuid,integer,uuid,uuid,uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_admin_promotion(uuid),
+  public.list_admin_promotions(integer,uuid,boolean,text,boolean,text),
+  public.list_admin_promotion_targets(uuid,integer,uuid,text),
+  public.list_admin_discount_redemptions(uuid,integer,uuid,uuid,uuid) TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;
