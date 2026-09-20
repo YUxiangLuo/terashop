@@ -10,6 +10,7 @@ export const key = z
     'Keep the same key and identical arguments for retries. The database validates 1–200 characters after trimming ordinary spaces.',
   );
 export const pageSize = z.number().int().min(1).max(100).optional();
+export const metafieldOwner = z.enum(['product', 'variant', 'category', 'customer', 'order', 'shop']);
 export const search = z.string().max(200).optional();
 export const reason = z.string().max(2000).optional();
 export const order = z.strictObject({ order_id: id });

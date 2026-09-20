@@ -717,6 +717,13 @@ REVOKE ALL ON FUNCTION private.bump_tax_rate_revision(), private.admin_tax_rate_
 GRANT EXECUTE ON FUNCTION public.get_admin_tax_rate(uuid), public.list_admin_tax_rates(integer,uuid,boolean,text,text),
   public.create_tax_rate(uuid,jsonb), public.update_tax_rate(uuid,integer,jsonb) TO authenticated,service_role;
 
+REVOKE ALL ON FUNCTION private.admin_metafield_definition_json(public.metafield_definitions),
+  public.get_admin_metafield_definition(uuid), public.list_admin_metafield_definitions(integer,uuid,text,text,text),
+  public.list_admin_metafields(text,uuid,integer,uuid,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_admin_metafield_definition(uuid),
+  public.list_admin_metafield_definitions(integer,uuid,text,text,text),
+  public.list_admin_metafields(text,uuid,integer,uuid,text,text) TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;

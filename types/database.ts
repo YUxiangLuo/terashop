@@ -1818,6 +1818,10 @@ export type Database = {
       get_admin_category: { Args: { category_id: string }; Returns: Json }
       get_admin_customer: { Args: { customer_id: string }; Returns: Json }
       get_admin_location: { Args: { location_id: string }; Returns: Json }
+      get_admin_metafield_definition: {
+        Args: { definition_id: string }
+        Returns: Json
+      }
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
       get_admin_promotion: { Args: { promotion_id: string }; Returns: Json }
@@ -1913,6 +1917,27 @@ export type Database = {
           after_id?: string
           page_size?: number
           search?: string
+        }
+        Returns: Json
+      }
+      list_admin_metafield_definitions: {
+        Args: {
+          access_filter?: string
+          after_id?: string
+          namespace_filter?: string
+          owner_type_filter?: string
+          page_size?: number
+        }
+        Returns: Json
+      }
+      list_admin_metafields: {
+        Args: {
+          after_id?: string
+          key_filter?: string
+          namespace_filter?: string
+          owner_id_filter: string
+          owner_type_filter: string
+          page_size?: number
         }
         Returns: Json
       }

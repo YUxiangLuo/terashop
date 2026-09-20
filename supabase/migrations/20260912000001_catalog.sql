@@ -2277,4 +2277,81 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.admin_metafield_definition_json(d public.metafield_definitions) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
+  select jsonb_build_object('id',d.id,'owner_type',d.owner_type,'namespace',d.namespace,'key',d.key,
+    'name',d.name,'type',d.type,'access',d.access,'description',d.description,'validations',d.validations,
+    'position',d.position,'created_at',d.created_at,'updated_at',d.updated_at);
+$$;
+
+CREATE FUNCTION public.get_admin_metafield_definition(definition_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.admin_metafield_definition_json(d) from public.metafield_definitions d where d.id=definition_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_metafield_definitions(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    owner_type_filter text DEFAULT NULL, namespace_filter text DEFAULT NULL, access_filter text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100
+    or owner_type_filter not in ('product','variant','category','customer','order','shop')
+    or access_filter not in ('admin','public','customer') then
+    raise exception using errcode='22023', message='invalid metafield definition filters';
+  end if;
+  with candidates as materialized (
+    select d as definition,d.id from public.metafield_definitions d where (after_id is null or d.id>after_id)
+      and (owner_type_filter is null or d.owner_type=owner_type_filter)
+      and (namespace_filter is null or d.namespace=namespace_filter)
+      and (access_filter is null or d.access=access_filter)
+    order by d.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(private.admin_metafield_definition_json(p.definition) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_metafields(owner_type_filter text, owner_id_filter uuid,
+    page_size integer DEFAULT 20, after_id uuid DEFAULT NULL, namespace_filter text DEFAULT NULL,
+    key_filter text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or owner_id_filter is null or owner_type_filter is null
+    or owner_type_filter not in ('product','variant','category','customer','order','shop') then
+    raise exception using errcode='22023', message='invalid metafield filters';
+  end if;
+  with candidates as materialized (
+    select m.id,jsonb_build_object('id',m.id,'owner_type',m.owner_type,'owner_id',m.owner_id,
+      'namespace',m.namespace,'key',m.key,'type',m.type,'value',m.value,
+      'created_at',m.created_at,'updated_at',m.updated_at,'definition_id',d.id,
+      'definition_access',coalesce(d.access,'admin')) as dto
+    from public.metafields m left join public.metafield_definitions d
+      on (d.owner_type,d.namespace,d.key)=(m.owner_type,m.namespace,m.key)
+    where m.owner_type=owner_type_filter and m.owner_id=owner_id_filter
+      and (after_id is null or m.id>after_id)
+      and (namespace_filter is null or m.namespace=namespace_filter)
+      and (key_filter is null or m.key=key_filter)
+    order by m.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(p.dto order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;

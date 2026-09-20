@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，65 个显式工具（28 个只读、37 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，68 个显式工具（31 个只读、37 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -56,6 +56,7 @@
 | 促销 | `list_admin_promotions`、`get_admin_promotion`、`list_admin_promotion_targets`、`list_admin_discount_redemptions`、`create_promotion`、`update_promotion`；版本化规则/目标原子保存与启停，新建默认停用；优惠码占用不等于永久历史或已付款销售 |
 | 配送 | `list_admin_shipping_methods`、`get_admin_shipping_method`、`create_shipping_method`、`update_shipping_method`；版本化费用/免邮门槛/国家范围/启停，新建默认停用；不调用承运商、不购买面单、不改写历史收费 |
 | 税率 | `list_admin_tax_rates`、`get_admin_tax_rate`、`create_tax_rate`、`update_tax_rate`；版本化国家/比例/运费计税/启停，新建默认停用；国家规则优先于 * 兜底，不叠加、不改写历史税额 |
+| 扩展字段 | `list_admin_metafield_definitions`、`get_admin_metafield_definition`、`list_admin_metafields`；按资源读取私有/公开/客户字段及无定义值；不展开引用、不把声明 access 当作实际公开可见性 |
 | 订单 | `list_admin_orders`、`get_admin_order`、`get_order_pricing`、`get_order_checkout_quote`、`get_order_ledger`、`get_order_fulfillment_balance`、`cancel_order`、`cancel_zero_value_order_item` |
 | 手工资金 | `mark_order_paid`、`refund_order`；仅记账，不调用真实支付渠道 |
 | 履约 | `create_fulfillment`、`update_fulfillment` |
@@ -90,7 +91,7 @@
 | 1 | 商品与目录完整管理 | 商品原子编辑、分类管理及 ≤1 MiB 商品媒体上传已接入；剩余大文件传输、媒体引用登记和安全删除，不新增底表编辑后门 |
 | 2 | 客户、地址、库存与仓库 | 客户与地址管理、仓库读写/启停/原子默认仓切换、库存流水分页及单变体即时原子调拨已接入；不追踪在途与收货 |
 | 3 | 促销、配送、税 | 三类配置的查询、版本化创建/编辑/启停已接入。促销目标整组替换最多 100 个；配送 countries=[] 为不限国家；税率 0.13 为 13%，停用国家规则可能启用 * 兜底。引用中的配置不强删；不提供复杂税制或承运商服务 |
-| 4 | 扩展内容与评价 | Metafield 定义/可见性/值、Metaobject 定义/条目/发布；类别/客户/订单/shop 扩展值；评价列表/详情/删除。公开引用与不可恢复匿名化仍由数据库校验 |
+| 4 | 扩展内容与评价 | Metafield 定义查询及六类 owner 的值查询已接入；待补定义/可见性编辑、类别/客户/订单/shop 值写入、Metaobject 定义/条目/发布及评价列表/详情/删除。商品/变体值写入已有商品聚合命令；公开引用与不可恢复匿名化仍由数据库校验 |
 | 5 | 订单与渠道运营 | 内部备注编辑、订单事件分页、脱敏支付操作 DTO、真实 PayPal 退款 Edge 调用。先完善 DTO，不能把 `get_payment_operations` 的内部原始 error 原样送给 agent；手工退款不替代渠道退款 |
 | 6 | 身份、店铺设置与运营 | 管理员账户列表及角色流程、店铺扩展设置、受控统计/导出、运维诊断。当前无通用 shop settings 表或报表 API，先定义数据库合同；不让 MCP 写 Supabase 项目密钥/Auth 配置 |
 | 7 | HTTP 与生产接入 | Streamable HTTP、受保护资源元数据、OAuth issuer/audience/resource/scope 校验、用户授权撤销、限流/请求预算/日志脱敏、部署测试与客户端兼容验收 |
@@ -117,6 +118,7 @@ bun run test:current tests/admin-promotion-reads.test.ts
 bun run test:current tests/admin-promotion-commands.test.ts
 bun run test:current tests/admin-shipping-methods.test.ts
 bun run test:current tests/admin-tax-rates.test.ts
+bun run test:current tests/admin-metafield-reads.test.ts
 bun run docs:check
 ```
 
