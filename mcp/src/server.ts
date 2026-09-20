@@ -640,6 +640,16 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
   );
   rpc('get_order_pricing', 'Read historical pricing, discounts, shipping and tax snapshots.', order);
   rpc(
+    'list_admin_payment_operations',
+    'Read sanitized provider operations for one order and kind, UUID ascending. Amounts are exact decimal STRINGS; preserve precision. No provider references, keys, metadata, reasons or raw errors. has_error signals stored diagnostics, not final failure. A pending refund is not money returned; a provider movement is not a reconciled ledger entry. No network calls or retries. Empty does not prove order existence, and manual ledger transactions are not provider operations. Reset cursor when changing order/kind; no cross-page snapshot. provider_event_id is an internal event UUID, not the provider event reference.',
+    z.strictObject({
+      order_id: id,
+      kind: z.enum(['payment_intent', 'refund_request', 'money_movement']),
+      page_size: pageSize,
+      after_id: id.optional(),
+    }),
+  );
+  rpc(
     'get_order_ledger',
     'Read captures, refunds, refund components and fulfillment ledger. Never infer provider success from a pending request.',
     order,

@@ -227,6 +227,18 @@ PATCH 省略保留，只允许显式字段，JSONB 文本最多 256 KiB。客户
 
 事件项仅含 `id/order_id/actor_id/type/created_at`，actor_id 为可空 Auth UUID；**不返回任意 data 载荷**，不展开用户资料。事件类型也作为不可信文本处理；这不是支付成功判断或完整业务事实查询，仍应读取订单详情和专项账本。顺序是 ID 分配顺序，不是提交顺序，不提供跨页快照或可靠事件消费水位；更换类型筛选时清空游标。此 RPC 不改变旧事件底表的客户读取权限。
 
+### 管理员脱敏支付操作分页
+
+`list_admin_payment_operations(order_id, kind, page_size=20, after_id?)` 仅 admin/service 可调用，是同名只读 MCP 工具。kind 必须为 `payment_intent/refund_request/money_movement`，每次只读一类。返回 `{order_id,kind,items,next_cursor}`，UUID 升序，页大小 1–100，末页游标 null。更换订单或类别须清空游标；没有总数、跨页快照或时间顺序承诺。未知订单返回空页，不证明订单存在。非法筛选 `22023`，无权限 `42501`。
+
+- 支付意图：ID、订单、provider/payment_method/status、amount/currency、expires_at、捕获请求时间、最后轮询时间/次数和创建/更新时间。
+- 退款请求：ID、订单、父交易、provider/status/source、amount/currency、restock_requested、result_refund_id、has_error、提交/完成/渠道退款请求/最后轮询时间、轮询次数和创建/更新时间。
+- 渠道资金变动：ID、订单、内部 provider_event_id UUID、provider/kind、amount/currency、关联意图/退款请求/交易 ID、reconciliation_status、has_error、matched_at/created_at。仅返回已关联此订单的记录，不包含尚无订单归属的资金变动。
+
+所有金额返回**精确十进制字符串**；渠道资金变动保留八位小数及实际币种，不转 Number、不强制视为 USD 店铺账本金额。has_error 仅表示存有诊断信息，不代表终态失败或能否重试。请求待处理不等于退款完成，渠道事实不等于已对账入账；最终状态须结合订单及资金账本。restock_requested 不是已回库证明。
+
+字段白名单不返回渠道 reference、幂等键、request_hash、metadata、原因、actor 或原始错误（包括 failure_code/message）；不抓取渠道、不执行重试。渠道事件仍使用 `list_admin_payment_provider_events` 按资源查询，不在此接口复制事件载荷。手工收退款属于账本，不属于这些渠道操作。旧 `get_payment_operations` 保持原合同且未注册为 MCP 工具，不能把其管理员错误原文转发给 agent。
+
 ## 持久 Cart（可选）
 
 Cart 保存购买意向，不保存价格、锁价或占库存。可以为空，每个活跃 Cart 最多 50 条规范化商业行/100 件；同变体/属性合并，已有行 ID 在改数量时保留。停售/价格、库存、优惠资格在预览/转 Quote 时重新核验，不把 Cart 当可支付对象。

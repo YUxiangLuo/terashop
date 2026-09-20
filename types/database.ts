@@ -2043,6 +2043,15 @@ export type Database = {
         }
         Returns: Json
       }
+      list_admin_payment_operations: {
+        Args: {
+          after_id?: string
+          kind: string
+          order_id: string
+          page_size?: number
+        }
+        Returns: Json
+      }
       list_admin_payment_provider_events: {
         Args: {
           after_cursor?: Json

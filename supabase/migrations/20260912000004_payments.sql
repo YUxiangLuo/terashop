@@ -1990,4 +1990,51 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.list_admin_payment_operations(order_id uuid, kind text,
+    page_size integer DEFAULT 20, after_id uuid DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if order_id is null or kind is null or kind not in ('payment_intent','refund_request','money_movement')
+    or page_size is null or page_size not between 1 and 100 then
+    raise exception using errcode='22023', message='invalid payment operation filters';
+  end if;
+  with candidates as materialized (
+    select i.id,jsonb_build_object('id',i.id,'order_id',i.order_id,'provider',i.provider,
+      'payment_method',i.payment_method,'status',i.status,'amount',i.amount::text,'currency',i.currency,
+      'expires_at',i.expires_at,'provider_capture_requested_at',i.provider_capture_requested_at,
+      'last_provider_poll_at',i.last_provider_poll_at,'provider_poll_attempts',i.provider_poll_attempts,
+      'created_at',i.created_at,'updated_at',i.updated_at) as dto
+    from commerce.payment_intents i where kind='payment_intent' and i.order_id=list_admin_payment_operations.order_id
+      and (after_id is null or i.id>after_id)
+    union all
+    select r.id,jsonb_build_object('id',r.id,'order_id',r.order_id,'parent_transaction_id',r.parent_transaction_id,
+      'provider',r.provider,'status',r.status,'source',r.source,'amount',r.amount::text,'currency',r.currency,
+      'restock_requested',r.restock_requested,'result_refund_id',r.result_refund_id,
+      'has_error',r.failure_code is not null or r.failure_message is not null,
+      'submitted_at',r.submitted_at,'processed_at',r.processed_at,
+      'provider_refund_requested_at',r.provider_refund_requested_at,'last_provider_poll_at',r.last_provider_poll_at,
+      'provider_poll_attempts',r.provider_poll_attempts,'created_at',r.created_at,'updated_at',r.updated_at)
+    from commerce.refund_requests r where kind='refund_request' and r.order_id=list_admin_payment_operations.order_id
+      and (after_id is null or r.id>after_id)
+    union all
+    select m.id,jsonb_build_object('id',m.id,'order_id',m.order_id,'provider_event_id',m.provider_event_id,
+      'provider',m.provider,'kind',m.kind,'amount',m.amount::text,'currency',m.currency,
+      'payment_intent_id',m.payment_intent_id,'refund_request_id',m.refund_request_id,
+      'payment_transaction_id',m.payment_transaction_id,'reconciliation_status',m.reconciliation_status,
+      'has_error',m.last_error is not null,'matched_at',m.matched_at,'created_at',m.created_at)
+    from commerce.provider_money_movements m where list_admin_payment_operations.kind='money_movement'
+      and m.order_id=list_admin_payment_operations.order_id and (after_id is null or m.id>after_id)
+    order by id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(p.dto order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('order_id',order_id,'kind',kind,'items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;
