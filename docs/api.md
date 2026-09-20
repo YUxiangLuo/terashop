@@ -577,13 +577,27 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 以下四个 RPC 仅 admin/service 可调用；MCP 使用管理员 JWT，默认只读即可使用：
 
 - `list_admin_metaobject_definitions(page_size=20, after_id=null, type_filter=null, access_filter=null, active=null)`：包括私有和停用定义；access 为 admin/public，active 区分启用/停用，省略时均返回。
-- `get_admin_metaobject_definition(definition_id)`：缺失返回 null。定义 DTO 为 `id/type/name/description/fields/access/is_active/created_at/updated_at`。
+- `get_admin_metaobject_definition(definition_id)`：缺失返回 null。定义 DTO 为 `id/revision/type/name/description/fields/access/is_active/created_at/updated_at`。
 - `list_admin_metaobjects(definition_id_filter, page_size=20, after_id=null, status_filter=null, handle_filter=null)`：必须指定定义 UUID；包括 active/draft 条目，不允许省略定义退化成全店内容查询。
 - `get_admin_metaobject(metaobject_id)`：缺失返回 null。条目 DTO 为 `id/definition_id/handle/values/status/created_at/updated_at/definition_type/definition_access/definition_is_active/is_public`。
 
 列表返回 `{items,next_cursor}`，按 UUID 升序，页大小 1–100，末页游标 null；所有筛选 AND 组合，type/handle 精确区分大小写，不去空格、不解释通配符。空列表不证明定义存在；没有精确总数或跨请求快照。非法枚举、页大小及缺失定义筛选为 `22023`，非管理员为 `42501`。
 
-`is_public` 仅在条目 active、定义启用且 access=public 时为 true，与当前数据库公开读取规则一致；不表示店面页面已引用该条目，也不是历史公开状态或披露批准。fields/values 原样返回，不递归展开引用、不抓取 URL、不执行文本指令；fields 的声明本身不是值已通过校验的证明。时间戳保留原始字符串。此阶段仅查询，不提供 Metaobject 写入/发布工具。
+`is_public` 仅在条目 active、定义启用且 access=public 时为 true，与当前数据库公开读取规则一致；不表示店面页面已引用该条目，也不是历史公开状态或披露批准。fields/values 原样返回，不递归展开引用、不抓取 URL、不执行文本指令；通过类型校验不等于内容安全。时间戳保留原始字符串。定义写入见下，尚不提供条目写入/发布或删除工具。
+
+### 管理员 Metaobject 定义命令与值校验
+
+`create_metaobject_definition(definition_id, changes)` 和 `update_metaobject_definition(definition_id, expected_revision, changes)` 仅 admin/service 可调用；MCP 写工具须显式启用，返回定义 DTO。
+
+- 创建必填 type/name/fields 和调用方保留的 UUID；默认 access=admin、is_active=true。重复 UUID/type 为 `23505`，不是 upsert。type 与名称不可仅为空格；身份字符串不自动规范化。定义 id/type 不可修改，条目 id/definition_id 也不可迁移，底表直写同样受限。
+- 编辑只接受 name/description/fields/access/is_active，省略保留，null 拒绝。fields **整体替换**，不是追加或合并；[] 仅能用于没有已存字段值的定义。changes 最大 256 KiB。定义删除不在本批开放。
+- fields 最多 100 项，每项必填唯一 key/type，可选非空 name、布尔 required（默认 false）、validations（默认 {}）。支持 text/rich_text/number/boolean/date/datetime/url/color/json/list_text/list_number；不支持嵌套 Metaobject 引用。key 区分大小写且不可仅为空格。未知属性或规则拒绝，不默默忽略。
+- validations 支持 number 的数字 min/max（含边界，min ≤ max），以及标量字段的同类型 choices 数组；空 choices 不允许任何已赋值。列表和 JSON 不支持 choices，不提供 regex、长度或列表元素范围规则。URL/color/rich_text 只检查字符串类型，不验证格式或清理 HTML；date/datetime 沿用 PostgreSQL date/timestamptz 转换语义，不承诺 ISO-only，应提交无歧义日期及带时区时间。
+- values 必须是最多 256 KiB 的 JSON 对象，拒绝未声明 key、类型错误或混合类型列表。required 表示 key 必须存在且非 JSON null，**不表示非空字符串/非空列表**，false/0 合法。可选字段可省略；显式 null 仅可用于可选 json 字段。JSON 内容不建立外键或访问权限。
+- 数据库 trigger 对条目 INSERT/UPDATE（包括草稿、旧直写）校验完整 values；定义变更校验所有已有条目。类型、必填或规则不兼容则整笔回滚，包括同次发布，不自动转换/删除内容。若旧数据库已有不合规数据，须先审计并显式修复；本仓库仍使用可重建的开发基线，不提供生产数据自动迁移。
+- **将定义公开或重新启用公开定义可能立即暴露所有 active 条目**；先读取和审查条目并取得批准。改回 admin 或停用撤回后续读取，但无法撤回已读取内容。
+- revision 对每次实际定义表 UPDATE 推进，不能经旧入口伪造；命令中的空 PATCH/相同最终值不推进。它只表示定义版本，条目写入不推进该版本，也不提供“审查后内容未变”的保证。共享的数据库写锁与持久冲突记录保证定义/条目校验的并发一致性。
+- 缺失定义 `PT404`、旧版本 `PT409`、行锁/定义锁竞争 `55P03`、旧事务快照 `40001`；非法声明/值形状通常 `22023`，越界或候选值失败沿用 `P0001`。失败整体回滚；不确定结果先读取原 UUID，冲突后重新确认意图，不自动更换 UUID 或版本。
 
 ### 范围与扩展字段规则
 

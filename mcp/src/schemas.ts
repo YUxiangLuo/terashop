@@ -128,6 +128,24 @@ export const metafieldDefinitionChanges = z.strictObject({
     .optional(),
   position: position.optional(),
 });
+export const metaobjectFields = z
+  .array(
+    z.strictObject({
+      key: z.string(),
+      name: z.string().optional(),
+      type: metafieldType.exclude(['metaobject_reference', 'list_metaobject_reference']),
+      required: z.boolean().optional(),
+      validations: metafieldDefinitionChanges.shape.validations,
+    }),
+  )
+  .max(100);
+export const metaobjectDefinitionChanges = z.strictObject({
+  name: z.string().optional(),
+  description: z.string().optional(),
+  fields: metaobjectFields.optional(),
+  access: z.enum(['admin', 'public']).optional(),
+  is_active: z.boolean().optional(),
+});
 export const taxFraction = z.number().min(0).max(1);
 export const taxRateChanges = z.strictObject({
   name: z.string().optional(),

@@ -34,7 +34,10 @@ async function definition(access = 'admin', is_active = true) {
         id,
         type,
         name: 'Untrusted definition',
-        fields: [{ key: 'text', type: 'text' }],
+        fields: [
+          { key: 'text', type: 'text' },
+          { key: 'nested', type: 'json' },
+        ],
         access,
         is_active,
       },
@@ -79,7 +82,18 @@ test('定义精确 AND 筛选与 UUID 分页；私有停用定义可见，详情
   const detail = await toolData(session.client, 'get_admin_metaobject_definition', { definition_id: d.id });
   expect(detail).toEqual(page.items[0]);
   expect(Object.keys(page.items[0]).sort()).toEqual(
-    ['id', 'type', 'name', 'description', 'fields', 'access', 'is_active', 'created_at', 'updated_at'].sort(),
+    [
+      'id',
+      'revision',
+      'type',
+      'name',
+      'description',
+      'fields',
+      'access',
+      'is_active',
+      'created_at',
+      'updated_at',
+    ].sort(),
   );
   for (const extra of [
     { type_filter: `${d.type}%` },

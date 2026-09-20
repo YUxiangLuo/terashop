@@ -26,7 +26,7 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
     expect(readTools.length).toBe(35);
-    expect(writeTools.length).toBe(77);
+    expect(writeTools.length).toBe(79);
     expect(readTools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(writeTools.find((tool) => tool.name === 'adjust_inventory')?.annotations).toMatchObject({
       readOnlyHint: false,
@@ -124,6 +124,27 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
       ['list_admin_categories', { root_only: true, parent_id: id }],
       ['list_admin_metafields', { owner_type_filter: 'customer' }],
       ['list_admin_metaobjects', {}],
+      ['create_metaobject_definition', { definition_id: id, changes: { type: 'x', name: 'X' } }],
+      [
+        'update_metaobject_definition',
+        { definition_id: id, expected_revision: 1, changes: { type: 'rename' } },
+      ],
+      [
+        'update_metaobject_definition',
+        {
+          definition_id: id,
+          expected_revision: 1,
+          changes: { fields: [{ key: 'x', type: 'metaobject_reference' }] },
+        },
+      ],
+      [
+        'update_metaobject_definition',
+        {
+          definition_id: id,
+          expected_revision: 1,
+          changes: { fields: [{ key: 'x', type: 'text', validations: { regex: '.*' } }] },
+        },
+      ],
       ['list_admin_metaobjects', { definition_id_filter: id, status_filter: 'published' }],
       ['list_admin_metaobject_definitions', { access_filter: 'customer' }],
       ['list_admin_metafields', { owner_type_filter: 'user', owner_id_filter: id }],

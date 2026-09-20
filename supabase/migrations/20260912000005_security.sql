@@ -204,7 +204,9 @@ CREATE TRIGGER metafields_reference_integrity AFTER INSERT OR UPDATE OF type, va
 CREATE TRIGGER metafields_revision BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.bump_metafield_revision();
 CREATE TRIGGER metafields_updated_at BEFORE UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER metafields_validate BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION public.validate_metafield_value();
+CREATE TRIGGER metaobject_definitions_integrity BEFORE INSERT OR UPDATE OR DELETE ON public.metaobject_definitions FOR EACH ROW EXECUTE FUNCTION private.guard_metaobject_definition();
 CREATE TRIGGER metaobject_definitions_updated_at BEFORE UPDATE ON public.metaobject_definitions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER metaobjects_integrity BEFORE INSERT OR UPDATE OR DELETE ON public.metaobjects FOR EACH ROW EXECUTE FUNCTION private.guard_metaobject_values();
 CREATE TRIGGER metaobjects_updated_at BEFORE UPDATE ON public.metaobjects FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER order_events_append_only BEFORE DELETE OR UPDATE ON public.order_events FOR EACH ROW EXECUTE FUNCTION private.protect_audit_row();
 CREATE TRIGGER order_events_enqueue_outbox AFTER INSERT ON public.order_events FOR EACH ROW EXECUTE FUNCTION private.order_event_to_outbox();
@@ -744,6 +746,12 @@ REVOKE ALL ON FUNCTION private.admin_metaobject_definition_json(public.metaobjec
 GRANT EXECUTE ON FUNCTION public.get_admin_metaobject_definition(uuid), public.get_admin_metaobject(uuid),
   public.list_admin_metaobject_definitions(integer,uuid,text,text,boolean),
   public.list_admin_metaobjects(uuid,integer,uuid,text,text) TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION private.lock_metaobject_definition(uuid), private.assert_metaobject_fields(jsonb),
+  private.assert_metaobject_values(jsonb,jsonb), private.guard_metaobject_definition(), private.guard_metaobject_values(),
+  public.create_metaobject_definition(uuid,jsonb), public.update_metaobject_definition(uuid,integer,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_metaobject_definition(uuid,jsonb),
+  public.update_metaobject_definition(uuid,integer,jsonb) TO authenticated,service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

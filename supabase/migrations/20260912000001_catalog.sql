@@ -2539,7 +2539,7 @@ $$;
 
 CREATE FUNCTION private.admin_metaobject_definition_json(d public.metaobject_definitions) RETURNS jsonb
     LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
-  select jsonb_build_object('id',d.id,'type',d.type,'name',d.name,'description',d.description,
+  select jsonb_build_object('id',d.id,'revision',d.revision,'type',d.type,'name',d.name,'description',d.description,
     'fields',d.fields,'access',d.access,'is_active',d.is_active,'created_at',d.created_at,'updated_at',d.updated_at);
 $$;
 
@@ -2619,6 +2619,203 @@ begin
     case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
   into v_items,v_next from page p;
   return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION private.lock_metaobject_definition(p_id uuid) RETURNS void
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not pg_catalog.pg_try_advisory_xact_lock(pg_catalog.hashtextextended('metaobject:' || p_id::text,0)) then
+    raise exception using errcode='55P03', message='metaobject definition is being modified; retry transaction';
+  end if;
+  insert into private.metaobject_definition_guards as g(definition_id) values(p_id)
+    on conflict (definition_id) do update set revision=g.revision+1;
+end;
+$$;
+
+CREATE FUNCTION private.assert_metaobject_fields(p_fields jsonb) RETURNS void
+    LANGUAGE plpgsql IMMUTABLE SET search_path TO '' AS $$
+declare f jsonb; k text; v jsonb; kind text; rules jsonb; seen text[] := ARRAY[]::text[];
+begin
+  if jsonb_typeof(p_fields) is distinct from 'array' or octet_length(p_fields::text)>262144 then
+    raise exception using errcode='22023', message='fields must be an array up to 256 KiB';
+  end if;
+  if jsonb_array_length(p_fields)>100 then
+    raise exception using errcode='22023', message='at most 100 fields allowed';
+  end if;
+  for f in select jsonb_array_elements(p_fields) loop
+    if jsonb_typeof(f) is distinct from 'object' then
+      raise exception using errcode='22023', message='field must be an object';
+    end if;
+    if jsonb_typeof(f->'key') is distinct from 'string' or btrim(f->>'key')=''
+      or jsonb_typeof(f->'type') is distinct from 'string'
+      or f->>'type' not in ('text','rich_text','number','boolean','date','datetime','url','color','json','list_text','list_number')
+      or f->>'key'=any(seen)
+      or exists(select 1 from jsonb_object_keys(f) x where x not in ('key','name','type','required','validations'))
+      or (f ? 'name' and (jsonb_typeof(f->'name')<>'string' or btrim(f->>'name')=''))
+      or (f ? 'required' and jsonb_typeof(f->'required')<>'boolean') then
+      raise exception using errcode='22023', message='invalid or duplicate field declaration';
+    end if;
+    seen := array_append(seen,f->>'key');
+    rules := coalesce(f->'validations','{}'::jsonb);
+    if jsonb_typeof(rules)<>'object' then
+      raise exception using errcode='22023', message='validations must be an object';
+    end if;
+    for k,v in select * from jsonb_each(rules) loop
+      if k in ('min','max') then
+        if f->>'type'<>'number' or jsonb_typeof(v)<>'number' then
+          raise exception using errcode='22023', message='min/max require numeric bounds on number fields';
+        end if;
+      elsif k='choices' then
+        kind := case when f->>'type'='number' then 'number' when f->>'type'='boolean' then 'boolean'
+          when f->>'type' in ('text','rich_text','date','datetime','url','color') then 'string' end;
+        if kind is null or jsonb_typeof(v)<>'array' then
+          raise exception using errcode='22023', message='choices require an array on a scalar field';
+        end if;
+        if exists(select 1 from jsonb_array_elements(v) e where jsonb_typeof(e.value)<>kind) then
+          raise exception using errcode='22023', message='choice types must match the field';
+        end if;
+      else
+        raise exception using errcode='22023', message='unsupported field validation';
+      end if;
+    end loop;
+    if (rules->>'min')::numeric>(rules->>'max')::numeric then
+      raise exception using errcode='22023', message='min must not exceed max';
+    end if;
+  end loop;
+end;
+$$;
+
+CREATE FUNCTION private.assert_metaobject_values(p_fields jsonb, p_values jsonb) RETURNS void
+    LANGUAGE plpgsql STABLE SET search_path TO '' AS $$
+declare f jsonb; v jsonb; t text; kind text;
+begin
+  if jsonb_typeof(p_values) is distinct from 'object' or octet_length(p_values::text)>262144 then
+    raise exception using errcode='22023', message='values must be an object up to 256 KiB';
+  end if;
+  if exists(select 1 from jsonb_object_keys(p_values) k
+    where not exists(select 1 from jsonb_array_elements(p_fields) declared where declared->>'key'=k)) then
+    raise exception using errcode='22023', message='undeclared metaobject field';
+  end if;
+  for f in select jsonb_array_elements(p_fields) loop
+    v := p_values->(f->>'key'); t := f->>'type';
+    if coalesce((f->>'required')::boolean,false) and (v is null or v='null'::jsonb) then
+      raise exception using errcode='22023', message='required metaobject field missing or null';
+    end if;
+    if v is null then continue; end if;
+    kind := case when t='number' then 'number' when t='boolean' then 'boolean'
+      when t in ('text','rich_text','date','datetime','url','color') then 'string'
+      when t in ('list_text','list_number') then 'array' end;
+    if kind is not null and jsonb_typeof(v)<>kind then
+      raise exception using errcode='22023', message='metaobject value type mismatch';
+    end if;
+    if t in ('list_text','list_number') then
+      if exists(select 1 from jsonb_array_elements(v) e
+        where jsonb_typeof(e.value)<>case when t='list_text' then 'string' else 'number' end) then
+        raise exception using errcode='22023', message='metaobject list element type mismatch';
+      end if;
+    elsif t in ('date','datetime') then
+      begin
+        if t='date' then perform (v#>>'{}')::date; else perform (v#>>'{}')::timestamptz; end if;
+      exception when others then
+        raise exception using errcode='22023', message='invalid metaobject date or datetime';
+      end;
+    end if;
+    perform private.assert_metafield_validations(t,v,f->'validations',f->>'key');
+  end loop;
+end;
+$$;
+
+CREATE FUNCTION private.guard_metaobject_definition() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v jsonb;
+begin
+  -- BEFORE triggers precede RLS WITH CHECK; reject API callers before validation.
+  if (auth.role() in ('anon','authenticated') or current_setting('role') in ('anon','authenticated'))
+    and not public.is_admin() then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if tg_op='UPDATE' and (new.id,new.type) is distinct from (old.id,old.type) then
+    raise exception using errcode='22023', message='metaobject definition identity is immutable';
+  end if;
+  perform private.lock_metaobject_definition(case when tg_op='DELETE' then old.id else new.id end);
+  if tg_op='DELETE' then return old; end if;
+  if btrim(new.type)='' or btrim(new.name)='' then
+    raise exception using errcode='22023', message='definition type and name must not be blank';
+  end if;
+  perform private.assert_metaobject_fields(new.fields);
+  for v in select o.values from public.metaobjects o where o.definition_id=new.id loop
+    perform private.assert_metaobject_values(new.fields,v);
+  end loop;
+  if tg_op='INSERT' then new.revision := 1; else new.revision := old.revision+1; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.guard_metaobject_values() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_fields jsonb;
+begin
+  if (auth.role() in ('anon','authenticated') or current_setting('role') in ('anon','authenticated'))
+    and not public.is_admin() then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if tg_op='UPDATE' and (new.id,new.definition_id) is distinct from (old.id,old.definition_id) then
+    raise exception using errcode='22023', message='metaobject identity and definition are immutable';
+  end if;
+  perform private.lock_metaobject_definition(case when tg_op='DELETE' then old.definition_id else new.definition_id end);
+  if tg_op='DELETE' then return old; end if;
+  select d.fields into v_fields from public.metaobject_definitions d where d.id=new.definition_id;
+  if not found then raise exception using errcode='23503', message='metaobject definition not found'; end if;
+  perform private.assert_metaobject_values(v_fields,new.values);
+  return new;
+end;
+$$;
+
+CREATE FUNCTION public.update_metaobject_definition(definition_id uuid, expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_old public.metaobject_definitions; v_new public.metaobject_definitions; k text; v jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if definition_id is null or expected_revision is null or expected_revision<1
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid metaobject definition patch';
+  end if;
+  for k,v in select * from jsonb_each(changes) loop
+    if k not in ('name','description','fields','access','is_active')
+      or (k in ('name','description','access') and jsonb_typeof(v)<>'string')
+      or (k='fields' and jsonb_typeof(v)<>'array') or (k='is_active' and jsonb_typeof(v)<>'boolean') then
+      raise exception using errcode='22023', message='unknown or invalid definition field';
+    end if;
+  end loop;
+  select * into v_old from public.metaobject_definitions d where d.id=definition_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='metaobject definition not found'; end if;
+  if v_old.revision<>expected_revision then raise exception using errcode='PT409', message='definition was modified'; end if;
+  v_new := jsonb_populate_record(v_old,changes);
+  if v_new is distinct from v_old then
+    update public.metaobject_definitions d set name=v_new.name,description=v_new.description,fields=v_new.fields,
+      access=v_new.access,is_active=v_new.is_active where d.id=definition_id;
+  end if;
+  return public.get_admin_metaobject_definition(definition_id);
+end;
+$$;
+
+CREATE FUNCTION public.create_metaobject_definition(definition_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if definition_id is null or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144
+    or jsonb_typeof(changes->'type') is distinct from 'string' or jsonb_typeof(changes->'name') is distinct from 'string'
+    or jsonb_typeof(changes->'fields') is distinct from 'array' then
+    raise exception using errcode='22023', message='definition id, type, name and fields required';
+  end if;
+  insert into public.metaobject_definitions(id,type,name,fields)
+    values(definition_id,changes->>'type',changes->>'name',changes->'fields');
+  return public.update_metaobject_definition(definition_id,1,changes-'type');
 end;
 $$;
 

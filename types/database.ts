@@ -566,6 +566,7 @@ export type Database = {
           id: string
           is_active: boolean
           name: string
+          revision: number
           type: string
           updated_at: string
         }
@@ -577,6 +578,7 @@ export type Database = {
           id?: string
           is_active?: boolean
           name: string
+          revision?: number
           type: string
           updated_at?: string
         }
@@ -588,6 +590,7 @@ export type Database = {
           id?: string
           is_active?: boolean
           name?: string
+          revision?: number
           type?: string
           updated_at?: string
         }
@@ -1732,6 +1735,10 @@ export type Database = {
         Args: { changes: Json; definition_id: string }
         Returns: Json
       }
+      create_metaobject_definition: {
+        Args: { changes: Json; definition_id: string }
+        Returns: Json
+      }
       create_order: {
         Args: {
           address?: Json
@@ -2327,6 +2334,14 @@ export type Database = {
         Returns: Json
       }
       update_metafield_definition: {
+        Args: {
+          changes: Json
+          definition_id: string
+          expected_revision: number
+        }
+        Returns: Json
+      }
+      update_metaobject_definition: {
         Args: {
           changes: Json
           definition_id: string

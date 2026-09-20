@@ -77,6 +77,14 @@ CREATE TABLE private.metafield_key_guards (
 ALTER TABLE private.metafield_key_guards ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.metafield_key_guards FROM PUBLIC, anon, authenticated, service_role;
 
+-- Definitions and entries share a durable write fence, including old RR snapshots.
+CREATE TABLE private.metaobject_definition_guards (
+  definition_id uuid PRIMARY KEY,
+  revision bigint NOT NULL DEFAULT 1
+);
+ALTER TABLE private.metaobject_definition_guards ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.metaobject_definition_guards FROM PUBLIC, anon, authenticated, service_role;
+
 CREATE FUNCTION private.valid_tax_context(p_context jsonb) RETURNS boolean
     LANGUAGE sql IMMUTABLE STRICT SET search_path TO '' AS $$
   select coalesce(jsonb_typeof(p_context) = 'object' and case p_context ->> 'status'
@@ -743,6 +751,7 @@ CREATE TABLE public.metafields (
 
 CREATE TABLE public.metaobject_definitions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     type text NOT NULL,
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,

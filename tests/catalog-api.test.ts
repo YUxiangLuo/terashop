@@ -248,7 +248,7 @@ test('客户可见字段仍限定本人；非法 owner/access 组合与客户提
 test('私有/草稿/停用 Metaobject 不经引用穿透；重新公开恢复，UUID 大小写不改变引用', async () => {
   await withRollback(database, async sql => {
     const p = await product(sql), definition = crypto.randomUUID(), object = crypto.randomUUID();
-    await sql`insert into public.metaobject_definitions(id,type,name,fields) values (${definition}::uuid,${definition},'Private object','[]')`;
+    await sql`insert into public.metaobject_definitions(id,type,name,fields) values (${definition}::uuid,${definition},'Private object','[{"key":"note","type":"text"}]')`;
     await sql`insert into public.metaobjects(id,definition_id,handle,values) values (${object}::uuid,${definition}::uuid,'entry','{"note":"content"}')`;
     await sql`insert into public.metafield_definitions(owner_type,namespace,key,name,type,access)
       values ('product',${p.id},'reference','Reference','metaobject_reference','public')`;
