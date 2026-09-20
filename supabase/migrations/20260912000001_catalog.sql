@@ -1839,7 +1839,7 @@ $$;
 
 CREATE FUNCTION private.admin_promotion_json(p public.promotions) RETURNS jsonb
     LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
-  select jsonb_build_object('id',p.id,'name',p.name,'code',p.code,'type',p.type,'params',p.params,
+  select jsonb_build_object('id',p.id,'revision',p.revision,'name',p.name,'code',p.code,'type',p.type,'params',p.params,
     'priority',p.priority,'stackable',p.stackable,'apply_scope',p.apply_scope,'get_scope',p.get_scope,
     'usage_limit',p.usage_limit,'used_count',p.used_count,'per_customer_limit',p.per_customer_limit,
     'starts_at',p.starts_at,'ends_at',p.ends_at,'is_active',p.is_active,
@@ -1933,6 +1933,123 @@ begin
     case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
   into v_items,v_next from page p;
   return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION private.bump_promotion_revision() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO '' AS $$
+begin
+  -- Target guards touch the parent even when scopes/timestamps do not change.
+  -- Every parent UPDATE must fence stale aggregate edits, including legacy writes.
+  if tg_op='INSERT' then new.revision := 1; else new.revision := old.revision+1; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION public.update_promotion(promotion_id uuid, expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_old public.promotions; v_new public.promotions; v_key text; v_value jsonb; v_target jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if promotion_id is null or expected_revision is null or expected_revision<1
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid promotion patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('name','code','type','params','priority','stackable','apply_scope','get_scope',
+      'usage_limit','per_customer_limit','starts_at','ends_at','is_active','targets')
+      or (v_key in ('name','type','apply_scope','get_scope') and jsonb_typeof(v_value)<>'string')
+      or (v_key in ('code','starts_at','ends_at') and jsonb_typeof(v_value) not in ('string','null'))
+      or (v_key in ('stackable','is_active') and jsonb_typeof(v_value)<>'boolean')
+      or (v_key='params' and jsonb_typeof(v_value)<>'object')
+      or (v_key='targets' and jsonb_typeof(v_value)<>'array')
+      or (v_key in ('priority','per_customer_limit') and jsonb_typeof(v_value)<>'number')
+      or (v_key='usage_limit' and jsonb_typeof(v_value) not in ('number','null')) then
+      raise exception using errcode='22023', message='unknown or invalid promotion field';
+    end if;
+    if v_key in ('priority','per_customer_limit','usage_limit') and jsonb_typeof(v_value)='number'
+      and (v_value#>>'{}')::numeric<>trunc((v_value#>>'{}')::numeric) then
+      raise exception using errcode='22023', message='promotion limits and priority must be integers';
+    end if;
+  end loop;
+  if changes ? 'type' and not changes ? 'params' then
+    raise exception using errcode='22023', message='type changes require complete params';
+  end if;
+  if changes ? 'targets' then
+    if jsonb_array_length(changes->'targets')>100 then
+      raise exception using errcode='22023', message='at most 100 targets per replacement';
+    end if;
+    for v_target in select value from jsonb_array_elements(changes->'targets') loop
+      if jsonb_typeof(v_target)<>'object' then
+        raise exception using errcode='22023', message='target must be an object';
+      end if;
+      if v_target-'role'-'product_id'-'category_id'-'variant_id'<>'{}'::jsonb
+        or coalesce(v_target->>'role','') not in ('apply','get')
+        or num_nonnulls(v_target->>'product_id',v_target->>'category_id',v_target->>'variant_id')<>1 then
+        raise exception using errcode='22023', message='target requires role and exactly one reference';
+      end if;
+    end loop;
+  end if;
+  select * into v_old from public.promotions p where p.id=promotion_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='promotion not found'; end if;
+  if v_old.revision<>expected_revision then
+    raise exception using errcode='PT409', message='promotion was modified';
+  end if;
+  v_new := jsonb_populate_record(v_old,changes-'targets');
+  if btrim(v_new.name)='' or not isfinite(v_new.starts_at) or not isfinite(v_new.ends_at) then
+    raise exception using errcode='22023', message='invalid name or schedule';
+  end if;
+  if changes ? 'targets' then
+    -- A supplied array replaces ALL roles; omission leaves associations untouched.
+    -- Infer narrowing only; clearing a selected set never silently widens it.
+    for v_key in select distinct value->>'role' from jsonb_array_elements(changes->'targets') loop
+      if v_key='apply' then
+        if changes ? 'apply_scope' and v_new.apply_scope<>'selected' then
+          raise exception using errcode='22023', message='apply targets require selected scope';
+        end if;
+        v_new.apply_scope := 'selected';
+      else
+        if changes ? 'get_scope' and v_new.get_scope<>'selected' then
+          raise exception using errcode='22023', message='get targets require selected scope';
+        end if;
+        v_new.get_scope := 'selected';
+      end if;
+    end loop;
+    delete from public.promotion_targets t where t.promotion_id=update_promotion.promotion_id;
+  end if;
+  if v_new is distinct from v_old then
+    update public.promotions p set name=v_new.name,code=v_new.code,type=v_new.type,params=v_new.params,
+      priority=v_new.priority,stackable=v_new.stackable,apply_scope=v_new.apply_scope,get_scope=v_new.get_scope,
+      usage_limit=v_new.usage_limit,per_customer_limit=v_new.per_customer_limit,
+      starts_at=v_new.starts_at,ends_at=v_new.ends_at,is_active=v_new.is_active where p.id=promotion_id;
+  end if;
+  if changes ? 'targets' then
+    insert into public.promotion_targets(promotion_id,role,product_id,category_id,variant_id)
+      select update_promotion.promotion_id,value->>'role',(value->>'product_id')::uuid,
+        (value->>'category_id')::uuid,(value->>'variant_id')::uuid
+      from jsonb_array_elements(changes->'targets');
+  end if;
+  return public.get_admin_promotion(promotion_id);
+end;
+$$;
+
+CREATE FUNCTION public.create_promotion(promotion_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if promotion_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or jsonb_typeof(changes->'name') is distinct from 'string'
+    or jsonb_typeof(changes->'type') is distinct from 'string'
+    or jsonb_typeof(changes->'params') is distinct from 'object' then
+    raise exception using errcode='22023', message='promotion id, name, type and params required';
+  end if;
+  insert into public.promotions(id,name,type,params,is_active)
+    values(promotion_id,changes->>'name',changes->>'type',changes->'params',false);
+  return public.update_promotion(promotion_id,1,changes);
 end;
 $$;
 

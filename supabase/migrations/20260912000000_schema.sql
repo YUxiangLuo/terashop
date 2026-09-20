@@ -885,6 +885,7 @@ CREATE TABLE public.promotion_targets (
 
 CREATE TABLE public.promotions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     name text NOT NULL,
     code text,
     type text NOT NULL,

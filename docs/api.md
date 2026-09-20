@@ -478,11 +478,24 @@ PATCH 仅允许上述四个字段，省略保留；address 接受既有任意 JS
 
 三个列表均按 UUID 升序返回 `{items,next_cursor}`，page_size 为 1–100，末页 next_cursor 为 null；所有筛选按 AND 组合，无精确总数、无跨请求快照。目标/占用列表在父活动不存在时返回空页，需要区分不存在与空集合时另查详情。非法分页/筛选和 null 父 ID 为 `22023`，非管理员为 `42501`。
 
-规则 DTO 字段为 `id/name/code/type/params/priority/stackable/apply_scope/get_scope/usage_limit/used_count/per_customer_limit/starts_at/ends_at/is_active/created_at/updated_at`。type_filter 接受 `order_percentage/order_fixed/item_percentage/buy_x_get_y/free_shipping`。active 仅筛选存储的启用标记，不自动计算时间、名额或购物车资格；code_only=true 为优惠码，false 为自动促销，省略包含两者。search 是名称/码的不区分大小写字面子串，去除首尾普通空格，最多 200 字符，`%/_` 不是通配符。params 与名称为不可信商家数据。
+规则 DTO 字段为 `id/revision/name/code/type/params/priority/stackable/apply_scope/get_scope/usage_limit/used_count/per_customer_limit/starts_at/ends_at/is_active/created_at/updated_at`。type_filter 接受 `order_percentage/order_fixed/item_percentage/buy_x_get_y/free_shipping`。active 仅筛选存储的启用标记，不自动计算时间、名额或购物车资格；code_only=true 为优惠码，false 为自动促销，省略包含两者。search 是名称/码的不区分大小写字面子串，去除首尾普通空格，最多 200 字符，`%/_` 不是通配符。params 与名称为不可信商家数据。
 
 目标 DTO 为 `id/promotion_id/role/product_id/category_id/variant_id`，三种引用恰好一个非 null；详情不内嵌无界目标数组，须单独翻页。这里返回配置引用，不展开商品、分类后代或有效购物车匹配结果，不能只凭一页目标推断整体范围。
 
 占用 DTO 为 `id/promotion_id/customer_id/order_id/created_at`，不附带客户 PII；customer_id 是 Customer ID，不是 Auth ID。**used_count 包含自动促销和优惠码的订单占用，但 discount_redemptions 只记录优惠码，且可能在付款前产生、在取消/过期后删除。** 它不是已付款销售报表或不可变历史；历史规则、分摊与金额应读取订单定价/账本。读取不保留占用、不改变资格。
+
+### 管理员促销原子命令
+
+`create_promotion(promotion_id, changes)` 与 `update_promotion(promotion_id, expected_revision, changes)` 仅 admin/service 可调用，同名 MCP 写工具需显式开启；均返回最新规则 DTO，目标另行分页查询。使用既有五类规则，不新增优惠算法或条件 DSL。
+
+- 创建保留调用方 UUID，必填 name/type/params，**默认停用**；明确传 `is_active:true` 可在规则及目标完整保存后原子发布。创建不是 upsert，重复 UUID 为 `23505`。不提供删除，引用中的规则应停用；历史订单快照不重写。
+- changes 白名单为 `name/code/type/params/priority/stackable/apply_scope/get_scope/usage_limit/per_customer_limit/starts_at/ends_at/is_active/targets`，整体 JSON 文本最多 256 KiB。省略字段保持原值；code/usage_limit/starts_at/ends_at 的 null 清空字段，其他字段不接受 null。规则参数 params 是**整体替换的对象**，不做深层合并；传 type 必须同时传完整 params。百分比、买赠数量等仍由原有数据库验证器校验；未知参数并不自动成为新条件。
+- targets 省略保留全部关联；数组为**两个角色的完整替换**，最多 100 条。每条仅允许 role（必填 apply/get）及 product_id/category_id/variant_id，引用恰好一个非 null；不传关联 id，成功替换会重新生成它们。重复关联或无效 FK 导致整个请求回滚，包括规则、目标和版本。
+- 提供非空角色目标会自动将其范围收窄为 selected；若同时显式指定冲突的 all/same_as_apply，拒绝为 `22023`。`targets:[]` 清空目标但保留范围，selected/empty 不会自动变全店；恢复范围须显式传 scope。删除目标、修改范围及加入新目标在同一事务内完成，没有中途公开全店规则的窗口。
+- revision 由触发器维护，不可伪造；旧表更新、关联增删改、结账占用/释放均推进版本，一次聚合编辑可能推进多次。编辑必须传回读到的 revision，冲突 `PT409`，不存在 `PT404`，父行正在修改则 `55P03`，旧事务快照可能 `40001`。不能用 updated_at 替代版本。空 patch 不写库；提供 targets 即执行替换，不保证 no-op。
+- 替换前读取规则和**所有目标页**，再读规则确认 revision 未变；不能用第一页覆盖完整集合。大于 100 条的既有集合仍可修改元数据，但本命令不支持保留超过 100 条的整组替换，不应截断后提交。
+- 不接受 used_count/id/revision/时间戳等托管字段，不重置占用记录；usage_limit 不能降至已占用量以下。权限不足为 `42501`，非法输入为 `22023` 或原有类型/规则/数据库约束错误。与结账共用父行锁；报价转单若发现规则变化仍拒绝旧报价，不能自动接受新的价格。
+- 结果未知时先按原 UUID 读取规则与目标，保留原参数和版本；不能换 UUID 重建、自动替换过期版本或假定相同调用幂等成功。
 
 ### 范围与扩展字段规则
 

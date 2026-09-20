@@ -14,6 +14,44 @@ export const search = z.string().max(200).optional();
 export const reason = z.string().max(2000).optional();
 export const order = z.strictObject({ order_id: id });
 export const createdCursor = z.strictObject({ created_at: z.string().min(1), id }).optional();
+export const promotionType = z.enum([
+  'order_percentage',
+  'order_fixed',
+  'item_percentage',
+  'buy_x_get_y',
+  'free_shipping',
+]);
+export const promotionChanges = z.strictObject({
+  name: z.string().optional(),
+  code: z.string().nullable().optional(),
+  type: promotionType.optional(),
+  params: z.record(z.string(), z.json()).optional(),
+  priority: z.number().int().min(-2147483648).max(2147483647).optional(),
+  stackable: z.boolean().optional(),
+  apply_scope: z.enum(['all', 'selected']).optional(),
+  get_scope: z.enum(['same_as_apply', 'selected']).optional(),
+  usage_limit: z.number().int().positive().max(2147483647).nullable().optional(),
+  per_customer_limit: z.number().int().positive().max(2147483647).optional(),
+  starts_at: z.string().nullable().optional(),
+  ends_at: z.string().nullable().optional(),
+  is_active: z.boolean().optional(),
+  targets: z
+    .array(
+      z
+        .strictObject({
+          role: z.enum(['apply', 'get']),
+          product_id: id.nullable().optional(),
+          category_id: id.nullable().optional(),
+          variant_id: id.nullable().optional(),
+        })
+        .refine(
+          (t) => [t.product_id, t.category_id, t.variant_id].filter((v) => v != null).length === 1,
+          'Exactly one target reference is required',
+        ),
+    )
+    .max(100)
+    .optional(),
+});
 export const locationChanges = z.strictObject({
   code: z.string().optional(),
   name: z.string().optional(),

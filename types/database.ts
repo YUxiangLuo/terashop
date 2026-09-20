@@ -1326,6 +1326,7 @@ export type Database = {
           params: Json
           per_customer_limit: number
           priority: number
+          revision: number
           stackable: boolean
           starts_at: string | null
           type: string
@@ -1345,6 +1346,7 @@ export type Database = {
           params?: Json
           per_customer_limit?: number
           priority?: number
+          revision?: number
           stackable?: boolean
           starts_at?: string | null
           type: string
@@ -1364,6 +1366,7 @@ export type Database = {
           params?: Json
           per_customer_limit?: number
           priority?: number
+          revision?: number
           stackable?: boolean
           starts_at?: string | null
           type?: string
@@ -1745,6 +1748,10 @@ export type Database = {
       }
       create_product: {
         Args: { changes: Json; product_id: string }
+        Returns: Json
+      }
+      create_promotion: {
+        Args: { changes: Json; promotion_id: string }
         Returns: Json
       }
       create_refund_request: {
@@ -2214,6 +2221,10 @@ export type Database = {
       }
       update_product: {
         Args: { changes: Json; expected_revision: number; product_id: string }
+        Returns: Json
+      }
+      update_promotion: {
+        Args: { changes: Json; expected_revision: number; promotion_id: string }
         Returns: Json
       }
     }

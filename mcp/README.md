@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，55 个显式工具（24 个只读、31 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，57 个显式工具（24 个只读、33 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -53,7 +53,7 @@
 | 地址 | `create_customer_address`、`update_customer_address`、`delete_customer_address`、`set_default_address`；读取使用客户详情；编辑/删除使用地址自身 updated_at，返回最新客户详情 |
 | 库存 | `get_inventory_availability`、`adjust_inventory`、`list_admin_inventory_movements`、`transfer_inventory`、`get_inventory_transfer`；即时原子调拨，不跟踪在途/收货，不搬预留；流水 ID/游标为字符串，历史实物库存不代表当前可用量 |
 | 仓库 | `list_admin_locations`、`get_admin_location`、`create_location`、`update_location`、`set_default_location`；版本化编辑/启停，默认仓原子切换；不删除、不搬库存 |
-| 促销 | `list_admin_promotions`、`get_admin_promotion`、`list_admin_promotion_targets`、`list_admin_discount_redemptions`；规则与目标独立分页，优惠码占用不等于永久历史或已付款销售 |
+| 促销 | `list_admin_promotions`、`get_admin_promotion`、`list_admin_promotion_targets`、`list_admin_discount_redemptions`、`create_promotion`、`update_promotion`；版本化规则/目标原子保存与启停，新建默认停用；优惠码占用不等于永久历史或已付款销售 |
 | 订单 | `list_admin_orders`、`get_admin_order`、`get_order_pricing`、`get_order_checkout_quote`、`get_order_ledger`、`get_order_fulfillment_balance`、`cancel_order`、`cancel_zero_value_order_item` |
 | 手工资金 | `mark_order_paid`、`refund_order`；仅记账，不调用真实支付渠道 |
 | 履约 | `create_fulfillment`、`update_fulfillment` |
@@ -87,7 +87,7 @@
 | --- | --- | --- |
 | 1 | 商品与目录完整管理 | 商品原子编辑、分类管理及 ≤1 MiB 商品媒体上传已接入；剩余大文件传输、媒体引用登记和安全删除，不新增底表编辑后门 |
 | 2 | 客户、地址、库存与仓库 | 客户与地址管理、仓库读写/启停/原子默认仓切换、库存流水分页及单变体即时原子调拨已接入；不追踪在途与收货 |
-| 3 | 促销、配送、税 | 促销列表/详情、适用/赠送目标及优惠码占用分页已接入。下一步补活动/优惠码原子创建/编辑/启停和目标保存，再补配送方法/国家范围及税率配置。定向活动须先以 inactive/selected 创建；引用中的配置停用而非强删 |
+| 3 | 促销、配送、税 | 促销查询、版本化规则/目标原子创建/编辑/启停已接入；下一步补配送方法/国家范围及税率配置。促销整组替换最多 100 个目标，先读取全部分页且核对 revision；引用中的配置停用而非强删 |
 | 4 | 扩展内容与评价 | Metafield 定义/可见性/值、Metaobject 定义/条目/发布；类别/客户/订单/shop 扩展值；评价列表/详情/删除。公开引用与不可恢复匿名化仍由数据库校验 |
 | 5 | 订单与渠道运营 | 内部备注编辑、订单事件分页、脱敏支付操作 DTO、真实 PayPal 退款 Edge 调用。先完善 DTO，不能把 `get_payment_operations` 的内部原始 error 原样送给 agent；手工退款不替代渠道退款 |
 | 6 | 身份、店铺设置与运营 | 管理员账户列表及角色流程、店铺扩展设置、受控统计/导出、运维诊断。当前无通用 shop settings 表或报表 API，先定义数据库合同；不让 MCP 写 Supabase 项目密钥/Auth 配置 |
@@ -112,6 +112,7 @@ bun run test:current tests/admin-inventory-reads.test.ts
 bun run test:current tests/admin-location-commands.test.ts
 bun run test:current tests/inventory-transfer.test.ts
 bun run test:current tests/admin-promotion-reads.test.ts
+bun run test:current tests/admin-promotion-commands.test.ts
 bun run docs:check
 ```
 

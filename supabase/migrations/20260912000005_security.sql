@@ -263,6 +263,7 @@ CREATE TRIGGER customers_updated_at BEFORE UPDATE ON public.customers FOR EACH R
 CREATE TRIGGER customers_no_delete BEFORE DELETE OR TRUNCATE ON public.customers FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER promotion_targets_scope BEFORE INSERT OR UPDATE OR DELETE ON public.promotion_targets FOR EACH ROW EXECUTE FUNCTION private.guard_promotion_targets();
 CREATE TRIGGER promotions_normalize_code BEFORE INSERT OR UPDATE OF code ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.normalize_promotion_code();
+CREATE TRIGGER promotions_revision BEFORE INSERT OR UPDATE ON public.promotions FOR EACH ROW EXECUTE FUNCTION private.bump_promotion_revision();
 CREATE TRIGGER promotions_updated_at BEFORE UPDATE ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER promotions_validate BEFORE INSERT OR UPDATE ON public.promotions FOR EACH ROW EXECUTE FUNCTION public.validate_promotion_params();
 CREATE TRIGGER shipping_methods_normalize_countries BEFORE INSERT OR UPDATE OF countries ON public.shipping_methods FOR EACH ROW EXECUTE FUNCTION private.normalize_shipping_countries();
@@ -694,6 +695,11 @@ GRANT EXECUTE ON FUNCTION public.get_admin_promotion(uuid),
   public.list_admin_promotions(integer,uuid,boolean,text,boolean,text),
   public.list_admin_promotion_targets(uuid,integer,uuid,text),
   public.list_admin_discount_redemptions(uuid,integer,uuid,uuid,uuid) TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION private.bump_promotion_revision(), public.create_promotion(uuid,jsonb),
+  public.update_promotion(uuid,integer,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_promotion(uuid,jsonb),
+  public.update_promotion(uuid,integer,jsonb) TO authenticated,service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

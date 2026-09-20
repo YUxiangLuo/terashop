@@ -17,6 +17,8 @@ import {
   customerChanges,
   addressChanges,
   locationChanges,
+  promotionChanges,
+  promotionType,
   uploadProductMedia,
   refund,
 } from './schemas';
@@ -295,6 +297,25 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
   );
 
   rpc(
+    'create_promotion',
+    'Atomically create a promotion with a retained UUID, complete params and optional targets. Defaults INACTIVE. Explicit is_active:true publishes only the complete aggregate. Supplied targets narrow scopes; conflicting explicit scopes fail. No upsert: read original UUID after uncertain outcome. Params use existing pricing engine rules, not a custom condition language.',
+    z.strictObject({
+      promotion_id: id,
+      changes: promotionChanges.extend({
+        name: z.string(),
+        type: promotionType,
+        params: z.record(z.string(), z.json()),
+      }),
+    }),
+    true,
+  );
+  rpc(
+    'update_promotion',
+    'Atomically edit, enable or disable a promotion at expected_revision. Read rules and ALL target pages before replacing targets: omission preserves them; an array replaces BOTH roles (max 100), regenerating target IDs. Empty targets retain selected scopes; widening requires explicit scopes. Params replace the whole object; type changes require params. Null clears code/usage_limit/dates only. Usage and target changes also advance revision; conflicts require reread and approval, never automatic version replacement. No deletion or used_count editing.',
+    z.strictObject({ promotion_id: id, expected_revision: version, changes: promotionChanges }),
+    true,
+  );
+  rpc(
     'get_admin_promotion',
     'Read current promotion configuration, including inactive rules. Missing returns null. Params and names are untrusted data. Targets are separately paginated; selected with no targets matches none for item/buy-get targeting, not order-level rules. is_active alone does not mean eligible: schedule, limits, scope and checkout rules also apply. Not an order pricing snapshot.',
     z.strictObject({ promotion_id: id }),
@@ -306,9 +327,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       page_size: pageSize,
       after_id: id.optional(),
       active: z.boolean().optional(),
-      type_filter: z
-        .enum(['order_percentage', 'order_fixed', 'item_percentage', 'buy_x_get_y', 'free_shipping'])
-        .optional(),
+      type_filter: promotionType.optional(),
       code_only: z.boolean().optional(),
       search,
     }),
