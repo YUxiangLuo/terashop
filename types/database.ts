@@ -1840,6 +1840,11 @@ export type Database = {
         Args: { definition_id: string }
         Returns: Json
       }
+      get_admin_metaobject: { Args: { metaobject_id: string }; Returns: Json }
+      get_admin_metaobject_definition: {
+        Args: { definition_id: string }
+        Returns: Json
+      }
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
       get_admin_promotion: { Args: { promotion_id: string }; Returns: Json }
@@ -1956,6 +1961,26 @@ export type Database = {
           owner_id_filter: string
           owner_type_filter: string
           page_size?: number
+        }
+        Returns: Json
+      }
+      list_admin_metaobject_definitions: {
+        Args: {
+          access_filter?: string
+          active?: boolean
+          after_id?: string
+          page_size?: number
+          type_filter?: string
+        }
+        Returns: Json
+      }
+      list_admin_metaobjects: {
+        Args: {
+          after_id?: string
+          definition_id_filter: string
+          handle_filter?: string
+          page_size?: number
+          status_filter?: string
         }
         Returns: Json
       }

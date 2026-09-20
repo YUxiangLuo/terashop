@@ -2537,4 +2537,89 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.admin_metaobject_definition_json(d public.metaobject_definitions) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
+  select jsonb_build_object('id',d.id,'type',d.type,'name',d.name,'description',d.description,
+    'fields',d.fields,'access',d.access,'is_active',d.is_active,'created_at',d.created_at,'updated_at',d.updated_at);
+$$;
+
+CREATE FUNCTION private.admin_metaobject_json(o public.metaobjects, d public.metaobject_definitions) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
+  select jsonb_build_object('id',o.id,'definition_id',o.definition_id,'handle',o.handle,'values',o.values,
+    'status',o.status,'created_at',o.created_at,'updated_at',o.updated_at,'definition_type',d.type,
+    'definition_access',d.access,'definition_is_active',d.is_active,
+    'is_public',o.status='active' and d.is_active and d.access='public');
+$$;
+
+CREATE FUNCTION public.get_admin_metaobject_definition(definition_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.admin_metaobject_definition_json(d) from public.metaobject_definitions d where d.id=definition_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_metaobject_definitions(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    type_filter text DEFAULT NULL, access_filter text DEFAULT NULL, active boolean DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or access_filter not in ('admin','public') then
+    raise exception using errcode='22023', message='invalid metaobject definition filters';
+  end if;
+  with candidates as materialized (
+    select d as definition,d.id from public.metaobject_definitions d where (after_id is null or d.id>after_id)
+      and (type_filter is null or d.type=type_filter) and (access_filter is null or d.access=access_filter)
+      and (active is null or d.is_active=active)
+    order by d.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(private.admin_metaobject_definition_json(p.definition) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.get_admin_metaobject(metaobject_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.admin_metaobject_json(o,d) from public.metaobjects o
+    join public.metaobject_definitions d on d.id=o.definition_id where o.id=metaobject_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_metaobjects(definition_id_filter uuid, page_size integer DEFAULT 20,
+    after_id uuid DEFAULT NULL, status_filter text DEFAULT NULL, handle_filter text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if definition_id_filter is null or page_size is null or page_size not between 1 and 100
+    or status_filter not in ('draft','active') then
+    raise exception using errcode='22023', message='invalid metaobject filters';
+  end if;
+  with candidates as materialized (
+    select o.id,private.admin_metaobject_json(o,d) as dto from public.metaobjects o
+      join public.metaobject_definitions d on d.id=o.definition_id
+    where o.definition_id=definition_id_filter and (after_id is null or o.id>after_id)
+      and (status_filter is null or o.status=status_filter) and (handle_filter is null or o.handle=handle_filter)
+    order by o.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(p.dto order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;

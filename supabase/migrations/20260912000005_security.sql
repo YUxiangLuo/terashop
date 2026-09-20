@@ -736,6 +736,15 @@ REVOKE ALL ON FUNCTION private.bump_metafield_revision(), public.create_metafiel
 GRANT EXECUTE ON FUNCTION public.create_metafield(uuid,jsonb), public.update_metafield(uuid,integer,jsonb),
   public.delete_metafield(uuid,integer) TO authenticated,service_role;
 
+REVOKE ALL ON FUNCTION private.admin_metaobject_definition_json(public.metaobject_definitions),
+  private.admin_metaobject_json(public.metaobjects,public.metaobject_definitions),
+  public.get_admin_metaobject_definition(uuid), public.get_admin_metaobject(uuid),
+  public.list_admin_metaobject_definitions(integer,uuid,text,text,boolean),
+  public.list_admin_metaobjects(uuid,integer,uuid,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_admin_metaobject_definition(uuid), public.get_admin_metaobject(uuid),
+  public.list_admin_metaobject_definitions(integer,uuid,text,text,boolean),
+  public.list_admin_metaobjects(uuid,integer,uuid,text,text) TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;

@@ -572,6 +572,19 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 - 删除返回 `{id,deleted:true}`，只删该值，不删除定义、所属资源或引用目标。无定义值也可管理。客户匿名化会清除客户所属值并阻止恢复；订单及其扩展历史仍按既有保留合同处理。订单字段写入不重新计算历史订单金额。
 - 缺失为 `PT404`，旧版本为 `PT409`，行锁/键锁竞争可返回 `55P03`，旧事务快照可返回 `40001`。删除不是幂等成功接口：重复删除返回缺失。保留原 UUID 和 owner/namespace/key；结果不明时用 `list_admin_metafields` 精确读取核对，不能自动换 UUID 重建、覆盖版本或删除同键的新记录。主动删除后重建须使用新 UUID，避免旧版本请求命中重建记录。
 
+### 管理员 Metaobject 查询
+
+以下四个 RPC 仅 admin/service 可调用；MCP 使用管理员 JWT，默认只读即可使用：
+
+- `list_admin_metaobject_definitions(page_size=20, after_id=null, type_filter=null, access_filter=null, active=null)`：包括私有和停用定义；access 为 admin/public，active 区分启用/停用，省略时均返回。
+- `get_admin_metaobject_definition(definition_id)`：缺失返回 null。定义 DTO 为 `id/type/name/description/fields/access/is_active/created_at/updated_at`。
+- `list_admin_metaobjects(definition_id_filter, page_size=20, after_id=null, status_filter=null, handle_filter=null)`：必须指定定义 UUID；包括 active/draft 条目，不允许省略定义退化成全店内容查询。
+- `get_admin_metaobject(metaobject_id)`：缺失返回 null。条目 DTO 为 `id/definition_id/handle/values/status/created_at/updated_at/definition_type/definition_access/definition_is_active/is_public`。
+
+列表返回 `{items,next_cursor}`，按 UUID 升序，页大小 1–100，末页游标 null；所有筛选 AND 组合，type/handle 精确区分大小写，不去空格、不解释通配符。空列表不证明定义存在；没有精确总数或跨请求快照。非法枚举、页大小及缺失定义筛选为 `22023`，非管理员为 `42501`。
+
+`is_public` 仅在条目 active、定义启用且 access=public 时为 true，与当前数据库公开读取规则一致；不表示店面页面已引用该条目，也不是历史公开状态或披露批准。fields/values 原样返回，不递归展开引用、不抓取 URL、不执行文本指令；fields 的声明本身不是值已通过校验的证明。时间戳保留原始字符串。此阶段仅查询，不提供 Metaobject 写入/发布工具。
+
 ### 范围与扩展字段规则
 
 商品百分比及买赠的 `promotions.apply_scope` 为 `all`（默认）或 `selected`；买赠的 `get_scope` 为 `same_as_apply`（默认）或 `selected`。定向活动应以 selected 或 inactive 创建，再配置目标，避免先公开全店优惠。INSERT `promotion_targets` 自动将对应范围收窄为 selected，删除最后一条仍匹配零商品；扩大范围须先删除对应目标，再显式 PATCH scope。规则、范围与目标一起进入交易快照。整单百分比/固定金额与免邮仍按原有整单语义执行，不借此改变算法或增加条件 DSL。
