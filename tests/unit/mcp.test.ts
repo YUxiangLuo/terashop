@@ -90,8 +90,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(39);
-    expect(writeTools.length).toBe(90);
+    expect(readTools.length).toBe(41);
+    expect(writeTools.length).toBe(92);
     expect(writeTools.find((t) => t.name === 'refund_paypal')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,

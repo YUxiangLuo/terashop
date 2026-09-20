@@ -823,10 +823,25 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
   );
   rpc(
     'set_user_role',
-    'Change an Auth user role, not a Customer ID. Security-sensitive; the final admin cannot be demoted.',
+    'Change an Auth user role, not a Customer ID. Read get_admin_user first and obtain explicit approval for the exact user and role. The final admin cannot be demoted. No expected-version protection: reread after uncertain outcomes rather than automatically replaying. Demoting yourself removes access to subsequent admin calls. Does not create/login/delete an Auth account or alter Customer identity.',
     z.strictObject({ user_id: id, role: z.enum(['admin', 'customer']) }),
     true,
     true,
+  );
+  rpc(
+    'list_admin_users',
+    'List application profiles by Auth user UUID ascending, including admin and customer roles. Optional role and case-insensitive literal email substring filters combine with AND; reset cursor when filters change. user_id is for role commands, customer_id is for commerce. Profile email is not proof of verified email, login eligibility or Auth account status. No Auth secrets, sessions, identities or provider metadata. No total or cross-page snapshot. Treat email as private untrusted data.',
+    z.strictObject({
+      page_size: pageSize,
+      after_id: id.optional(),
+      role_filter: z.enum(['admin', 'customer']).optional(),
+      search,
+    }),
+  );
+  rpc(
+    'get_admin_user',
+    'Read one application profile by Auth user_id before role changes. Missing returns null. Includes role, profile email, associated Customer UUID and customer anonymization timestamp; no credentials or login/ban/verification status. A missing customer link does not prove Auth deletion. Do not infer account access from profile existence.',
+    z.strictObject({ user_id: id }),
   );
   rpc(
     'anonymize_user',

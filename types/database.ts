@@ -1883,6 +1883,7 @@ export type Database = {
         Returns: Json
       }
       get_admin_tax_rate: { Args: { tax_rate_id: string }; Returns: Json }
+      get_admin_user: { Args: { user_id: string }; Returns: Json }
       get_cart: {
         Args: { cart_id: string; guest_token?: string }
         Returns: Json
@@ -2118,6 +2119,15 @@ export type Database = {
           after_id?: string
           country?: string
           page_size?: number
+          search?: string
+        }
+        Returns: Json
+      }
+      list_admin_users: {
+        Args: {
+          after_id?: string
+          page_size?: number
+          role_filter?: string
           search?: string
         }
         Returns: Json

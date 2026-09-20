@@ -2986,4 +2986,44 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.list_admin_users(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    role_filter text DEFAULT NULL, search text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid; v_search text:=nullif(btrim(search),'');
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or char_length(search)>200
+    or (role_filter is not null and role_filter not in ('admin','customer')) then
+    raise exception using errcode='22023', message='invalid user filters';
+  end if;
+  with candidates as materialized (
+    select p.id as user_id,p.email,p.role,p.created_at,p.updated_at,c.id as customer_id,
+      c.anonymized_at as customer_anonymized_at
+    from public.profiles p left join public.customers c on c.auth_user_id=p.id
+    where (after_id is null or p.id>after_id) and (role_filter is null or p.role=role_filter)
+      and (v_search is null or strpos(lower(p.email),lower(v_search))>0)
+    order by p.id limit page_size+1
+  ), page as materialized (select * from candidates order by user_id limit page_size)
+  select coalesce(jsonb_agg(to_jsonb(p) order by p.user_id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select user_id from page order by user_id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.get_admin_user(user_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if user_id is null then raise exception using errcode='22023', message='user id required'; end if;
+  return (select jsonb_build_object('user_id',p.id,'email',p.email,'role',p.role,
+    'created_at',p.created_at,'updated_at',p.updated_at,'customer_id',c.id,'customer_anonymized_at',c.anonymized_at)
+    from public.profiles p left join public.customers c on c.auth_user_id=p.id where p.id=user_id);
+end;
+$$;
+
 commit;

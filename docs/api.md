@@ -456,6 +456,16 @@ POST /rest/v1/rpc/receive_return
 
 客户创建只规范化邮箱首尾空白及空串，不按邮箱合并客户；匿名化后的重放不会恢复或返回旧 PII。库存首次成功绑定实际仓库，之后默认仓变化不改变重放目标；省略仓库与显式指定仓库是不同请求。手工收款重放可返回已退款订单，不再次记账。这三个命令的键格式错误为 `22023`，同键参数冲突为 `PT409`，权限不足为 `42501`，已绑定资源不存在为 `PT404`；其他业务校验仍遵循各命令原有错误合同。
 
+### 管理员账户身份查询与角色流程
+
+`list_admin_users(page_size=20, after_id?, role_filter?, search?)` 与 `get_admin_user(user_id)` 仅 admin/service 可调用，同名 MCP 工具只读。数据源是应用 profiles，不是 Auth 管理 API；不返回密码、会话、身份提供商 metadata、封禁/验证/登录状态。不能根据 profile 存在、角色或邮箱推断可登录性，邮箱也不是已验证归属的证明。
+
+DTO 为 `user_id/email/role/created_at/updated_at/customer_id/customer_anonymized_at`。user_id 是 Auth UUID，用于 set_user_role/anonymize_user；customer_id 是关联商业客户 UUID，用于客户与订单工具，可能为 null。匿名化保留身份关联时返回匿名化时间；空邮箱不等同于删除 Auth。未绑定 Auth 的纯商业客户不在列表中；本接口不创建或邀请账号。
+
+列表返回 `{items,next_cursor}`，按 user_id UUID 升序，页大小 1–100，末页游标 null。role_filter 精确 admin/customer；search 去首尾普通空格，按 profile 邮箱不区分大小写字面子串匹配，最多 200 字符，`%/_` 不作为通配符，空白等同无筛选。筛选 AND 组合、更换筛选清空游标，不提供总数或跨页快照。详情不存在返回 null；非法输入 `22023`、无权限 `42501`。
+
+角色变更先读取具体 Auth 用户，确认目标及当前角色，再取得明确批准调用现有 `set_user_role`；不以 Customer ID 代替。此命令继续使用既有串行化与最后管理员保护，不新增预期版本；结果不明先重读，不能自动重放覆盖另一位管理员的变更。自我降级会失去后续 MCP 管理权限；每次 MCP 调用及目标 RPC 均复核权限。匿名化不是撤销角色或删除 Auth 凭据。
+
 ### 管理员评价查询、审核与删除
 
 `list_admin_reviews(page_size=20, after_id?, product_id_filter?, customer_id_filter?, status_filter?, rating_filter?)` 和 `get_admin_review(review_id)` 仅 admin/service 可调用。列表覆盖全部商品状态及 pending/approved/rejected 评价，筛选按 AND 组合，rating 为 1–5；customer_id 是 Customer UUID，不是 Auth ID。
