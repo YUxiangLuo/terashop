@@ -1875,6 +1875,10 @@ export type Database = {
         Returns: Json
       }
       get_admin_order: { Args: { order_id: string }; Returns: Json }
+      get_admin_order_summary: {
+        Args: { end_at: string; start_at: string }
+        Returns: Json
+      }
       get_admin_payment_summary: {
         Args: { end_at: string; start_at: string }
         Returns: Json

@@ -464,6 +464,16 @@ POST /rest/v1/rpc/receive_return
 
 必须提供有限、递增的时间边界，跨度不超过 744 小时。MCP 要求带 Z 或偏移量的 ISO 时间，不自动应用店铺/用户时区，数据库 RPC 采用 timestamptz 解析规则。恰好 31 天允许；空结果返回零，非法范围 `22023`，无权限 `42501`。单次最多 10,000 条匹配账本记录，超过返回 `PT422`，应缩小区间，不返回截断总额。索引与 limit 限制候选记录量；不提供任意分组/SQL/导出，也不保证跨多次请求的共同快照。数据晚到或状态变化可能改变历史区间结果，不能当作封账报表。
 
+### 下单区间运营概览
+
+`get_admin_order_summary(start_at, end_at)` 仅 admin/service 可调用，同名 MCP 工具只读。按 `orders.created_at` 的 `[start_at,end_at)` 选取订单，包括未付款、已取消和零元订单。状态分布是查询时的当前状态，不是 end_at 时的历史快照。
+
+返回 start_at/end_at、currency=`USD`、time_basis=`orders.created_at`、order_count、order_total_amount，以及 status_counts/financial_status_counts/fulfillment_status_counts 三个状态计数对象。笔数均为字符串，金额为两位小数字符串；状态对象只含非零键，缺失键表示零，空结果三个对象均为 `{}`。
+
+order_total_amount 汇总原始订单 total（折扣后、含运费与税）；不排除取消订单，不减退款，也不是收款、利润或销售净额。状态变化会改变历史下单区间的状态分布，不会改写原始订单金额。资金统计应单独使用账本汇总，两种口径不得混用。
+
+时间格式、权限与 744 小时上限同账本汇总；订单数最多 10,000，超限 `PT422`，不返回部分总计。使用现有 created_at 索引，单次快照聚合；无客户 PII、订单明细、任意分组、跨请求快照或自动店铺时区转换。
+
 ### 单店基础设置
 
 `get_admin_shop_settings()` 和 `update_shop_settings(expected_revision, changes)` 仅 admin/service 可调用，同名 MCP 工具分别只读/写入。设置存储在私有单例表，不开放底表写入，也不与现有 shop metafield 的任意 owner UUID 自动绑定。

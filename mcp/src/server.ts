@@ -119,6 +119,11 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     z.strictObject({ start_at: z.iso.datetime({ offset: true }), end_at: z.iso.datetime({ offset: true }) }),
   );
   rpc(
+    'get_admin_order_summary',
+    'Summarize orders created in [start_at,end_at), including cancelled, unpaid and zero-value orders. Returns original order totals (including tax/shipping, not reduced by refunds) and CURRENT order/financial/fulfillment status counts, not historical status at end_at. Not revenue, cash or profit; use payment summary separately. Counts and amounts are strings; absent status keys mean zero. Explicit ISO timestamps with offsets, at most 744 hours and 10000 orders; PT422 requires a narrower range, never truncated totals. No customer data, arbitrary grouping or shared snapshot across calls. Shop timezone is not applied.',
+    z.strictObject({ start_at: z.iso.datetime({ offset: true }), end_at: z.iso.datetime({ offset: true }) }),
+  );
+  rpc(
     'update_shop_settings',
     'Update single-shop name and presentation timezone after reading its revision. Timezone must exactly match a PostgreSQL timezone name such as Asia/Shanghai or UTC. Does not change checkout currency, stored timestamps, database timezone or existing storefront UI. Unknown/null fields rejected; empty or unchanged patch preserves revision. Never replace a stale expected_revision automatically.',
     z.strictObject({

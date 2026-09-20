@@ -2339,4 +2339,36 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.get_admin_order_summary(start_at timestamptz, end_at timestamptz) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_count bigint; v_total numeric; v_status jsonb; v_financial jsonb; v_fulfillment jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if start_at is null or end_at is null or not isfinite(start_at) or not isfinite(end_at)
+    or end_at<=start_at or end_at-start_at>interval '744 hours' then
+    raise exception using errcode='22023', message='require finite increasing range of at most 31 days';
+  end if;
+  with candidates as materialized (
+    select o.total,o.status,o.financial_status,o.fulfillment_status from public.orders o
+    where o.created_at>=start_at and o.created_at<end_at limit 10001
+  )
+  select count(*),coalesce(sum(c.total),0),
+    (select coalesce(jsonb_object_agg(s.status,s.n::text),'{}'::jsonb)
+      from (select status,count(*) n from candidates group by status) s),
+    (select coalesce(jsonb_object_agg(s.financial_status,s.n::text),'{}'::jsonb)
+      from (select financial_status,count(*) n from candidates group by financial_status) s),
+    (select coalesce(jsonb_object_agg(s.fulfillment_status,s.n::text),'{}'::jsonb)
+      from (select fulfillment_status,count(*) n from candidates group by fulfillment_status) s)
+  into v_count,v_total,v_status,v_financial,v_fulfillment from candidates c;
+  if v_count>10000 then
+    raise exception using errcode='PT422', message='report exceeds 10000 orders; narrow the time range';
+  end if;
+  return jsonb_build_object('start_at',start_at,'end_at',end_at,'currency','USD','time_basis','orders.created_at',
+    'order_count',v_count::text,'order_total_amount',round(v_total,2)::text,
+    'status_counts',v_status,'financial_status_counts',v_financial,'fulfillment_status_counts',v_fulfillment);
+end;
+$$;
+
 commit;
