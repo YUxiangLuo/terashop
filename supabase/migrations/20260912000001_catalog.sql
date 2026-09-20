@@ -1630,7 +1630,7 @@ begin
   end if;
   if page_size is null or page_size not between 1 and 100
     or (after_id is not null and (length(after_id)>19 or after_id !~ '^[1-9][0-9]*$'))
-    or (reason_filter is not null and reason_filter not in ('order','cancel','restock','adjust','return')) then
+    or (reason_filter is not null and reason_filter not in ('order','cancel','restock','adjust','return','transfer_out','transfer_in')) then
     raise exception using errcode='22023', message='invalid inventory movement filters';
   end if;
   begin v_after := after_id::bigint;
@@ -1647,7 +1647,7 @@ begin
   ), page as materialized (select * from candidates order by id desc limit page_size)
   select coalesce(jsonb_agg(jsonb_build_object('id',p.id::text,'variant_id',p.variant_id,
     'location_id',p.location_id,'delta',p.delta,'on_hand_after',p.on_hand_after,'reason',p.reason,
-    'order_id',p.order_id,'actor_id',p.actor_id,'note',p.note,'created_at',p.created_at) order by p.id desc),'[]'::jsonb),
+    'order_id',p.order_id,'actor_id',p.actor_id,'note',p.note,'transfer_id',p.transfer_id,'created_at',p.created_at) order by p.id desc),'[]'::jsonb),
     case when (select count(*) from candidates)>page_size then (select id::text from page order by id limit 1) end
   into v_items,v_next from page p;
   return jsonb_build_object('items',v_items,'next_cursor',v_next);
@@ -1749,6 +1749,91 @@ begin
     update public.locations l set is_default=true where l.id=location_id returning * into v_location;
   end if;
   return private.admin_location_json(v_location);
+end;
+$$;
+
+CREATE FUNCTION private.assert_inventory_transfer() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if new.transfer_id is null then return null; end if;
+  if not exists (
+    select 1 from public.inventory_movements o join public.inventory_movements i on i.transfer_id=o.transfer_id
+    where o.transfer_id=new.transfer_id and o.reason='transfer_out' and i.reason='transfer_in'
+      and o.variant_id=i.variant_id and o.location_id<>i.location_id and o.delta::bigint+i.delta::bigint=0
+  ) then raise exception using errcode='23514', message='transfer requires a balanced pair of movements'; end if;
+  return null;
+end;
+$$;
+
+CREATE FUNCTION public.get_inventory_transfer(transfer_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() then raise exception using errcode='42501', message='admin only'; end if;
+  return (select jsonb_build_object('id',o.transfer_id,'variant_id',o.variant_id,
+    'from_location_id',o.location_id,'to_location_id',i.location_id,'quantity',i.delta,
+    'from_on_hand_after',o.on_hand_after,'to_on_hand_after',i.on_hand_after,
+    'out_movement_id',o.id::text,'in_movement_id',i.id::text,'actor_id',o.actor_id,'note',o.note,'created_at',o.created_at)
+    from public.inventory_movements o join public.inventory_movements i on i.transfer_id=o.transfer_id
+    where o.transfer_id=get_inventory_transfer.transfer_id and o.reason='transfer_out' and i.reason='transfer_in');
+end;
+$$;
+
+CREATE FUNCTION public.transfer_inventory(variant_id uuid, from_location_id uuid, to_location_id uuid,
+    quantity integer, idempotency_key text, note text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_key text := btrim(idempotency_key); v_hash text; v_record commerce.command_idempotency;
+  v_subject constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
+  v_transfer uuid := gen_random_uuid(); v_location uuid; v_count integer := 0;
+  v_from integer; v_to integer; v_tracked boolean;
+begin
+  if not public.is_admin() then raise exception using errcode='42501', message='admin only'; end if;
+  -- Reservation creation may only lock (not update) a stock row. A transaction
+  -- snapshot could therefore miss reservations committed while this command waited.
+  if current_setting('transaction_isolation')<>'read committed' then
+    raise exception using errcode='25001', message='inventory transfer requires READ COMMITTED';
+  end if;
+  if variant_id is null or from_location_id is null or to_location_id is null or from_location_id=to_location_id
+    or quantity is null or quantity<=0 or coalesce(v_key,'')='' or length(v_key)>200 or length(note)>2000 then
+    raise exception using errcode='22023', message='invalid inventory transfer';
+  end if;
+  v_hash := private.command_request_hash(jsonb_build_object('variant_id',variant_id,'from_location_id',from_location_id,
+    'to_location_id',to_location_id,'quantity',quantity,'note',note));
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('inventory.transfer:'||v_subject||':'||v_key,0));
+  select * into v_record from commerce.command_idempotency c
+    where c.scope='inventory.transfer' and c.subject_id=v_subject and c.idempotency_key=v_key;
+  if found then
+    if v_record.request_hash<>v_hash then raise exception using errcode='PT409', message='idempotency key parameter conflict'; end if;
+    return public.get_inventory_transfer(v_record.resource_id);
+  end if;
+  select v.track_inventory into v_tracked from public.product_variants v where v.id=variant_id for share;
+  if not found then raise exception using errcode='PT404', message='variant not found'; end if;
+  if not v_tracked then raise exception using errcode='22023', message='variant must track inventory'; end if;
+  -- Stable lock order for opposing transfers, including creation of missing levels.
+  for v_location in select l.id from public.locations l where l.id in (from_location_id,to_location_id)
+      and l.is_active order by l.id for share loop
+    v_count := v_count+1;
+  end loop;
+  if v_count<>2 then raise exception using errcode='PT409', message='both warehouses must exist and be active'; end if;
+  for v_location in select l.id from public.locations l where l.id in (from_location_id,to_location_id) order by l.id loop
+    insert into public.inventory_levels(variant_id,location_id,on_hand) values(variant_id,v_location,0)
+      on conflict on constraint inventory_levels_pkey do nothing;
+    perform 1 from public.inventory_levels il where il.variant_id=transfer_inventory.variant_id and il.location_id=v_location for update;
+  end loop;
+  select il.on_hand into v_from from public.inventory_levels il where il.variant_id=transfer_inventory.variant_id and il.location_id=from_location_id;
+  if v_from-private.active_reserved_quantity(variant_id,from_location_id,null)<quantity then
+    raise exception using errcode='PT409', message='insufficient available inventory';
+  end if;
+  update public.inventory_levels il set on_hand=il.on_hand-quantity
+    where il.variant_id=transfer_inventory.variant_id and il.location_id=from_location_id returning on_hand into v_from;
+  update public.inventory_levels il set on_hand=il.on_hand+quantity
+    where il.variant_id=transfer_inventory.variant_id and il.location_id=to_location_id returning on_hand into v_to;
+  insert into public.inventory_movements(variant_id,location_id,delta,on_hand_after,reason,actor_id,note,transfer_id)
+    values(variant_id,from_location_id,-quantity,v_from,'transfer_out',auth.uid(),note,v_transfer),
+          (variant_id,to_location_id,quantity,v_to,'transfer_in',auth.uid(),note,v_transfer);
+  insert into commerce.command_idempotency(scope,subject_id,idempotency_key,request_hash,resource_type,resource_id)
+    values('inventory.transfer',v_subject,v_key,v_hash,'inventory_transfer',v_transfer);
+  return public.get_inventory_transfer(v_transfer);
 end;
 $$;
 

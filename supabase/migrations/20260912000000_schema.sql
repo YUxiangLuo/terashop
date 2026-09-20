@@ -495,7 +495,7 @@ CREATE TABLE commerce.command_idempotency (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT command_idempotency_check CHECK ((scope, resource_type) IN (
       ('order.create', 'order'), ('fulfillment.create', 'fulfillment'), ('fulfillment.update', 'fulfillment'), ('order.refund', 'refund'),
-      ('customer.create', 'customer'), ('inventory.adjust', 'inventory_level'), ('order.pay', 'order'))),
+      ('customer.create', 'customer'), ('inventory.adjust', 'inventory_level'), ('inventory.transfer', 'inventory_transfer'), ('order.pay', 'order'))),
     CONSTRAINT command_idempotency_location_check CHECK ((scope = 'inventory.adjust') = (resource_location_id IS NOT NULL)),
     CONSTRAINT command_idempotency_idempotency_key_check CHECK (((length(btrim(idempotency_key)) >= 1) AND (length(btrim(idempotency_key)) <= 200))),
     CONSTRAINT command_idempotency_request_hash_check CHECK ((request_hash ~ '^[0-9a-f]{64}$'::text))
@@ -677,8 +677,14 @@ CREATE TABLE public.inventory_movements (
     order_id uuid,
     actor_id uuid,
     note text,
+    transfer_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT inventory_movements_reason_check CHECK ((reason = ANY (ARRAY['order'::text, 'cancel'::text, 'restock'::text, 'adjust'::text, 'return'::text])))
+    CONSTRAINT inventory_movements_reason_check CHECK ((reason = ANY (ARRAY['order'::text, 'cancel'::text, 'restock'::text, 'adjust'::text, 'return'::text, 'transfer_out'::text, 'transfer_in'::text]))),
+    CONSTRAINT inventory_movements_transfer_check CHECK (
+      (transfer_id IS NOT NULL) = (reason IN ('transfer_out','transfer_in'))
+      AND (transfer_id IS NULL OR (order_id IS NULL AND on_hand_after >= 0
+        AND ((reason='transfer_out' AND delta<0) OR (reason='transfer_in' AND delta>0))))),
+    UNIQUE (transfer_id, reason)
 );
 
 CREATE TABLE public.locations (

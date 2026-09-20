@@ -193,6 +193,8 @@ CREATE TRIGGER fulfillments_updated_at BEFORE UPDATE ON public.fulfillments FOR 
 CREATE TRIGGER inventory_levels_reservation_guard BEFORE DELETE OR UPDATE ON public.inventory_levels FOR EACH ROW EXECUTE FUNCTION private.protect_reserved_inventory();
 CREATE TRIGGER inventory_movements_append_only BEFORE DELETE OR UPDATE ON public.inventory_movements FOR EACH ROW EXECUTE FUNCTION private.protect_audit_row();
 CREATE TRIGGER inventory_movements_no_truncate BEFORE TRUNCATE ON public.inventory_movements FOR EACH STATEMENT EXECUTE FUNCTION private.protect_audit_row();
+CREATE CONSTRAINT TRIGGER inventory_transfer_balanced AFTER INSERT ON public.inventory_movements
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_inventory_transfer();
 CREATE TRIGGER metafield_definitions_existing_values_compatible BEFORE INSERT OR UPDATE OF owner_type, namespace, key, type, validations ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_definition_compatibility();
 CREATE TRIGGER metafield_definitions_updated_at BEFORE UPDATE ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER metafields_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_metafield();
@@ -678,6 +680,11 @@ REVOKE ALL ON FUNCTION public.create_location(uuid,jsonb), public.update_locatio
   public.set_default_location(uuid,integer,uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.create_location(uuid,jsonb), public.update_location(uuid,integer,jsonb),
   public.set_default_location(uuid,integer,uuid) TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION private.assert_inventory_transfer(), public.get_inventory_transfer(uuid),
+  public.transfer_inventory(uuid,uuid,uuid,integer,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_inventory_transfer(uuid),
+  public.transfer_inventory(uuid,uuid,uuid,integer,text,text) TO authenticated;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

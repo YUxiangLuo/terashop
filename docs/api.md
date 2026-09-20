@@ -409,6 +409,7 @@ POST /rest/v1/rpc/receive_return
 | `create_fulfillment` | admin | `order_id`、`items`、`idempotency_key`、可选物流信息 |
 | `update_fulfillment` | admin | `fulfillment_id`、`expected_version`、`changes`、`idempotency_key`；仅状态与物流字段 |
 | `adjust_inventory` | admin | 必填 `variant_id`、`delta`、`idempotency_key`；可选 `reason`（默认 adjust）、`note`、`location_id`（默认仓） |
+| `transfer_inventory` | admin | 必填 `variant_id`、`from_location_id`、`to_location_id`、`quantity`、`idempotency_key`；可选 `note`；即时原子调拨，见下文 |
 | `moderate_review` | admin | `review_id`、`status` |
 | `set_user_role` | admin | `user_id`、`role`；最后一名 admin 不可降级 |
 | `anonymize_user` | admin | `p_user_id` 为 Auth ID；匿名化关联客户，另清 profile PII 与审计 actor；不是完整账号删除 |
@@ -427,11 +428,22 @@ POST /rest/v1/rpc/receive_return
 
 - `get_admin_location(location_id)`：不存在返回 null，包含停用仓库。DTO 为 `id/code/name/address/is_default/is_active/revision/created_at`，不返回库存。address 为既有 JSON 值，不保证特定地址格式；编辑令牌为 revision，不是 created_at。
 - `list_admin_locations(page_size=20, after_id=null, active=null, search=null)`：UUID 升序分页，返回 `{items,next_cursor}`；active 省略包含启用与停用，search 按名称/code 不区分大小写的字面子串搜索，去除首尾普通空格，最多 200 字符，`%/_` 不作通配符。is_default 与 is_active 分开表达；默认仓必须同时启用才用于新结账。
-- `list_admin_inventory_movements(page_size=20, after_id=null, variant_id=null, location_id=null, order_id=null, reason_filter=null)`：按流水 bigint ID 倒序返回 `{items,next_cursor}`，筛选按 AND 组合；reason_filter 为 `order/cancel/restock/adjust/return`。每行显式返回 `id/variant_id/location_id/delta/on_hand_after/reason/order_id/actor_id/note/created_at`。actor_id 是可为 null 的 Auth ID，不是客户 ID；note 是不可信商家文本。
+- `list_admin_inventory_movements(page_size=20, after_id=null, variant_id=null, location_id=null, order_id=null, reason_filter=null)`：按流水 bigint ID 倒序返回 `{items,next_cursor}`，筛选按 AND 组合；reason_filter 为 `order/cancel/restock/adjust/return/transfer_out/transfer_in`。每行显式返回 `id/variant_id/location_id/delta/on_hand_after/reason/order_id/actor_id/note/transfer_id/created_at`。actor_id 是可为 null 的 Auth ID，不是客户 ID；note 是不可信商家文本。仅调拨流水带 transfer_id。
 
 两种列表 page_size 为 1–100，末页 next_cursor 为 null，修改筛选应清除游标。流水 id、next_cursor 和 after_id **均为十进制字符串**，不能转 Number；after_id 范围 1–9223372036854775807，不接受符号、空白或前导零。非法分页/筛选为 `22023`。列表不保证跨请求快照；流水 ID 是分配顺序，不是提交顺序，迟提交行可能被翻页跳过，不能用作可靠消费队列。
 
-`on_hand_after` 是该流水记录的历史实物库存，不代表当前可用量；预占及释放未必产生实物流水。当前精确库存与预占仍查 `get_inventory_availability`，不能只加总一页流水。不提供库存调拨或流水修改工具。
+`on_hand_after` 是该流水记录的历史实物库存，不代表当前可用量；预占及释放未必产生实物流水。当前精确库存与预占仍查 `get_inventory_availability`，不能只加总一页流水。不提供流水修改工具。
+
+### 即时库存调拨
+
+`transfer_inventory(variant_id, from_location_id, to_location_id, quantity, idempotency_key, note=null)` 与 `get_inventory_transfer(transfer_id)` 仅 admin 可调用，均有同名 MCP 工具；写入需开启 MCP 写开关。不跟踪在途、发运或收货状态。
+
+- 每次移动一个跟踪库存的变体，明确指定两个不同且启用的仓库；quantity 为 1–2147483647 整数，note 最多 2000 字符。来源可用量为实物库存减有效预留，不允许挪用预留；不受 allow_backorder 放宽。不迁移预留、不切换默认仓。
+- 同一事务锁定仓库与库存行，扣来源、加目标，创建共用 transfer_id 的 `transfer_out` / `transfer_in` 两条不可变流水；数据库延迟约束保证同变体、不同仓库、数量守恒。目标没有库存行时自动创建；任何失败全部回滚。
+- 幂等键使用独立的店铺级 `inventory.transfer` 范围，不按管理员隔离；数据库去除首尾普通空格后要求 1–200 字符。同键同参数返回原调拨事实，同键改参数为 `PT409`，失败不占用键。重放仍校验当前权限，不因后续停用仓库或库存变化重复执行。actor 匿名化后返回 null，不恢复旧身份。
+- 两个 RPC 返回 `{id,variant_id,from_location_id,to_location_id,quantity,from_on_hand_after,to_on_hand_after,out_movement_id,in_movement_id,actor_id,note,created_at}`；流水 ID 为字符串，两个余额是调拨当时的历史值。查询不存在返回 null；列表通过库存流水筛选调出或调入后取得 transfer_id。
+- 非法参数/非跟踪变体为 `22023`，变体不存在为 `PT404`，仓库不存在/停用、可用量不足或幂等冲突为 `PT409`，整数溢出为 `22003`，权限不足为 `42501`。调拨要求 PostgREST 默认的 `READ COMMITTED`；直接 SQL 使用其他隔离级别拒绝为 `25001`，避免等待锁后仍读取陈旧预留快照。
+- 不提供撤销或修改调拨。需要移回时，经确认后创建反向调拨，重新校验当前可用量；不能删除原始流水。网络结果不明时保留原键和全部参数，重试原请求，不生成新键。
 
 ### 管理员仓库命令
 

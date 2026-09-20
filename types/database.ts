@@ -319,6 +319,7 @@ export type Database = {
           on_hand_after: number
           order_id: string | null
           reason: string
+          transfer_id: string | null
           variant_id: string
         }
         Insert: {
@@ -331,6 +332,7 @@ export type Database = {
           on_hand_after: number
           order_id?: string | null
           reason: string
+          transfer_id?: string | null
           variant_id: string
         }
         Update: {
@@ -343,6 +345,7 @@ export type Database = {
           on_hand_after?: number
           order_id?: string | null
           reason?: string
+          transfer_id?: string | null
           variant_id?: string
         }
         Relationships: [
@@ -1806,6 +1809,7 @@ export type Database = {
         Args: { location_id?: string; variant_id: string }
         Returns: Json
       }
+      get_inventory_transfer: { Args: { transfer_id: string }; Returns: Json }
       get_order_checkout_quote: { Args: { order_id: string }; Returns: Json }
       get_order_fulfillment_balance: {
         Args: { order_id: string }
@@ -2110,6 +2114,17 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      transfer_inventory: {
+        Args: {
+          from_location_id: string
+          idempotency_key: string
+          note?: string
+          quantity: number
+          to_location_id: string
+          variant_id: string
+        }
+        Returns: Json
       }
       update_cart: {
         Args: {
