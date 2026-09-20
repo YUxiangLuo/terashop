@@ -2053,4 +2053,120 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.bump_shipping_method_revision() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO '' AS $$
+begin
+  if tg_op='INSERT' then new.revision := 1; else new.revision := old.revision+1; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.admin_shipping_method_json(s public.shipping_methods) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
+  select jsonb_build_object('id',s.id,'revision',s.revision,'name',s.name,'description',s.description,
+    'countries',s.countries,'price',s.price,'free_above',s.free_above,'estimated_days',s.estimated_days,
+    'position',s.position,'is_active',s.is_active,'created_at',s.created_at,'updated_at',s.updated_at);
+$$;
+
+CREATE FUNCTION public.get_admin_shipping_method(shipping_method_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.admin_shipping_method_json(s) from public.shipping_methods s where s.id=shipping_method_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_shipping_methods(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    active boolean DEFAULT NULL, country text DEFAULT NULL, search text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid; v_country text;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or length(search)>200 then
+    raise exception using errcode='22023', message='invalid shipping method filters';
+  end if;
+  if country is not null then v_country := private.normalize_country_code(country); end if;
+  with candidates as materialized (
+    select s as method,s.id from public.shipping_methods s where (after_id is null or s.id>after_id)
+      and (active is null or s.is_active=active)
+      and (v_country is null or cardinality(s.countries)=0 or v_country=any(s.countries))
+      and (nullif(btrim(search),'') is null or strpos(lower(s.name),lower(btrim(search)))>0)
+    order by s.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(private.admin_shipping_method_json(p.method) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.update_shipping_method(shipping_method_id uuid, expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_old public.shipping_methods; v_new public.shipping_methods; v_key text; v_value jsonb; v_number numeric;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if shipping_method_id is null or expected_revision is null or expected_revision<1
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid shipping method patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('name','description','countries','price','free_above','estimated_days','position','is_active')
+      or (v_key in ('name','description','estimated_days') and jsonb_typeof(v_value)<>'string')
+      or (v_key='countries' and jsonb_typeof(v_value)<>'array')
+      or (v_key in ('price','position') and jsonb_typeof(v_value)<>'number')
+      or (v_key='free_above' and jsonb_typeof(v_value) not in ('number','null'))
+      or (v_key='is_active' and jsonb_typeof(v_value)<>'boolean') then
+      raise exception using errcode='22023', message='unknown or invalid shipping method field';
+    end if;
+    if v_key='countries' and exists (select 1 from jsonb_array_elements(v_value) e where jsonb_typeof(e.value)<>'string') then
+      raise exception using errcode='22023', message='countries must contain only country code strings';
+    end if;
+    if v_key in ('price','free_above') and jsonb_typeof(v_value)='number' then
+      v_number := (v_value#>>'{}')::numeric;
+      if v_number<0 or v_number>9999999999.99 or v_number<>round(v_number,2) then
+        raise exception using errcode='22023', message='money must be nonnegative USD with at most two decimals';
+      end if;
+    end if;
+    if v_key='position' and (v_value#>>'{}')::numeric<>trunc((v_value#>>'{}')::numeric) then
+      raise exception using errcode='22023', message='position must be an integer';
+    end if;
+  end loop;
+  select * into v_old from public.shipping_methods s where s.id=shipping_method_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='shipping method not found'; end if;
+  if v_old.revision<>expected_revision then
+    raise exception using errcode='PT409', message='shipping method was modified';
+  end if;
+  v_new := jsonb_populate_record(v_old,changes);
+  if btrim(v_new.name)='' then raise exception using errcode='22023', message='shipping method name required'; end if;
+  if v_new is distinct from v_old then
+    update public.shipping_methods s set name=v_new.name,description=v_new.description,countries=v_new.countries,
+      price=v_new.price,free_above=v_new.free_above,estimated_days=v_new.estimated_days,
+      position=v_new.position,is_active=v_new.is_active where s.id=shipping_method_id;
+  end if;
+  return public.get_admin_shipping_method(shipping_method_id);
+end;
+$$;
+
+CREATE FUNCTION public.create_shipping_method(shipping_method_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if shipping_method_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or jsonb_typeof(changes->'name') is distinct from 'string'
+    or jsonb_typeof(changes->'price') is distinct from 'number' then
+    raise exception using errcode='22023', message='shipping method id, name and price required';
+  end if;
+  insert into public.shipping_methods(id,name,is_active) values(shipping_method_id,changes->>'name',false);
+  return public.update_shipping_method(shipping_method_id,1,changes);
+end;
+$$;
+
 commit;

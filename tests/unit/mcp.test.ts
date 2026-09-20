@@ -25,8 +25,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(24);
-    expect(writeTools.length).toBe(57);
+    expect(readTools.length).toBe(26);
+    expect(writeTools.length).toBe(61);
     expect(readTools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(writeTools.find((tool) => tool.name === 'adjust_inventory')?.annotations).toMatchObject({
       readOnlyHint: false,
@@ -122,6 +122,13 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
       ['delete_customer_address', { customer_id: id, address_id: id }],
       ['create_category', { category_id: id, changes: { name: 'Missing slug' } }],
       ['list_admin_categories', { root_only: true, parent_id: id }],
+      ['create_shipping_method', { shipping_method_id: id, changes: { name: 'Missing price' } }],
+      [
+        'update_shipping_method',
+        { shipping_method_id: id, expected_revision: 1, changes: { countries: null } },
+      ],
+      ['update_shipping_method', { shipping_method_id: id, expected_revision: 1, changes: { revision: 2 } }],
+      ['update_shipping_method', { shipping_method_id: id, expected_revision: 1, changes: { price: -1 } }],
       [
         'update_category',
         {

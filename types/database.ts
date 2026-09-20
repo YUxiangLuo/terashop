@@ -1388,6 +1388,7 @@ export type Database = {
           name: string
           position: number
           price: number
+          revision: number
           updated_at: string
         }
         Insert: {
@@ -1401,6 +1402,7 @@ export type Database = {
           name: string
           position?: number
           price?: number
+          revision?: number
           updated_at?: string
         }
         Update: {
@@ -1414,6 +1416,7 @@ export type Database = {
           name?: string
           position?: number
           price?: number
+          revision?: number
           updated_at?: string
         }
         Relationships: []
@@ -1778,6 +1781,10 @@ export type Database = {
         }
         Returns: Json
       }
+      create_shipping_method: {
+        Args: { changes: Json; shipping_method_id: string }
+        Returns: Json
+      }
       current_customer_id: { Args: never; Returns: string }
       delete_customer_address: {
         Args: {
@@ -1807,6 +1814,10 @@ export type Database = {
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
       get_admin_promotion: { Args: { promotion_id: string }; Returns: Json }
+      get_admin_shipping_method: {
+        Args: { shipping_method_id: string }
+        Returns: Json
+      }
       get_cart: {
         Args: { cart_id: string; guest_token?: string }
         Returns: Json
@@ -1953,6 +1964,16 @@ export type Database = {
           page_size?: number
           search?: string
           type_filter?: string
+        }
+        Returns: Json
+      }
+      list_admin_shipping_methods: {
+        Args: {
+          active?: boolean
+          after_id?: string
+          country?: string
+          page_size?: number
+          search?: string
         }
         Returns: Json
       }
@@ -2225,6 +2246,14 @@ export type Database = {
       }
       update_promotion: {
         Args: { changes: Json; expected_revision: number; promotion_id: string }
+        Returns: Json
+      }
+      update_shipping_method: {
+        Args: {
+          changes: Json
+          expected_revision: number
+          shipping_method_id: string
+        }
         Returns: Json
       }
     }

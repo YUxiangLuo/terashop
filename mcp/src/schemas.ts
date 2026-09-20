@@ -98,6 +98,17 @@ const money = z
   .nonnegative()
   .max(Number.MAX_SAFE_INTEGER / 100);
 const position = z.number().int().min(-2147483648).max(2147483647);
+export const shippingMoney = z.number().nonnegative().max(9999999999.99);
+export const shippingMethodChanges = z.strictObject({
+  name: z.string().optional(),
+  description: z.string().optional(),
+  countries: z.array(z.string()).optional(),
+  price: shippingMoney.optional(),
+  free_above: shippingMoney.nullable().optional(),
+  estimated_days: z.string().optional(),
+  position: position.optional(),
+  is_active: z.boolean().optional(),
+});
 export const categoryChanges = z.strictObject({
   slug: z.string().optional(),
   name: z.string().optional(),

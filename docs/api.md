@@ -463,6 +463,25 @@ PATCH 仅允许上述四个字段，省略保留；address 接受既有任意 JS
 
 创建不是 upsert，命令不缓存历史响应，结果未知先读取原 UUID 和当前默认选择。切换/停用不搬库存、不重写历史订单或既有预占，也不清理库存流水；切换影响后续默认仓解析，原预占/订单继续使用其记录的仓库。不提供仓库删除工具，引用中的仓库应停用而不是强删。
 
+## 管理员配送方式管理
+
+以下 RPC 仅 admin/service 可调用，均有同名 MCP 工具；MCP 只使用管理员用户 JWT，写命令须启用写开关。
+
+| RPC | 参数与返回 |
+| --- | --- |
+| `get_admin_shipping_method` | `shipping_method_id`；返回当前配置 DTO，包含停用方式，不存在为 null |
+| `list_admin_shipping_methods` | `page_size=20, after_id=null, active=null, country=null, search=null`；返回 `{items,next_cursor}` |
+| `create_shipping_method` | `shipping_method_id, changes`；必填 name 和显式 price，默认停用、不限国家、无免邮门槛；可显式 is_active=true 原子发布 |
+| `update_shipping_method` | `shipping_method_id, expected_revision, changes`；版本化原子 PATCH，返回最新 DTO |
+
+DTO 为 `id/revision/name/description/countries/price/free_above/estimated_days/position/is_active/created_at/updated_at`。列表按 UUID 升序，**不是 position 展示顺序**；页大小 1–100，末页游标 null。active 省略时包含停用方式；country 规范化后匹配指定国家或空 countries；search 为名称的不区分大小写字面子串，去除首尾普通空格，最多 200 字符，`%/_` 不是通配符。筛选以 AND 组合，无精确总数或跨请求快照，不替代实际结账报价。
+
+changes 只允许 name/description/countries/price/free_above/estimated_days/position/is_active，序列化 JSON 最大 256 KiB。省略字段保持不变，name 不可仅为空格。countries 必须为字符串数组，替换整个范围；代码去空格转大写并校验两个英文字母，不校验真实承运商服务范围。**`countries:[]` 表示不限国家，不是停用；null 拒绝**。price/free_above 必须为非负 USD JSON 数字，最多两位小数且不大于 9999999999.99，不接受字符串或自动舍入；只有 free_above 可以为 null。position 为 int32；description/estimated_days 是商家文本，不是承运商时效承诺。
+
+`free_above:null` 移除门槛，0 对非负商品净额均免运费；结账按**商品小计减商品优惠**达到门槛（含等号）时免邮，不含运费与税。例如商品 22.50、优惠 3.01，门槛 19.50 时仍收费，19.49 时免邮。配置变更不重写已创建订单的收费快照；旧 Quote 转单仍校验当前定价，变化时须重新报价。订单改地址仍受现有目的地校验规则约束。
+
+revision 由 trigger 在每次实际表 UPDATE 时推进，旧 SPA/service 直写也不可伪造；创建时使用返回的版本，不假定固定值。命令空 PATCH 或完全相同值不 UPDATE。使用行级 `FOR NO KEY UPDATE NOWAIT`，缺失为 `PT404`，过期版本为 `PT409`，锁竞争为 `55P03`，旧事务快照可能为 `40001`；非法字段/金额为 `22023`，重复 UUID 为 `23505`。任何失败整笔回滚。创建不是 upsert，不缓存历史响应；结果不明先读取原 UUID，冲突后须重新读取并确认意图，不自动替换版本。没有删除、承运商 API、面单购买或历史订单重定价工具。
+
 ## 促销范围与扩展字段管理
 
 ### 管理员促销查询

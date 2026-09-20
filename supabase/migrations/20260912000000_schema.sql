@@ -914,6 +914,7 @@ CREATE TABLE public.promotions (
 
 CREATE TABLE public.shipping_methods (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
     countries text[] DEFAULT '{}'::text[] NOT NULL,
