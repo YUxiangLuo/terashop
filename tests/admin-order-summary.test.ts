@@ -149,5 +149,19 @@ test('隔离容量夹具：10000 个订单精确汇总，10001 拒绝截断', as
         await sp`select public.get_admin_order_summary('1904-01-01','1904-01-03')`;
       }),
     ).rejects.toMatchObject({ errno: 'PT422' });
+    const [exported] = await tx`select public.export_admin_orders('1904-01-01','1904-01-02',1) as data`;
+    expect(exported.data.items).toHaveLength(1);
+    expect(exported.data.items[0].total).toBe('9999999999.99');
+    expect(BigInt(exported.data.items[0].order_number) < -9007199254740991n).toBe(true);
+    const [original] =
+      await tx`select order_number::text as number from public.orders where id=${exported.data.items[0].id}::uuid`;
+    expect(exported.data.items[0].order_number).toBe(original.number);
+    expect(exported.data.next_cursor).toBe(exported.data.items[0].id);
+    // A cursor beyond all rows must not bypass the whole-range cap.
+    await expect(
+      tx.savepoint(async (sp) => {
+        await sp`select public.export_admin_orders('1904-01-01','1904-01-03',1,'ffffffff-ffff-ffff-ffff-ffffffffffff')`;
+      }),
+    ).rejects.toMatchObject({ errno: 'PT422' });
   });
 });

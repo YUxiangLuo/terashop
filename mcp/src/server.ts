@@ -124,6 +124,16 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     z.strictObject({ start_at: z.iso.datetime({ offset: true }), end_at: z.iso.datetime({ offset: true }) }),
   );
   rpc(
+    'export_admin_orders',
+    'Read one fixed-field JSON export page for orders created in [start_at,end_at). UUID ascending; pass next_cursor as after_id with the SAME range, reset on range changes. Up to 100 rows/page and 10000 orders per range, at most 744 hours; PT422 requires narrowing the range even on later pages. Order numbers and monetary components are strings. Includes cancelled/unpaid/zero-value orders and current statuses, not cash or historical state. Omits customer IDs, emails, addresses, notes, items and provider references. No files, CSV, network destinations or automatic page traversal. Not anonymized public data: order IDs remain linkable. No frozen cross-page snapshot; concurrent inserts may be missed and statuses may change. Obtain approval before exporting data outside this session.',
+    z.strictObject({
+      start_at: z.iso.datetime({ offset: true }),
+      end_at: z.iso.datetime({ offset: true }),
+      page_size: pageSize,
+      after_id: id.optional(),
+    }),
+  );
+  rpc(
     'update_shop_settings',
     'Update single-shop name and presentation timezone after reading its revision. Timezone must exactly match a PostgreSQL timezone name such as Asia/Shanghai or UTC. Does not change checkout currency, stored timestamps, database timezone or existing storefront UI. Unknown/null fields rejected; empty or unchanged patch preserves revision. Never replace a stale expected_revision automatically.',
     z.strictObject({

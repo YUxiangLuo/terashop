@@ -90,8 +90,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(44);
-    expect(writeTools.length).toBe(96);
+    expect(readTools.length).toBe(45);
+    expect(writeTools.length).toBe(97);
     expect(writeTools.find((t) => t.name === 'refund_paypal')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
@@ -198,6 +198,11 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
       ['list_admin_reviews', { rating_filter: 6 }],
       ['get_admin_payment_summary', { start_at: '2026-01-01', end_at: '2026-01-02' }],
       ['get_admin_order_summary', { start_at: '2026-01-01', end_at: '2026-01-02' }],
+      ['export_admin_orders', { start_at: '2026-01-01', end_at: '2026-01-02' }],
+      [
+        'export_admin_orders',
+        { start_at: '2026-01-01T00:00:00Z', end_at: '2026-01-02T00:00:00Z', fields: ['email'] },
+      ],
       [
         'get_admin_order_summary',
         { start_at: '2026-01-01T00:00:00Z', end_at: '2026-01-02T00:00:00Z', group_by: 'email' },

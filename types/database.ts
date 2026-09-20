@@ -1862,6 +1862,15 @@ export type Database = {
         Args: { as_of?: string; max_quotes?: number }
         Returns: Json
       }
+      export_admin_orders: {
+        Args: {
+          after_id?: string
+          end_at: string
+          page_size?: number
+          start_at: string
+        }
+        Returns: Json
+      }
       get_admin_category: { Args: { category_id: string }; Returns: Json }
       get_admin_customer: { Args: { customer_id: string }; Returns: Json }
       get_admin_location: { Args: { location_id: string }; Returns: Json }

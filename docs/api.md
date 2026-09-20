@@ -474,6 +474,16 @@ order_total_amount 汇总原始订单 total（折扣后、含运费与税）；�
 
 时间格式、权限与 744 小时上限同账本汇总；订单数最多 10,000，超限 `PT422`，不返回部分总计。使用现有 created_at 索引，单次快照聚合；无客户 PII、订单明细、任意分组、跨请求快照或自动店铺时区转换。
 
+### 受控订单 JSON 导出
+
+`export_admin_orders(start_at,end_at,page_size=100,after_id?)` 仅 admin/service 可调用，同名 MCP 工具只读。按下单时间 `[start_at,end_at)` 选择全部状态订单；时间范围有限且递增，最多 744 小时。返回 `{start_at,end_at,items,next_cursor}`，按订单 UUID 升序，每页 1–100 条，末页 next_cursor=null。将 next_cursor 原样作为 after_id，修改时间区间须清空游标。
+
+每条固定字段为 id/order_number/status/financial_status/fulfillment_status/currency/subtotal/discount_total/shipping_total/tax_total/total/created_at/updated_at。订单号和全部金额为字符串，避免 bigint 或浮点精度丢失。金额保留原始订单快照，含取消和未付款订单，不扣退款，不代表收入。没有客户 ID、邮箱、地址、备注、商品行、渠道引用或任意字段选择参数；订单标识仍可关联个人，不能视为可公开的匿名数据。
+
+每次调用都校验整个区间最多 10,000 条订单，超限 `PT422`，游标不能绕过上限；非法范围/页大小 `22023`，无权限 `42501`。旧管理列表及其含客户信息的 DTO 保持不变。
+
+这是单页 JSON 数据接口，不生成 CSV、文件或下载链接，不接受本地路径/外部目的地，不自动翻页。跨页没有冻结快照：新提交订单可能落在已翻过的 UUID 之前，状态也可能变化；严格一致导出需要未来独立的快照任务。向外部保存或发送数据前须取得批准，工具说明不是独立审批系统。
+
 ### 单店基础设置
 
 `get_admin_shop_settings()` 和 `update_shop_settings(expected_revision, changes)` 仅 admin/service 可调用，同名 MCP 工具分别只读/写入。设置存储在私有单例表，不开放底表写入，也不与现有 shop metafield 的任意 owner UUID 自动绑定。

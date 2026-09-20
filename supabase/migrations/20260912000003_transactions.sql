@@ -2429,4 +2429,39 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.export_admin_orders(start_at timestamptz, end_at timestamptz,
+    page_size integer DEFAULT 100, after_id uuid DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_count bigint; v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if start_at is null or end_at is null or not isfinite(start_at) or not isfinite(end_at)
+    or end_at<=start_at or end_at-start_at>interval '744 hours'
+    or page_size is null or page_size not between 1 and 100 then
+    raise exception using errcode='22023', message='invalid export range or page size';
+  end if;
+  with candidates as materialized (
+    select o.id,o.order_number,o.status,o.financial_status,o.fulfillment_status,o.currency,
+      o.subtotal,o.discount_total,o.shipping_total,o.tax_total,o.total,o.created_at,o.updated_at
+    from public.orders o where o.created_at>=start_at and o.created_at<end_at limit 10001
+  ), remaining as materialized (
+    select * from candidates c where after_id is null or c.id>after_id order by id limit page_size+1
+  ), page as materialized (select * from remaining order by id limit page_size)
+  select (select count(*) from candidates),
+    coalesce(jsonb_agg(jsonb_build_object('id',p.id,'order_number',p.order_number::text,
+      'status',p.status,'financial_status',p.financial_status,'fulfillment_status',p.fulfillment_status,
+      'currency',p.currency,'subtotal',p.subtotal::text,'discount_total',p.discount_total::text,
+      'shipping_total',p.shipping_total::text,'tax_total',p.tax_total::text,'total',p.total::text,
+      'created_at',p.created_at,'updated_at',p.updated_at) order by p.id),'[]'::jsonb),
+    case when (select count(*) from remaining)>page_size then (select id from page order by id desc limit 1) end
+  into v_count,v_items,v_next from page p;
+  if v_count>10000 then
+    raise exception using errcode='PT422', message='export exceeds 10000 orders; narrow the time range';
+  end if;
+  return jsonb_build_object('start_at',start_at,'end_at',end_at,'items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;
