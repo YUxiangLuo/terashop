@@ -274,3 +274,27 @@ export const refund = z
     },
   )
   .refine((value) => !value.restock || value.items !== undefined, { message: 'restock requires items' });
+
+const paypalMoney = z
+  .string()
+  .regex(/^(?:0|[1-9][0-9]{0,9})(?:\.[0-9]{1,2})?$/)
+  .refine((value) => Number(value) > 0, 'Amount must be positive');
+export const paypalRefund = z
+  .strictObject({
+    order_id: id,
+    idempotency_key: key,
+    amount: paypalMoney.optional(),
+    shipping_amount: paypalMoney.optional(),
+    items: itemQuantities.optional(),
+    reason: z.string().max(1000).optional(),
+    restock: z.boolean().optional(),
+  })
+  .refine(
+    (v) => v.amount !== undefined || v.shipping_amount !== undefined || v.items !== undefined,
+    'Explicit amount, items or shipping_amount required',
+  )
+  .refine(
+    (v) => v.amount === undefined || (v.items === undefined && v.shipping_amount === undefined),
+    'amount is mutually exclusive with items and shipping_amount',
+  )
+  .refine((v) => !v.restock || v.items !== undefined, 'restock requires items');

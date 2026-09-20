@@ -239,6 +239,16 @@ PATCH 省略保留，只允许显式字段，JSONB 文本最多 256 KiB。客户
 
 字段白名单不返回渠道 reference、幂等键、request_hash、metadata、原因、actor 或原始错误（包括 failure_code/message）；不抓取渠道、不执行重试。渠道事件仍使用 `list_admin_payment_provider_events` 按资源查询，不在此接口复制事件载荷。手工收退款属于账本，不属于这些渠道操作。旧 `get_payment_operations` 保持原合同且未注册为 MCP 工具，不能把其管理员错误原文转发给 agent。
 
+### MCP PayPal 退款
+
+`refund_paypal` 是会移动真实资金的写工具，须开启 MCP 写开关并先取得明确批准；与仅记账的 `refund_order` 不同。固定调用 `/functions/v1/paypal-create-refund`，透传当前管理员 JWT；MCP 不持有 service key 或 PayPal 凭据，Edge 继续负责身份验证、数据库管理员授权及渠道调用。运行环境必须已部署该 Edge 并配置 PayPal；live/sandbox 由服务端配置决定，工具参数不可覆盖。
+
+必填 order_id/idempotency_key，且必须显式提供 amount、items 或 shipping_amount；amount 与另外两者互斥，items 可与 shipping_amount 组合。金额为正十进制字符串，整数部分最多 10 位、小数最多两位，不接受 Number、指数或前导零。items 沿用订单行 UUID/正数量合同，最多 100 行；reason 最多 1000 字符；restock=true 必须有 items，仅回补取消的未发货库存，不代表收到退货。**不允许省略退款范围自动退剩余全额**，实际可退余额及已发货限制由数据库判定。
+
+返回只含 `refund_request_id/order_id/provider/provider_status/pending_reconciliation`；不转发渠道 reference、processing_status 原文或错误消息。provider_status 为 PENDING/COMPLETED/FAILED/CANCELLED。渠道 COMPLETED 不是本地账本已完成的充分证明，尤其 pending_reconciliation=true 时；使用脱敏支付操作和订单账本核对。工具注解为 destructive/open-world，非自动幂等重放提示；注解和说明不是独立审批机制。
+
+每次调用先复核管理员身份；通过后发起 Edge 请求，任何失败（包括 4xx、超时、响应格式不对或订单不匹配）均保守返回 outcome_unknown=true，因为可能已创建本地请求或发起退款。保留原幂等键及完全相同参数，先查原订单的退款请求/账本，再经确认决定是否同键重试；不能换键或改参数盲目重建。响应丢失且未获得请求 UUID 时，列表仅辅助核对，不能仅凭金额判断请求身份。MCP 不自动重试；既有 Edge 在同键恢复时复用数据库请求，已绑定渠道 ID 则 GET 核对，不重新 POST 创建。
+
 ## 持久 Cart（可选）
 
 Cart 保存购买意向，不保存价格、锁价或占库存。可以为空，每个活跃 Cart 最多 50 条规范化商业行/100 件；同变体/属性合并，已有行 ID 在改数量时保留。停售/价格、库存、优惠资格在预览/转 Quote 时重新核验，不把 Cart 当可支付对象。

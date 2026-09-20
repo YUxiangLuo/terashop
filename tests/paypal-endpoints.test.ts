@@ -9,6 +9,9 @@ import { checked, fixtureOrder, fixtureIntent, paymentFixture, paymentEvent, set
 import { testDatabase } from './database-concurrency';
 import { paymentRequest, withPaymentProviderMock } from './payment-handler-harness';
 import type { PayPalRefund } from '../supabase/functions/_shared/paypal';
+import { AdminBackend } from '../mcp/src/backend';
+import { API, ANON_KEY } from './helpers';
+import { mcpSession, toolData } from './support/mcp';
 
 const database = testDatabase();
 let admin: TestUser;
@@ -32,6 +35,47 @@ const operations = (id: string) => checked<{
   refund_requests: Array<{ id: string; status: string }>;
   provider_money_movements: unknown[];
 }>(rpc('get_payment_operations', { order_id: id }, buyer.token));
+
+test('MCP → 真实退款 handler：响应丢失后同键恢复 GET，不重复退款且不泄露渠道引用', async () => {
+  const order = await fixtureOrder(fixture, buyer);
+  await settleIntent(await fixtureIntent(order, buyer));
+  const args = { order_id: order.id, idempotency_key: crypto.randomUUID(), amount: '1.00' };
+  let loseResponse = true, posts = 0, gets = 0;
+  let refund: PayPalRefund;
+  await withPaymentProviderMock(async request => {
+    const token = oauth(request); if (token) return token;
+    if (request.method === 'POST') {
+      posts++;
+      const body = await request.json();
+      refund = {id:`REFUND${body.custom_id}`,status:'PENDING',amount:body.amount,create_time:new Date().toISOString()};
+      return Response.json(refund);
+    }
+    gets++;
+    return Response.json({...refund!,status:'COMPLETED'});
+  }, async () => {
+    const backend = new AdminBackend({url:API,anonKey:ANON_KEY,accessToken:admin.token}, async (url, init) => {
+      if (url.endsWith('/functions/v1/paypal-create-refund')) {
+        const response = await handlePayPalCreateRefund(new Request(url,init));
+        if (loseResponse) { loseResponse=false; throw new Error('lost response'); }
+        return response;
+      }
+      return fetch(url,init);
+    });
+    const session = await mcpSession(backend,true);
+    try {
+      const lost = await session.client.callTool({name:'refund_paypal',arguments:args});
+      expect(lost.isError).toBe(true);
+      expect(JSON.parse((lost.content as Array<{text:string}>)[0].text).outcome_unknown).toBe(true);
+      expect(posts).toBe(1); expect(gets).toBe(0);
+      expect((await operations(order.id)).refund_requests).toHaveLength(1);
+      const result = await toolData<Record<string,unknown>>(session.client,'refund_paypal',args);
+      expect(result).toMatchObject({order_id:order.id,provider_status:'COMPLETED',pending_reconciliation:false});
+      expect(Object.keys(result).sort()).toEqual(['refund_request_id','order_id','provider','provider_status','pending_reconciliation'].sort());
+      expect((await operations(order.id)).refund_requests).toMatchObject([{status:'succeeded'}]);
+      expect(posts).toBe(1); expect(gets).toBe(1);
+    } finally {await session.close();}
+  });
+});
 
 test('创建 Order 使用数据库金额/地址和配置跳转；重试 GET 不重建，其他客户不能发起渠道请求', async () => {
   const local = await fixtureOrder(fixture, buyer);

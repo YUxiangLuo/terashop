@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { AdminBackend } from '../../mcp/src/backend';
-import { productChanges, uploadProductMedia } from '../../mcp/src/schemas';
+import { productChanges, uploadProductMedia, paypalRefund } from '../../mcp/src/schemas';
 import { mcpSession, toolData } from '../support/mcp';
 
 const config = { url: 'http://127.0.0.1:54321', anonKey: 'public-key', accessToken: 'private-session' };
@@ -18,6 +18,71 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('PayPal 明确范围、JWT 透传及返回白名单；Edge 失败/畸形成功均不可盲目重试', async () => {
+  const args = { order_id: crypto.randomUUID(), idempotency_key: 'retained', amount: '1.20' };
+  const success = {
+    refund_request_id: crypto.randomUUID(),
+    order_id: args.order_id,
+    provider: 'paypal',
+    provider_status: 'PENDING',
+    pending_reconciliation: true,
+  };
+  for (const invalid of [
+    { amount: undefined },
+    { amount: 1.2 },
+    { amount: '0' },
+    { amount: '1.001' },
+    { amount: '1e2' },
+    { amount: '1.20', shipping_amount: '2.00' },
+    { actor_id: user.id },
+    { restock: true },
+  ]) {
+    expect(paypalRefund.safeParse({ ...args, ...invalid }).success).toBe(false);
+  }
+  expect(paypalRefund.safeParse({ ...args, amount: undefined, shipping_amount: '0.01' }).success).toBe(true);
+  for (const [respond, expected] of [
+    [() => Response.json({ ...success, provider_reference: 'SECRET', processing_status: 'SECRET' }), null],
+    [() => Response.json({ code: 'PT409', error: 'SECRET' }, { status: 409 }), 'PT409'],
+    [() => Response.json({ error: 'SECRET' }, { status: 502 }), 'HTTP_502'],
+    [() => Response.json({ ...success, order_id: crypto.randomUUID() }), 'INVALID_BACKEND_RESPONSE'],
+    [() => new Response('SECRET'), 'INVALID_BACKEND_RESPONSE'],
+    [
+      () => {
+        throw new Error('SECRET');
+      },
+      'BACKEND_UNAVAILABLE',
+    ],
+  ] as const) {
+    const { backend, calls } = fakeBackend(respond);
+    const session = await mcpSession(backend, true);
+    try {
+      const result = await session.client.callTool({ name: 'refund_paypal', arguments: args });
+      expect(JSON.stringify(result)).not.toContain('SECRET');
+      if (expected) {
+        expect(result.isError).toBe(true);
+        expect(JSON.parse((result.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: expected,
+          outcome_unknown: true,
+        });
+      } else expect(result.structuredContent).toEqual({ data: success });
+      expect(calls).toHaveLength(3);
+      expect(new URL(calls[2].url).pathname).toBe('/functions/v1/paypal-create-refund');
+      expect(calls[2].headers.get('authorization')).toBe('Bearer private-session');
+      expect(await calls[2].json()).toEqual(args);
+    } finally {
+      await session.close();
+    }
+  }
+  const denied = fakeBackend(() => {
+    throw new Error('must not call Edge');
+  }, false);
+  await expect(denied.backend.refundPayPal(args)).rejects.toMatchObject({
+    code: 'ADMIN_REQUIRED',
+    outcomeUnknown: false,
+  });
+  expect(denied.calls).toHaveLength(2);
+});
+
 test('MCP 默认只读；写工具显式启用，不能调用未注册或 service-only 入口', async () => {
   const { backend, calls } = fakeBackend(() => Response.json(null));
   const readonly = await mcpSession(backend);
@@ -26,7 +91,13 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
     expect(readTools.length).toBe(39);
-    expect(writeTools.length).toBe(89);
+    expect(writeTools.length).toBe(90);
+    expect(writeTools.find((t) => t.name === 'refund_paypal')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    });
     expect(readTools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(writeTools.find((tool) => tool.name === 'adjust_inventory')?.annotations).toMatchObject({
       readOnlyHint: false,

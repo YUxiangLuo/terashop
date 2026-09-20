@@ -1,4 +1,14 @@
 import type { Database, Json } from '../../types/database';
+import * as z from 'zod/v4';
+import { paypalRefund } from './schemas';
+
+const paypalRefundResult = z.object({
+  refund_request_id: z.uuid(),
+  order_id: z.uuid(),
+  provider: z.literal('paypal'),
+  provider_status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'CANCELLED']),
+  pending_reconciliation: z.boolean(),
+});
 
 export type Functions = Database['public']['Functions'];
 
@@ -111,6 +121,22 @@ export class AdminBackend {
     // The target RPC also checks permissions within its own transaction.
     await this.assertAdmin();
     return this.json(`/rest/v1/rpc/${name}`, args, mutation);
+  }
+
+  async refundPayPal(args: z.infer<typeof paypalRefund>): Promise<Json> {
+    await this.assertAdmin();
+    try {
+      const raw = await this.json('/functions/v1/paypal-create-refund', args, true);
+      const parsed = paypalRefundResult.safeParse(raw);
+      if (!parsed.success || parsed.data.order_id.toLowerCase() !== args.order_id.toLowerCase()) {
+        throw new BackendError('INVALID_BACKEND_RESPONSE', true);
+      }
+      // Explicit output whitelist: never forward provider references or raw text.
+      return parsed.data;
+    } catch (error) {
+      // Even a 4xx can follow creation/dispatch of the durable refund request.
+      throw new BackendError(error instanceof BackendError ? error.code : 'BACKEND_UNAVAILABLE', true);
+    }
   }
 
   async uploadProductMedia(args: {

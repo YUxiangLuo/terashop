@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，89 个显式工具（39 个只读、50 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，90 个显式工具（39 个只读、51 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -60,7 +60,7 @@
 | 扩展对象 | `list_admin_metaobject_definitions`、`get_admin_metaobject_definition`、`list_admin_metaobjects`、`get_admin_metaobject`、`create_metaobject_definition`、`update_metaobject_definition`、`create_metaobject`、`update_metaobject`、`delete_metaobject`、`delete_metaobject_definition`；定义默认私有、条目命令默认草稿，版本化编辑/发布/撤回/删除；引用中条目和非空定义不可删，不自动解除引用或级联 |
 | 订单 | `list_admin_orders`、`get_admin_order`、`update_order_admin_note`、`list_admin_order_events`、`get_order_pricing`、`get_order_checkout_quote`、`get_order_ledger`、`get_order_fulfillment_balance`、`cancel_order`、`cancel_zero_value_order_item`；备注按旧值比较后替换，不追踪历史；事件仅安全元数据，不含任意载荷 |
 | 手工资金 | `mark_order_paid`、`refund_order`；仅记账，不调用真实支付渠道 |
-| 渠道资金 | `list_admin_payment_operations`；按订单/类别分页查询脱敏意图、退款请求、资金变动；金额为精确字符串，不返回原始错误或渠道引用，不执行渠道请求 |
+| 渠道资金 | `list_admin_payment_operations` 查询脱敏渠道操作；`refund_paypal` 通过现有 Edge 发起真实退款，要求显式范围与批准、保留原幂等键、不自动重试；服务端决定 sandbox/live，不能用手工退款代替 |
 | 履约 | `create_fulfillment`、`update_fulfillment` |
 | 退货 | `get_order_returns`、`create_return`、`receive_return`、`dispose_return_receipt`、`close_return` |
 | 评价 | `list_admin_reviews`、`get_admin_review`、`moderate_review`、`delete_review`；全部状态查询、版本化审核与删除；作者编辑后重新待审，不代写客户内容 |
@@ -95,7 +95,7 @@
 | 2 | 客户、地址、库存与仓库 | 客户与地址管理、仓库读写/启停/原子默认仓切换、库存流水分页及单变体即时原子调拨已接入；不追踪在途与收货 |
 | 3 | 促销、配送、税 | 三类配置的查询、版本化创建/编辑/启停已接入。促销目标整组替换最多 100 个；配送 countries=[] 为不限国家；税率 0.13 为 13%，停用国家规则可能启用 * 兜底。引用中的配置不强删；不提供复杂税制或承运商服务 |
 | 4 | 扩展内容与评价 | Metafield 定义查询/创建/版本化规则与可见性编辑、六类 owner 值查询及分类/客户/订单/shop 值增删改已接入；Metaobject 定义/条目查询、创建、版本化编辑、公开状态与安全删除已接入；评价列表/详情/版本化审核与删除已接入。暂不提供嵌套 Metaobject 引用或 Metafield 定义删除。商品/变体值写入已有商品聚合命令；公开引用与不可恢复匿名化仍由数据库校验 |
-| 5 | 订单与渠道运营 | 内部备注编辑、订单事件元数据及脱敏支付操作分页已接入；待补真实 PayPal 退款 Edge 调用。旧 `get_payment_operations` 不作为 MCP 工具；手工退款不替代渠道退款 |
+| 5 | 订单与渠道运营 | 内部备注、订单事件、脱敏支付操作及 PayPal 退款 Edge 适配已接入；真实 Sandbox/部署验收待完成。旧 `get_payment_operations` 不作为 MCP 工具；手工退款不替代渠道退款 |
 | 6 | 身份、店铺设置与运营 | 管理员账户列表及角色流程、店铺扩展设置、受控统计/导出、运维诊断。当前无通用 shop settings 表或报表 API，先定义数据库合同；不让 MCP 写 Supabase 项目密钥/Auth 配置 |
 | 7 | HTTP 与生产接入 | Streamable HTTP、受保护资源元数据、OAuth issuer/audience/resource/scope 校验、用户授权撤销、限流/请求预算/日志脱敏、部署测试与客户端兼容验收 |
 
@@ -131,6 +131,7 @@ bun run test:current tests/admin-metaobject-delete.test.ts
 bun run test:current tests/admin-reviews.test.ts
 bun run test:current tests/admin-order-operations.test.ts
 bun run test:current tests/admin-payment-operations.test.ts
+bun run test:current tests/paypal-endpoints.test.ts
 bun run docs:check
 ```
 
