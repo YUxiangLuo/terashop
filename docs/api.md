@@ -583,14 +583,14 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 
 列表返回 `{items,next_cursor}`，按 UUID 升序，页大小 1–100，末页游标 null；所有筛选 AND 组合，type/handle 精确区分大小写，不去空格、不解释通配符。空列表不证明定义存在；没有精确总数或跨请求快照。非法枚举、页大小及缺失定义筛选为 `22023`，非管理员为 `42501`。
 
-`is_public` 仅在条目 active、定义启用且 access=public 时为 true，与当前数据库公开读取规则一致；不表示店面页面已引用该条目，也不是历史公开状态或披露批准。fields/values 原样返回，不递归展开引用、不抓取 URL、不执行文本指令；通过类型校验不等于内容安全。时间戳保留原始字符串。定义与条目写入见下，尚不提供删除工具。
+`is_public` 仅在条目 active、定义启用且 access=public 时为 true，与当前数据库公开读取规则一致；不表示店面页面已引用该条目，也不是历史公开状态或披露批准。fields/values 原样返回，不递归展开引用、不抓取 URL、不执行文本指令；通过类型校验不等于内容安全。时间戳保留原始字符串。定义与条目写入、安全删除见下。
 
 ### 管理员 Metaobject 定义命令与值校验
 
 `create_metaobject_definition(definition_id, changes)` 和 `update_metaobject_definition(definition_id, expected_revision, changes)` 仅 admin/service 可调用；MCP 写工具须显式启用，返回定义 DTO。
 
 - 创建必填 type/name/fields 和调用方保留的 UUID；默认 access=admin、is_active=true。重复 UUID/type 为 `23505`，不是 upsert。type 与名称不可仅为空格；身份字符串不自动规范化。定义 id/type 不可修改，条目 id/definition_id 也不可迁移，底表直写同样受限。
-- 编辑只接受 name/description/fields/access/is_active，省略保留，null 拒绝。fields **整体替换**，不是追加或合并；[] 仅能用于没有已存字段值的定义。changes 最大 256 KiB。定义删除不在本批开放。
+- 编辑只接受 name/description/fields/access/is_active，省略保留，null 拒绝。fields **整体替换**，不是追加或合并；[] 仅能用于没有已存字段值的定义。changes 最大 256 KiB。定义删除使用独立命令且必须没有条目。
 - fields 最多 100 项，每项必填唯一 key/type，可选非空 name、布尔 required（默认 false）、validations（默认 {}）。支持 text/rich_text/number/boolean/date/datetime/url/color/json/list_text/list_number；不支持嵌套 Metaobject 引用。key 区分大小写且不可仅为空格。未知属性或规则拒绝，不默默忽略。
 - validations 支持 number 的数字 min/max（含边界，min ≤ max），以及标量字段的同类型 choices 数组；空 choices 不允许任何已赋值。列表和 JSON 不支持 choices，不提供 regex、长度或列表元素范围规则。URL/color/rich_text 只检查字符串类型，不验证格式或清理 HTML；date/datetime 沿用 PostgreSQL date/timestamptz 转换语义，不承诺 ISO-only，应提交无歧义日期及带时区时间。
 - values 必须是最多 256 KiB 的 JSON 对象，拒绝未声明 key、类型错误或混合类型列表。required 表示 key 必须存在且非 JSON null，**不表示非空字符串/非空列表**，false/0 合法。可选字段可省略；显式 null 仅可用于可选 json 字段。JSON 内容不建立外键或访问权限。
@@ -607,7 +607,16 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 - 编辑仅允许 handle/values/status；id/definition_id 不可变。handle 不可仅为空格，不自动去空格、转小写或生成别名；改名可能影响依赖 handle 的外部链接，不影响 UUID 引用。省略保持，values 整体替换而非合并；values:null 拒绝，对象内 null 按字段规则校验。changes 最大 256 KiB，未知属性拒绝。
 - 用 status=active 发布、status=draft 撤回。实际公开仍取决于当前定义启用且 access=public；编辑已公开条目的值会立即改变公开内容，应先审查并取得批准。撤回也使指向该对象的公开类型化 Metafield 引用不可读，但不删除引用或对象，也不能撤回缓存。定义稍后公开/启用可能暴露当前 active 条目。
 - revision 对每次实际条目表 UPDATE 推进，包括旧直写，调用方不能伪造；空 PATCH/相同最终值不推进。只覆盖条目，定义变更不推进条目版本；须读取当前定义，不能将条目版本当成可见性/规则快照。写入继续使用共享定义锁和完整字段校验，失败连同 handle/发布变更整体回滚。
-- 缺失 `PT404`、旧版本 `PT409`、行锁/定义锁竞争 `55P03`、旧事务快照 `40001`；非法 PATCH 为 `22023`，字段值错误沿用定义校验错误。结果不明先读原 UUID，不自动生成新 UUID 重建；版本冲突后重新确认意图，不自动替换版本。不提供条目删除或定义迁移。
+- 缺失 `PT404`、旧版本 `PT409`、行锁/定义锁竞争 `55P03`、旧事务快照 `40001`；非法 PATCH 为 `22023`，字段值错误沿用定义校验错误。结果不明先读原 UUID，不自动生成新 UUID 重建；版本冲突后重新确认意图，不自动替换版本。条目删除见下，不提供定义迁移。
+
+### 管理员 Metaobject 安全删除
+
+`delete_metaobject(metaobject_id, expected_revision)` 与 `delete_metaobject_definition(definition_id, expected_revision)` 仅 admin/service 可调用；MCP 写工具须显式启用。成功返回 `{id,deleted:true}`，没有撤销或自动清理依赖功能。
+
+- 条目删除只删除目标条目，保留定义与其他条目。任何类型化 Metafield 单引用/列表引用都会阻止删除（`23503`），与引用是否公开、对象是否草稿无关。命令不自动删字段或解除引用；非类型化 JSON、URL 或外部使用不在数据库引用保护范围。
+- 定义删除必须没有任何条目，包括草稿、私有或未被引用的条目，否则 `23503`。命令先取得定义行锁和持久并发保护，再检查是否为空；不会把旧事务快照中的“空”当成当前为空。**不提供 cascade/force 参数**，不改变旧底表直写的级联删除合同。
+- 两者必须携带目标当前 revision；非法参数 `22023`、缺失 `PT404`、陈旧版本 `PT409`。并发修改/新增引用或条目可返回 `55P03`，旧快照可返回 `40001`。引用完整性由真实外键保证，失败整体回滚，不会留下悬空类型化引用或部分删除。
+- 删除前读取并取得明确批准；只需可逆撤回时，优先把条目改为 draft 或停用定义。重复删除返回 `PT404`，不是幂等成功。响应丢失时读取原 UUID 核对，不自动重试删除同 handle/type 的替代记录，不自动更新版本。主动重建必须使用新 UUID，避免旧请求命中重建记录。
 
 ### 范围与扩展字段规则
 

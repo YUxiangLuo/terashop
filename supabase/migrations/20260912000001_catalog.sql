@@ -2870,4 +2870,48 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.delete_metaobject(metaobject_id uuid, expected_revision integer) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_row public.metaobjects;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if metaobject_id is null or expected_revision is null or expected_revision<1 then
+    raise exception using errcode='22023', message='metaobject id and revision required';
+  end if;
+  select * into v_row from public.metaobjects o where o.id=metaobject_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='metaobject not found'; end if;
+  if v_row.revision<>expected_revision then raise exception using errcode='PT409', message='metaobject was modified'; end if;
+  -- The existing trigger fences definition writers; real reference FKs protect
+  -- target lifetime even against concurrent inserts and old snapshots.
+  delete from public.metaobjects o where o.id=metaobject_id;
+  return jsonb_build_object('id',metaobject_id,'deleted',true);
+end;
+$$;
+
+CREATE FUNCTION public.delete_metaobject_definition(definition_id uuid, expected_revision integer) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_row public.metaobject_definitions;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if definition_id is null or expected_revision is null or expected_revision<1 then
+    raise exception using errcode='22023', message='definition id and revision required';
+  end if;
+  select * into v_row from public.metaobject_definitions d where d.id=definition_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='metaobject definition not found'; end if;
+  if v_row.revision<>expected_revision then raise exception using errcode='PT409', message='definition was modified'; end if;
+  -- Acquire the durable fence BEFORE inspecting children: a stale RR snapshot
+  -- must not mistake a newly populated definition for empty and cascade-delete it.
+  perform private.lock_metaobject_definition(definition_id);
+  if exists(select 1 from public.metaobjects o where o.definition_id=delete_metaobject_definition.definition_id) then
+    raise exception using errcode='23503', message='definition still has entries; delete them explicitly first';
+  end if;
+  delete from public.metaobject_definitions d where d.id=definition_id;
+  return jsonb_build_object('id',definition_id,'deleted',true);
+end;
+$$;
+
 commit;

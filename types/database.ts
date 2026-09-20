@@ -1833,6 +1833,14 @@ export type Database = {
         Args: { expected_revision: number; metafield_id: string }
         Returns: Json
       }
+      delete_metaobject: {
+        Args: { expected_revision: number; metaobject_id: string }
+        Returns: Json
+      }
+      delete_metaobject_definition: {
+        Args: { definition_id: string; expected_revision: number }
+        Returns: Json
+      }
       dispose_return_receipt: {
         Args: {
           disposition: string
