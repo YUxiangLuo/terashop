@@ -33,6 +33,7 @@ bun run storefront:dev   # 打开终端显示的前台地址
 ```text
 storefront/             SvelteKit 静态女装站
 admin/                  SvelteKit SPA：登录、商品列表、草稿编辑及图片上传
+mcp/                    Admin MCP：独立 stdio 客户端层，领域覆盖持续补齐
 supabase/migrations/   六个初始化基线文件；开发期可直接修改并重建
 supabase/functions/    支付入口与共享适配代码
 supabase/seed.sql      本地演示数据
@@ -44,6 +45,7 @@ types/database.ts      自动生成的数据库类型，不手改
 
 - [Storefront](storefront/README.md)：运行、静态部署、当前能力与限制。
 - [Admin](admin/README.md)：管理员初始化、SPA 运行与部署、图片上传及权限。
+- [Admin MCP](mcp/README.md)：本地 agent 接入、管理员权限、工具合同与完整覆盖计划。
 - [API 使用参考](docs/api.md)：参数、权限、返回值与调用重试。
 - [架构决策](docs/architecture-decisions.md)：金额、库存、权限、支付与退款不变量及演进边界。
 - [数据库开发](docs/database.md)：基线文件职责、SQL 检查和历史审阅证据。
