@@ -86,7 +86,7 @@ test('card create uses DB money and SCA policy, works without approve URL, and r
         attributes: { verification: { method: 'SCA_WHEN_REQUIRED' } },
         experience_context: { return_url: 'https://shop.example/paypal/return', cancel_url: 'https://shop.example/paypal/cancel' },
       } });
-      expect(request.headers.get('PayPal-Request-Id')).toBe(body.purchase_units[0].custom_id);
+      expect(request.headers.get('PayPal-Request-Id')).toBe(`ord_${body.purchase_units[0].custom_id.replaceAll('-', '')}`);
       stored = { ...body, id: `CARD${order.id.replaceAll('-', '')}`, status: 'CREATED' };
     }
     return Response.json(stored!);
@@ -170,7 +170,7 @@ test('server checks card before capture marker, ignores browser claims, and reco
     const token = oauth(request); if (token) return token;
     if (request.method === 'POST') {
       posts++; captured = true;
-      expect(request.headers.get('PayPal-Request-Id')).toBe(intent.id);
+      expect(request.headers.get('PayPal-Request-Id')).toBe(`cap_${intent.id.replaceAll('-', '')}`);
     }
     return Response.json({ id: reference, intent: 'CAPTURE', status: captured ? 'COMPLETED' : 'APPROVED', payment_source,
       purchase_units: [{ ...unit, ...(captured ? { payments: { captures: [{ id: `CAP${intent.id.replaceAll('-', '')}`,

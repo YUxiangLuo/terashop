@@ -37,7 +37,7 @@ for (const ambiguous of [false, true]) test(`退款发出后取消/替代均被�
     const body = await request.json();
     if (id) expect(body.custom_id).toBe(id);
     id = body.custom_id;
-    expect(request.headers.get('PayPal-Request-Id')).toBe(id);
+    expect(request.headers.get('PayPal-Request-Id')).toBe(`ref_${id.replaceAll('-', '')}`);
     expect((await rpc('cancel_refund_request', {
       refund_request_id: id, actor_id: admin.userId, provider_confirmed: false,
     }, undefined, true)).status).toBe(400);

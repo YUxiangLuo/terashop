@@ -163,23 +163,54 @@ describe('PayPal Edge 安全边界', () => {
       create_time: '2026-08-30T00:00:00Z',
       resource: { id: 'CAPTURE12345' },
     };
+    // Valid JSON with noncanonical whitespace, escapes and numeric lexemes.
+    const raw = JSON.stringify(event, null, 2).replace('"CAPTURE12345"', '"CAPTURE12345", "note": "\\u0041", "n": 1.00e+2');
     let verificationBody: Record<string, unknown> | null = null;
+    const verificationRequests: string[] = [];
     const fetcher: PayPalFetcher = async (input, init) => {
       if (String(input).endsWith('/v1/oauth2/token')) {
         return new Response(JSON.stringify({ access_token: MOCK_ACCESS_TOKEN, expires_in: 3600 }), { status: 200 });
       }
+      verificationRequests.push(String(init?.body));
       verificationBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (verificationRequests.length === 1) return Response.json({}, { status: 401 });
       return new Response(JSON.stringify({ verification_status: 'SUCCESS' }), { status: 200 });
     };
     const parsedHeaders = parsePayPalWebhookHeaders(webhookHeaders(), false);
-    await verifyPayPalWebhook(event, parsedHeaders, 'WEBHOOK-123', { ...config, fetcher });
+    await verifyPayPalWebhook(raw, parsedHeaders, 'WEBHOOK-123', { ...config, fetcher });
+    expect(verificationRequests).toHaveLength(2);
+    expect(verificationRequests[0]).toBe(verificationRequests[1]);
+    expect(verificationRequests[0]).toEndWith(`,"webhook_event":${raw}}`);
     expect(verificationBody).toMatchObject({
       webhook_id: 'WEBHOOK-123',
       transmission_id: 'transmission-123',
-      webhook_event: event,
+      webhook_event: JSON.parse(raw),
     });
     expect(() => parsePayPalWebhookHeaders(webhookHeaders('attacker.example'), false))
       .toThrow('Untrusted PayPal certificate URL');
+  });
+
+  test('官方 PAYMENT.CAPTURE.REFUNDED 样例是 Refund，up 链接才是 Capture', () => {
+    // paypal/paypal-rest-api-specifications: payments_payment_v2.json,
+    // components.callbacks.capture_refunded (official identity/link shape).
+    const result = normalizePayPalEvent({
+      id: 'WH-3UE850097C805102A-18305212AB1299210',
+      event_type: 'PAYMENT.CAPTURE.REFUNDED', resource_type: 'refund',
+      create_time: '2022-10-27T22:34:27.088Z',
+      resource: {
+        id: '3NG36268BJ600681V', status: 'COMPLETED',
+        amount: { value: '5.00', currency_code: 'USD' },
+        links: [
+          { rel: 'self', href: 'https://api-m.paypal.com/v2/payments/refunds/3NG36268BJ600681V' },
+          { rel: 'up', href: 'https://api-m.paypal.com/v2/payments/captures/27C890397M291943E' },
+        ],
+      },
+    });
+    expect(result).toMatchObject({ objectReference: '3NG36268BJ600681V', data: {
+      object_type: 'refund', status: 'completed', amount: '5.00', currency: 'USD',
+      capture_reference: '27C890397M291943E', metadata: { tera_refund_request_id: null },
+    } });
+    expect(result.data).not.toHaveProperty('order_reference');
   });
 
   test('Webhook 归一化不保留 payer/payee/email 等 PII', () => {

@@ -95,7 +95,7 @@ describe('PayPal refund handler contracts', () => {
         posts += 1;
         const body = await request.json();
         refund = refundFixture(body, 'COMPLETED');
-        expect(request.headers.get('PayPal-Request-Id')).toBe(body.custom_id);
+        expect(request.headers.get('PayPal-Request-Id')).toBe(`ref_${body.custom_id.replaceAll('-', '')}`);
         expect(Object.hasOwn(refund, 'custom_id')).toBe(false);
       } else gets += 1;
       return Response.json(refund!);
@@ -219,7 +219,7 @@ describe('PayPal capture dispatch and cancellation', () => {
       if (oauth) return oauth;
       if (request.method === 'POST') {
         captures += 1;
-        expect(request.headers.get('PayPal-Request-Id')).toBe(intent.id);
+        expect(request.headers.get('PayPal-Request-Id')).toBe(`cap_${intent.id.replaceAll('-', '')}`);
         const cancel = await rpc('cancel_order', { order_id: order.id }, buyer.token);
         expect(cancel.status).toBe(400);
         expect(cancel.data).toMatchObject({ message: expect.stringContaining('capture is in progress') });
@@ -261,7 +261,7 @@ describe('PayPal capture dispatch and cancellation', () => {
         status: 200, data: { processing_status: 'captured' },
       });
     });
-    expect(keys).toEqual([intent.id, intent.id]);
+    expect(keys).toEqual(Array(2).fill(`cap_${intent.id.replaceAll('-', '')}`));
   });
 
   test('prepare RPC 限制 service role 和订单归属，并串行化与取消的竞争', async () => {

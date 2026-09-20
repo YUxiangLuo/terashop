@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import type { TransactionSQL } from 'bun';
+import { withRollback } from '../scripts/lib/transactions';
 import { testDatabase, staleAfterCommit as runStale } from './database-concurrency';
 import { api, makeAdmin, rpc, signup, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, fixtureOrder, paymentFixture, type PaymentFixture } from './payment-fixtures';
@@ -19,6 +20,47 @@ async function actor(sql: TransactionSQL, user: TestUser) {
 
 const staleAfterCommit = (run: (sql: TransactionSQL) => Promise<unknown>, commit: () => Promise<unknown>, isolation: 'repeatable read' | 'read committed' = 'repeatable read') =>
   runStale(database, run, commit, isolation);
+
+for (const isolation of ['read committed', 'repeatable read'] as const)
+for (const mode of ['insert', 'update'] as const)
+test(`直接账本写入不能超退：${mode} / ${isolation}`, async () => {
+  const f = await fixture(), buyer = await signup(), order = await fixtureOrder(f, buyer, 1, false);
+  await checked(rpc('mark_order_paid', { order_id: order.id }, admin.token));
+  const id = crypto.randomUUID(), amount = order.total * 0.6;
+  if (mode === 'update') await database`insert into commerce.payment_transactions(id,order_id,provider,kind,status,amount,currency)
+    values (${id}::uuid,${order.id}::uuid,'manual','refund','pending',${amount},${order.currency})`;
+  const result = await staleAfterCommit(async sql => {
+    if (mode === 'update') return sql`update commerce.payment_transactions set status='succeeded' where id=${id}::uuid`;
+    return sql`insert into commerce.payment_transactions(order_id,provider,kind,status,amount,currency)
+      values (${order.id}::uuid,'manual','refund','succeeded',${amount},${order.currency})`;
+  }, () => database`insert into commerce.payment_transactions(order_id,provider,kind,status,amount,currency)
+      values (${order.id}::uuid,'manual','refund','succeeded',${amount},${order.currency})`, isolation);
+  if (isolation === 'repeatable read') expect(result.error).toMatchObject({ errno: '40001' });
+  else expect(result.error?.message).toContain('refund amount exceeds captured amount');
+  const [row] = await database`select sum(amount)::float8 total from commerce.payment_transactions
+    where order_id=${order.id}::uuid and kind='refund' and status='succeeded'`;
+  expect(row.total).toBe(amount);
+});
+
+for (const isolation of ['read committed', 'repeatable read'] as const)
+test(`管理员降级不会清空管理员：${isolation}`, async () => {
+  const first = await signup(), second = await signup();
+  const original = await database`select id from public.profiles where role='admin'`;
+  try {
+    await database`update public.profiles set role='customer' where role='admin'`;
+    await makeAdmin(first.userId); await makeAdmin(second.userId);
+    const result = await staleAfterCommit(async sql => {
+      await actor(sql, second);
+      return sql`select public.set_user_role(${second.userId}::uuid,'customer')`;
+    }, () => checked(rpc('set_user_role', { user_id: first.userId, role: 'customer' }, first.token)), isolation);
+    expect(result.error).toMatchObject(isolation === 'repeatable read'
+      ? { errno: '40001' } : { message: 'cannot demote the last admin' });
+    expect(await database`select id from public.profiles where role='admin'`).toHaveLength(1);
+  } finally {
+    for (const row of original) await database`update public.profiles set role='admin' where id=${row.id}::uuid`;
+    await database`update public.profiles set role='customer' where id in (${first.userId}::uuid,${second.userId}::uuid)`;
+  }
+});
 
 for (const isolation of ['read committed', 'repeatable read'] as const)
 for (const mode of ['change-definition', 'create-definition', 'definition-first'] as const)
@@ -140,5 +182,71 @@ for (const first of ['insert', 'delete'] as const) test(`metafield/商品删除�
   } finally {
     await database`delete from public.metafields where id=${meta}::uuid`;
     await database`delete from public.products where id=${product}::uuid`;
+  }
+});
+
+for (const rules of [{ min: 8 }, { max: 6 }, { choices: [6, 8] }])
+for (const exists of [false, true])
+test(`Metafield 定义拒绝使既有值失效：${JSON.stringify(rules)} / update=${exists}`, async () => {
+  const namespace = crypto.randomUUID();
+  try {
+    if (exists) await database`insert into public.metafield_definitions(owner_type,namespace,key,name,type)
+      values ('shop',${namespace},'n','n','number')`;
+    await database`insert into public.metafields(owner_type,owner_id,namespace,key,type,value)
+      values ('shop',${crypto.randomUUID()}::uuid,${namespace},'n','number','7')`;
+    await expect(withRollback(database, async sql => {
+      if (exists) await sql`update public.metafield_definitions set validations=${JSON.stringify(rules)}::text::jsonb where namespace=${namespace}`;
+      else await sql`insert into public.metafield_definitions(owner_type,namespace,key,name,type,validations)
+        values ('shop',${namespace},'n','n','number',${JSON.stringify(rules)}::text::jsonb)`;
+    })).rejects.toThrow('metafield "n" must be');
+    if (exists) await database`update public.metafield_definitions set validations='{"min":7,"max":7,"choices":[7]}' where namespace=${namespace}`;
+    else await database`insert into public.metafield_definitions(owner_type,namespace,key,name,type,validations)
+      values ('shop',${namespace},'n','n','number','{"min":7,"max":7,"choices":[7]}')`;
+  } finally {
+    await database`delete from public.metafields where namespace=${namespace}`;
+    await database`delete from public.metafield_definitions where namespace=${namespace}`;
+  }
+});
+
+for (const definitionFirst of [false, true]) test(`Metafield validations 变更和旧 RR 值写入互斥：definitionFirst=${definitionFirst}`, async () => {
+  const namespace = crypto.randomUUID();
+  const value = (sql: TransactionSQL | typeof database) => sql`insert into public.metafields(owner_type,owner_id,namespace,key,type,value)
+    values ('shop',${crypto.randomUUID()}::uuid,${namespace},'n','number','7')`;
+  const definition = (sql: TransactionSQL | typeof database) => sql`update public.metafield_definitions set validations='{"max":6}' where namespace=${namespace}`;
+  try {
+    await database`insert into public.metafield_definitions(owner_type,namespace,key,name,type)
+      values ('shop',${namespace},'n','n','number')`;
+    const result = await staleAfterCommit(sql => definitionFirst ? value(sql) : definition(sql),
+      () => definitionFirst ? definition(database) : value(database));
+    expect(result.error).toMatchObject({ errno: '40001' });
+  } finally {
+    await database`delete from public.metafields where namespace=${namespace}`;
+    await database`delete from public.metafield_definitions where namespace=${namespace}`;
+  }
+});
+
+for (const insertFirst of [false, true]) test(`Metaobject 引用与目标删除不能留下悬空引用：insertFirst=${insertFirst}`, async () => {
+  const definition = crypto.randomUUID(), object = crypto.randomUUID(), meta = crypto.randomUUID();
+  const insert = (sql: TransactionSQL | typeof database) => sql`insert into public.metafields(id,owner_type,owner_id,key,type,value)
+    values (${meta}::uuid,'shop',${meta}::uuid,${meta},'metaobject_reference',to_jsonb(${object}::text))`;
+  const remove = (sql: TransactionSQL | typeof database) => sql`delete from public.metaobjects where id=${object}::uuid`;
+  try {
+    await database`insert into public.metaobject_definitions(id,type,name,fields) values (${definition}::uuid,${definition},'refs','[]')`;
+    await database`insert into public.metaobjects(id,definition_id,handle) values (${object}::uuid,${definition}::uuid,'object')`;
+    const result = await staleAfterCommit(sql => insertFirst ? remove(sql) : insert(sql),
+      () => insertFirst ? insert(database) : remove(database));
+    expect(result.error).not.toBeNull();
+    expect(['40001','23503']).toContain(result.error.errno);
+    if (insertFirst) {
+      await expect(withRollback(database, sql => sql`delete from public.metaobject_definitions where id=${definition}::uuid`)).rejects.toMatchObject({ errno: '23503' });
+      await database`update public.metafields set type='list_metaobject_reference',value=jsonb_build_array(${object}::text,${object}::text) where id=${meta}::uuid`;
+      expect(await database`select target_id from private.metafield_metaobject_refs where metafield_id=${meta}::uuid`).toHaveLength(1);
+      await database`update public.metafields set value='[]' where id=${meta}::uuid`;
+      expect(await database`select target_id from private.metafield_metaobject_refs where metafield_id=${meta}::uuid`).toHaveLength(0);
+      await remove(database);
+    }
+  } finally {
+    await database`delete from public.metafields where id=${meta}::uuid`;
+    await database`delete from public.metaobject_definitions where id=${definition}::uuid`;
   }
 });

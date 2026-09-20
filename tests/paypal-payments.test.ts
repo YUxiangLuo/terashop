@@ -2,9 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { stockedProduct } from './support/catalog';
 import { Cleanup } from './support/cleanup';
 import { fixtureOrder, withRefundPolling } from './payment-fixtures';
-import { testDatabase } from './database-concurrency';
+import { staleAfterCommit, testDatabase } from './database-concurrency';
 import {
-  api, TEST_ADDRESS, makeAdmin, rpc, signup, stockOf, type TestUser,
+  api, checked, TEST_ADDRESS, makeAdmin, rpc, signup, stockOf, type TestUser,
 } from './helpers';
 
 interface Fixture {
@@ -300,8 +300,12 @@ describe('PayPal Orders v2 与 Provider Inbox', () => {
   });
 
   test('PayPal reversal 记为外部资金异常并阻止继续退款，不伪造本地退款', async () => {
-    const created = await createPayPalOrder(1);
+    const created = await createPayPalOrder(2);
     const captureReference = await capturePayPal(created);
+    const [pending] = await checked<Array<{ id: string }>>(api('/rest/v1/fulfillments', {
+      service: true, method: 'POST', body: { order_id: created.id, status: 'pending',
+        items: [{ order_item_id: created.itemId, quantity: 1 }] },
+    }));
     const reversed = await paypalEvent({
       eventType: 'PAYMENT.CAPTURE.REVERSED',
       objectReference: captureReference,
@@ -333,6 +337,18 @@ describe('PayPal Orders v2 与 Provider Inbox', () => {
       token: buyer.token,
     });
     expect(order.data).toEqual([{ financial_status: 'paid' }]);
+
+    const balance = await rpc('get_order_fulfillment_balance', { order_id: created.id }, buyer.token);
+    expect(balance.data).toMatchObject({ payment_hold: true, is_fulfillable: false,
+      lines: [expect.objectContaining({ available_quantity: 0 })],
+    });
+    const items = [{ order_item_id: created.itemId, quantity: 1 }];
+    expect((await rpc('create_fulfillment', { order_id: created.id, items, idempotency_key: crypto.randomUUID() }, admin.token)).data)
+      .toMatchObject({ message: 'order has an unresolved payment hold' });
+    expect((await api('/rest/v1/fulfillments', { service: true, method: 'POST', body: { order_id: created.id, items } })).status).toBe(400);
+    expect((await api(`/rest/v1/fulfillments?id=eq.${pending.id}`, {
+      service: true, method: 'PATCH', body: { status: 'shipped' },
+    })).data).toMatchObject({ message: 'order has an unresolved payment hold' });
 
     const stockBeforeEarlyEvents = await stockOf(fixture.sku);
     const outOfOrder = await createPayPalOrder(1);
@@ -376,8 +392,28 @@ describe('PayPal Orders v2 与 Provider Inbox', () => {
   });
 });
 
+for (const isolation of ['read committed', 'repeatable read'] as const)
+test(`reversal 已提交后旧 ${isolation} 履约不能绕过资金暂停`, async () => {
+  const created = await createPayPalOrder(1);
+  const reference = await capturePayPal(created);
+  const result = await staleAfterCommit(database, async tx => {
+    await tx`select set_config('request.jwt.claims',${JSON.stringify({ role: 'authenticated', sub: admin.userId })},true)`;
+    return tx`select public.create_fulfillment(${created.id}::uuid,
+      ${JSON.stringify([{ order_item_id: created.itemId, quantity: 1 }])}::text::jsonb,${crypto.randomUUID()})`;
+  }, async () => {
+    const reversal = await paypalEvent({ eventType: 'PAYMENT.CAPTURE.REVERSED', objectReference: reference,
+      data: { status: 'reversed', amount: decimal(created.intent.amount), currency: 'USD', order_reference: created.orderReference },
+    });
+    expect(reversal.data).toMatchObject({ outcome: 'action_required' });
+  }, isolation);
+  expect(result.error).toMatchObject(isolation === 'repeatable read'
+    ? { errno: '40001' } : { message: 'order has an unresolved payment hold' });
+  expect(await api(`/rest/v1/fulfillments?order_id=eq.${created.id}&select=id`, { token: buyer.token }))
+    .toMatchObject({ status: 200, data: [] });
+});
+
 describe('PayPal 异步退款', () => {
-  test('pending 只预留；API COMPLETED 后落账回补，Capture refunded 信号触发轮询', async () => {
+  test('pending 只预留；API COMPLETED 后落账回补，Refund Webhook 重放不重复回库', async () => {
     const created = await createPayPalOrder(2);
     const captureReference = await capturePayPal(created);
     const stockBeforeRefund = await stockOf(fixture.sku);
@@ -456,18 +492,18 @@ describe('PayPal 异步退款', () => {
 
     const signal = await paypalEvent({
       eventType: 'PAYMENT.CAPTURE.REFUNDED',
-      objectReference: captureReference,
+      objectReference: refundReference,
       data: {
-        status: 'refunded',
-        amount: decimal(created.intent.amount),
-        currency: created.intent.currency,
-        order_reference: created.orderReference,
-        metadata: { tera_payment_intent_id: created.intent.id },
+        object_type: 'refund', status: 'completed',
+        amount: decimal(refund.amount), currency: refund.currency,
+        capture_reference: captureReference,
+        metadata: { tera_refund_request_id: refund.id },
       },
     });
     expect(signal.data).toMatchObject({
-      status: 'processed', outcome: 'refund_reconciliation_requested',
+      status: 'processed', outcome: 'refunded',
     });
+    expect(await stockOf(fixture.sku)).toBe(stockBeforeRefund + 1);
   });
 
   test('PAYMENT.REFUND.FAILED 释放预留，可重新发起退款', async () => {

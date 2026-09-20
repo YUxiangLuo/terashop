@@ -89,6 +89,10 @@ CREATE CONSTRAINT TRIGGER checkout_quotes_require_lines AFTER INSERT ON commerce
 CREATE TRIGGER checkout_quotes_validate BEFORE DELETE OR UPDATE ON commerce.checkout_quotes FOR EACH ROW EXECUTE FUNCTION private.validate_checkout_quote();
 CREATE TRIGGER command_idempotency_immutable BEFORE DELETE OR UPDATE ON commerce.command_idempotency FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER command_idempotency_no_truncate BEFORE TRUNCATE ON commerce.command_idempotency FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
+CREATE TRIGGER zero_value_cancellations_validate BEFORE INSERT ON commerce.zero_value_cancellations FOR EACH ROW EXECUTE FUNCTION private.validate_zero_value_cancellation();
+CREATE TRIGGER zero_value_cancellations_apply AFTER INSERT ON commerce.zero_value_cancellations FOR EACH ROW EXECUTE FUNCTION private.apply_zero_value_cancellation();
+CREATE TRIGGER zero_value_cancellations_immutable BEFORE UPDATE OR DELETE ON commerce.zero_value_cancellations FOR EACH ROW EXECUTE FUNCTION private.protect_audit_row();
+CREATE TRIGGER zero_value_cancellations_no_truncate BEFORE TRUNCATE ON commerce.zero_value_cancellations FOR EACH STATEMENT EXECUTE FUNCTION private.protect_audit_row();
 CREATE TRIGGER fulfillment_lines_immutable BEFORE DELETE OR UPDATE ON commerce.fulfillment_lines FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER fulfillment_lines_no_truncate BEFORE TRUNCATE ON commerce.fulfillment_lines FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER fulfillment_lines_validate BEFORE INSERT ON commerce.fulfillment_lines FOR EACH ROW EXECUTE FUNCTION private.validate_fulfillment_line();
@@ -188,10 +192,11 @@ CREATE TRIGGER fulfillments_updated_at BEFORE UPDATE ON public.fulfillments FOR 
 CREATE TRIGGER inventory_levels_reservation_guard BEFORE DELETE OR UPDATE ON public.inventory_levels FOR EACH ROW EXECUTE FUNCTION private.protect_reserved_inventory();
 CREATE TRIGGER inventory_movements_append_only BEFORE DELETE OR UPDATE ON public.inventory_movements FOR EACH ROW EXECUTE FUNCTION private.protect_audit_row();
 CREATE TRIGGER inventory_movements_no_truncate BEFORE TRUNCATE ON public.inventory_movements FOR EACH STATEMENT EXECUTE FUNCTION private.protect_audit_row();
-CREATE TRIGGER metafield_definitions_existing_values_compatible BEFORE INSERT OR UPDATE OF owner_type, namespace, key, type ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_definition_compatibility();
+CREATE TRIGGER metafield_definitions_existing_values_compatible BEFORE INSERT OR UPDATE OF owner_type, namespace, key, type, validations ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_definition_compatibility();
 CREATE TRIGGER metafield_definitions_updated_at BEFORE UPDATE ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER metafields_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_metafield();
 CREATE TRIGGER metafields_definition_integrity BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_integrity();
+CREATE TRIGGER metafields_reference_integrity AFTER INSERT OR UPDATE OF type, value ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.sync_metafield_metaobject_refs();
 CREATE TRIGGER metafields_updated_at BEFORE UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER metafields_validate BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION public.validate_metafield_value();
 CREATE TRIGGER metaobject_definitions_updated_at BEFORE UPDATE ON public.metaobject_definitions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -607,6 +612,8 @@ REVOKE ALL ON FUNCTION public.create_return(uuid,jsonb,text,text), public.receiv
 GRANT EXECUTE ON FUNCTION public.create_return(uuid,jsonb,text,text), public.receive_return(uuid,uuid,jsonb,text,text),
   public.dispose_return_receipt(uuid,integer,text,text,text), public.close_return(uuid,boolean) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.get_order_returns(uuid) TO authenticated,service_role;
+REVOKE ALL ON FUNCTION public.cancel_zero_value_order_item(uuid,uuid,integer,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.cancel_zero_value_order_item(uuid,uuid,integer,text,text) TO authenticated,service_role;
 
 -- Existing objects also use least privilege; clients cannot TRUNCATE, attach triggers or advance sequences.
 GRANT ALL ON TABLE public.categories, public.locations, public.metafield_definitions, public.metafields, public.metaobject_definitions, public.metaobjects, public.product_categories, public.product_images, public.products, public.product_option_values, public.product_options, public.promotion_targets, public.promotions, public.shipping_methods, public.tax_rates, public.variant_option_values, public.addresses, public.profiles, public.product_reviews, public.discount_redemptions, public.inventory_levels, public.inventory_movements, public.fulfillments, public.order_events, public.order_items, public.order_promotions, public.product_listing, public.orders, public.product_variants TO service_role;

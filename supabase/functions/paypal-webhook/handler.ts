@@ -46,7 +46,7 @@ export async function handlePayPalWebhook(request: Request): Promise<Response> {
     const { livemode } = config;
     const headers = parsePayPalWebhookHeaders(request.headers, livemode);
     await verifyPayPalWebhook(
-      parsed as Record<string, unknown>,
+      raw,
       headers,
       requiredEnv('PAYPAL_WEBHOOK_ID'),
       config,

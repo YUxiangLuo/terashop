@@ -374,10 +374,30 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.assert_metafield_validations(p_type text, p_value jsonb, p_rules jsonb, p_key text) RETURNS void
+    LANGUAGE plpgsql IMMUTABLE SET search_path TO '' AS $$
+begin
+  if p_type = 'number' then
+    if p_rules ? 'min' and (p_value #>> '{}')::numeric < (p_rules ->> 'min')::numeric then
+      raise exception 'metafield "%" must be >= %', p_key, p_rules ->> 'min';
+    end if;
+    if p_rules ? 'max' and (p_value #>> '{}')::numeric > (p_rules ->> 'max')::numeric then
+      raise exception 'metafield "%" must be <= %', p_key, p_rules ->> 'max';
+    end if;
+  end if;
+  if p_rules ? 'choices' and jsonb_typeof(p_value) <> 'array'
+     and not (p_rules -> 'choices' @> p_value) then
+    raise exception 'metafield "%" must be one of %', p_key, p_rules -> 'choices';
+  end if;
+end;
+$$;
+
 CREATE FUNCTION private.enforce_metafield_definition_compatibility() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
+declare
+  v_value jsonb;
 begin
   perform private.lock_metafield_key(new.owner_type,new.namespace,new.key);
   if exists (
@@ -389,6 +409,25 @@ begin
       and m.type <> new.type
   ) then
     raise exception 'metafield definition type % conflicts with existing values', new.type;
+  end if;
+  for v_value in select m.value from public.metafields m
+    where m.owner_type = new.owner_type and m.namespace = new.namespace and m.key = new.key
+  loop
+    perform private.assert_metafield_validations(new.type,v_value,new.validations,new.key);
+  end loop;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.sync_metafield_metaobject_refs() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  delete from private.metafield_metaobject_refs where metafield_id = new.id;
+  if new.type = 'metaobject_reference' then
+    insert into private.metafield_metaobject_refs values (new.id,(new.value #>> '{}')::uuid);
+  elsif new.type = 'list_metaobject_reference' then
+    insert into private.metafield_metaobject_refs
+      select distinct new.id, value::uuid from jsonb_array_elements_text(new.value);
   end if;
   return new;
 end;
@@ -544,6 +583,7 @@ CREATE FUNCTION private.set_user_role(user_id uuid, role text) RETURNS public.pr
 declare
   v_profile public.profiles;
 begin
+  update private.role_management_guard set revision = revision + 1 where singleton;
   if not public.is_admin() then
     raise exception 'admin only';
   end if;
@@ -807,7 +847,7 @@ end;
 $$;
 
 CREATE FUNCTION public.validate_metafield_value() RETURNS trigger
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
 declare
@@ -884,23 +924,7 @@ begin
     and d.namespace = new.namespace
     and d.key = new.key;
 
-  if found then
-    if new.type = 'number' then
-      if v_validations ? 'min'
-         and (new.value #>> '{}')::numeric < (v_validations ->> 'min')::numeric then
-        raise exception 'metafield "%" must be >= %', new.key, v_validations ->> 'min';
-      end if;
-      if v_validations ? 'max'
-         and (new.value #>> '{}')::numeric > (v_validations ->> 'max')::numeric then
-        raise exception 'metafield "%" must be <= %', new.key, v_validations ->> 'max';
-      end if;
-    end if;
-    if v_validations ? 'choices' and jsonb_typeof(new.value) <> 'array' then
-      if not (v_validations -> 'choices' @> new.value) then
-        raise exception 'metafield "%" must be one of %', new.key, v_validations -> 'choices';
-      end if;
-    end if;
-  end if;
+  perform private.assert_metafield_validations(new.type,new.value,v_validations,new.key);
 
   return new;
 end;

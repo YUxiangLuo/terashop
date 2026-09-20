@@ -95,7 +95,7 @@ test('Capture 响应丢失且无 Webhook：Worker 只 GET 恢复资金；重复�
     const token = oauth(request); if (token) return token;
     if (request.method === 'POST') {
       expect(request.url).toEndWith('/capture');
-      expect(request.headers.get('PayPal-Request-Id')).toBe(intent.id);
+      expect(request.headers.get('PayPal-Request-Id')).toBe(`cap_${intent.id.replaceAll('-', '')}`);
       capturePosts++; captured = true;
       throw new Error('provider captured, response lost');
     }

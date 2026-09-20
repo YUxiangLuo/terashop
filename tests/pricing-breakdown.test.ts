@@ -361,7 +361,7 @@ test('PayPal 生产 handler 接收 shipping_amount，发送的是数据库计算
     if (request.url.endsWith('/v1/oauth2/token')) return Response.json({ access_token: 'composition-mock', expires_in: 3600 });
     if (request.method === 'POST') {
       posts++; const body = await request.json(); expect(body.amount).toEqual({ value: '4.52', currency_code: 'USD' });
-      expect(request.headers.get('PayPal-Request-Id')).toBe(body.custom_id);
+      expect(request.headers.get('PayPal-Request-Id')).toBe(`ref_${body.custom_id.replaceAll('-', '')}`);
       refund = { id: `REFUND${body.custom_id.replaceAll('-', '')}`, status: 'COMPLETED', amount: body.amount, custom_id: body.custom_id, create_time: new Date().toISOString() };
     }
     return Response.json(refund!);

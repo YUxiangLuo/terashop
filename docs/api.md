@@ -241,12 +241,17 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 | `get_order_checkout_quote` | `order_id` |
 | `cancel_checkout_quote` | `quote_id`、可选 `reason` |
 | `cancel_order` | `order_id`、可选 `reason`；仅未支付未发货且无捕获保护的订单 |
+| `cancel_zero_value_order_item` | `order_id`、`order_item_id`、正整数 `quantity`、`idempotency_key`、可选 `reason`；已结算订单的零对价未发货行取消 |
 | `get_order_ledger` | `order_id`；安全交易账本 DTO，退款含金额组成 |
 | `get_order_pricing` | `order_id`；客户本人/admin/service 可读的价格、优惠、税与配送快照 |
-| `get_order_fulfillment_balance` | `order_id`；每行订购/履约/取消/退款预留/可履约数量 |
+| `get_order_fulfillment_balance` | `order_id`；每行订购/履约/取消/退款预留/可履约数量，及订单级 `payment_hold` |
 | `update_order_address` | 遗留入口；当前客户订单均有 Quote 快照，拒绝原地改址，须取消后重新结账 |
 
 查询限制订单/Quote 归属，部分接口另允许管理员。所有客户订单自建单起冻结商业快照，不可原地改价或改地址，支付失败也不解除快照保护。
+
+零对价取消允许订单本人/admin/service 调用，只接受 open、已结算订单中 `line_total=0` 且税额为零的商品行；数量不能占用已履约或退款请求预留部分。订单范围内同键同参数返回原取消事实 DTO（`id/order_id/order_item_id/quantity/restocked_quantity/created_at`），异参拒绝；reason 最多 2000 字符。依据原始扣库事实回库，不创建零金额 capture/refund。零总额订单全部商品取消后状态为 cancelled，financial_status 保持 paid；混合履约/取消覆盖全部商品时正常完成。
+
+关联订单的渠道资金存在 `action_required` 时，`payment_hold=true`，可履约数量显示为零；新增履约和 pending → shipped 都被拒绝。暂停由资金对账状态推导，没有面向客户的解除开关。
 
 ## 商业行身份
 

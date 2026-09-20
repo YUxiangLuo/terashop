@@ -249,10 +249,12 @@ begin
   begin
     if v_event.provider = 'paypal'
           and (v_event.event_type like 'PAYMENT.CAPTURE.%'
-               or v_event.event_type = 'paypal.capture.api_result') then
+               or v_event.event_type = 'paypal.capture.api_result')
+          and v_event.event_type <> 'PAYMENT.CAPTURE.REFUNDED' then
       v_result := private.process_paypal_payment_event(v_event);
     elsif v_event.provider = 'paypal'
           and (v_event.event_type like 'PAYMENT.REFUND.%'
+               or v_event.event_type = 'PAYMENT.CAPTURE.REFUNDED'
                or v_event.event_type = 'paypal.refund.api_result') then
       v_result := private.process_paypal_refund_event(v_event);
     else
@@ -307,20 +309,6 @@ declare
   v_movement commerce.provider_money_movements;
   v_error text;
 begin
-  if p_event.event_type = 'PAYMENT.CAPTURE.REFUNDED' then
-    perform private.enqueue_outbox_event(
-      'provider_event', p_event.id, 'paypal.refund_reconciliation_requested',
-      jsonb_build_object(
-        'provider_event_id', p_event.provider_event_id,
-        'capture_reference', p_event.object_reference,
-        'order_reference', v_order_reference
-      ),
-      'paypal-refund-reconcile:' || p_event.provider_event_id
-    );
-    return jsonb_build_object('status', 'processed',
-                              'outcome', 'refund_reconciliation_requested');
-  end if;
-
   v_amount := private.provider_decimal_amount(p_event.data ->> 'amount', v_currency);
   -- Provider bindings, not mutable custom_id metadata, establish ownership.
   -- Early webhooks remain retryable until the API response binds the Order ID.
@@ -549,16 +537,27 @@ begin
     if v_parent.provider_reference is distinct from v_capture_reference then
       v_error := 'PayPal refund capture reference mismatch';
     end if;
+  elsif v_request.id is null and v_capture_reference is not null then
+    -- Only a matched provider fact establishes Capture ownership. Manual ledger
+    -- references are neither verified nor unique, even when provider='paypal'.
+    select t.* into v_parent from commerce.provider_money_movements m
+    join commerce.payment_transactions t on t.id = m.payment_transaction_id
+    where m.provider = 'paypal' and m.kind = 'capture'
+      and m.provider_reference = v_capture_reference and m.reconciliation_status = 'matched';
   end if;
 
   if v_status = 'completed' then
     v_movement := private.record_provider_money_movement(
       p_event, 'refund', v_amount, v_currency,
-      case when v_request.id is null then null else v_request.order_id end,
+      coalesce(v_request.order_id, v_parent.order_id),
       null,
       case when v_request.currency = v_currency then v_request.id else null end
     );
     if v_request.id is null then
+      perform private.require_reconciliation(
+        v_movement.id, 'PayPal refund has no bound local request', v_parent.order_id
+      );
+      -- Remain retryable: a response lost after Refund POST may be bound later.
       return jsonb_build_object('status', 'received', 'outcome', 'unmatched_refund',
                                 'resource_type', 'provider_money_movement',
                                 'resource_id', v_movement.id);
@@ -995,6 +994,14 @@ begin
       raise exception 'matched provider money movement is immutable';
     end if;
   end if;
+  if new.order_id is not null and
+     (new.reconciliation_status='action_required' or (tg_op='UPDATE' and old.reconciliation_status='action_required'))
+     and (tg_op='INSERT' or (new.order_id,new.reconciliation_status) is distinct from (old.order_id,old.reconciliation_status)) then
+    -- Fence fulfillment, including trusted INSERT and old RR snapshots. Child
+    -- writers must not wait backwards for an order held by another settlement.
+    perform 1 from public.orders where id=new.order_id for update nowait;
+    update public.orders set updated_at=now() where id=new.order_id;
+  end if;
   return new;
 end;
 $$;
@@ -1114,7 +1121,8 @@ begin
   join commerce.refund_requests r on r.id = l.refund_request_id
   where l.order_item_id = new.order_item_id
     and r.status in ('requested', 'submitted', 'processing');
-  if v_item.refunded_quantity + v_active_qty + new.quantity > v_item.quantity then
+  if v_item.refunded_quantity + v_active_qty + new.quantity
+     + private.zero_value_cancelled_quantity(v_item.id) > v_item.quantity then
     raise exception 'refund request line exceeds available quantity';
   end if;
   v_expected := private.proportional_refund(v_item.line_total, v_item.quantity, new.quantity,
@@ -1766,6 +1774,11 @@ begin
     where candidate.provider = v_provider
       and candidate.provider_reference is not null
       and candidate.status in ('submitted', 'processing')
+      -- Once observed, local settlement belongs to Inbox's bounded retry budget,
+      -- not repeated GET -> ingest calls from this automatic polling worker.
+      and not exists (select 1 from commerce.provider_money_movements m
+        where m.provider=candidate.provider and m.kind='refund'
+          and m.provider_reference=candidate.provider_reference)
       and (candidate.last_provider_poll_at is null
            or candidate.last_provider_poll_at < clock_timestamp() - interval '5 minutes')
     order by coalesce(candidate.last_provider_poll_at, candidate.created_at),

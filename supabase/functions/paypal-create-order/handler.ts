@@ -78,7 +78,7 @@ export async function handlePayPalCreateOrder(request: Request): Promise<Respons
         )
       : await payPalRequest<PayPalOrder>('/v2/checkout/orders', {
           ...config,
-          idempotencyKey: local.id,
+          idempotencyKey: `ord_${local.id.replaceAll('-', '')}`,
           preferRepresentation: true,
           body: {
             intent: 'CAPTURE',

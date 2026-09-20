@@ -70,6 +70,8 @@
 表启用 RLS，新对象默认不授予客户端权限；已有对象也按表/列列举 SELECT / INSERT / UPDATE / DELETE 授权，anon/authenticated 不得拥有 TRUNCATE / TRIGGER / REFERENCES / MAINTAIN 或序列权限。显式 DTO 选择字段，内部表不是长期 Storefront 合同。`api` / `admin_api` 分层仍是演进目标。
 管理员与客户同属 `authenticated` 角色；订单状态、支付、履约和库存写入必须走受控命令，不能依靠客户端区分管理员。
 
+角色管理命令更新独立 guard 后再验证管理员身份与最后管理员数量；原 advisory lock 不能独自保证旧 RR 快照安全。此保证针对 `set_user_role`，受信初始化的直接 profiles 写入不属于该命令合同。
+
 ## ADR-007：税务范围
 
 当前按两位国家码选择单一有效比例税率，国家规则优先于 wildcard `*`，`include_shipping` 控制运费计税；国家码统一为大写。不内置任何国家的税率，seed 不安装税务规则。
@@ -91,16 +93,16 @@
 
 支付创建/捕获和 Worker RPC 仅授予 service role，浏览器不得持有该凭据。
 客户/管理员 Edge 入口通过 Auth `/user` 验证身份；数据库最终检查归属/管理员。创建/读取意图与 Capture 准备 RPC 接收 `actor_id`（已验证的 Auth UUID），由数据库映射活跃 Customer，不能把客户 UUID 或请求体中的身份当作认证。
-PayPal 通过 OAuth2 调官方 postback API 验证 transmission headers；验签后才能入箱。
+PayPal 通过 OAuth2 调官方 postback API 验证 transmission headers；原始 JSON 作为 `webhook_event` 原样嵌入，不解析后重新序列化；验签后才能入箱。
 库存消费、订单状态、交易、审计和 Outbox 在同一事务提交；同一订单最多一个活跃 PaymentIntent。
-PayPal Capture declined 后终结当前意图并允许新建 Order。客户端 PaymentIntent 幂等键按 `(order_id, provider, idempotency_key)` 隔离；渠道仍使用本地意图 UUID，不直接复用客户提供的键。
+PayPal Capture declined 后终结当前意图并允许新建 Order。客户端 PaymentIntent 幂等键按 `(order_id, provider, idempotency_key)` 隔离；渠道创建 Order / Capture 分别使用 `ord_` / `cap_` 加去连字符的意图 UUID，退款使用 `ref_` 加去连字符的请求 UUID。同操作重试不换键，不同操作不共用键，不直接复用客户提供的键。
 
 Outbox 存储每次领取确定的 `lease_expires_at` 与随机 `lease_token`。重领不能用新调用者的 lease_seconds 缩短旧期限；complete 必须同时匹配 event、worker、token 且未过期。消费者仍须幂等，租约 fencing 不提供外部副作用的 exactly-once。
 
 Outbox 自动重试有界，耗尽后仅允许受信人工重投。重投必须保留事件身份、累计次数和不可变审计；同一耗尽点的幂等重放不能重置后续处理。次数、请求参数与恢复步骤统一见 [Outbox 恢复](../supabase/functions/README.md#outbox-与-inbox-恢复)。
 
 PayPal Capture POST 前必须调用 `prepare_paypal_capture`，按 intent → quote → order 顺序复核归属、金额、订单及预占，并持久化捕获标记。
-普通取消不能穿透该标记，网络错误不清除它；重试先查询渠道，再复用原意图 UUID 作为幂等键。
+普通取消不能穿透该标记，网络错误不清除它；重试先查询渠道，再复用原 Capture 操作键。
 Quote 到期仍可释放预占并取消关联订单，不无限延长 hold；这不意味着未知 Capture 已失败，迟到成功资金只入对账，不复活订单或再次扣库存。
 `mark_order_paid` 不得先取消仍能扣款的线上意图再手工收款；不明 Capture 保留保护，已终结失败的 Capture 才允许新支付尝试。
 
@@ -128,8 +130,10 @@ PayPal 是唯一线上渠道，数据库约束意图、Inbox、渠道资金和�
 Refund API 的 `custom_id` 可缺省，已绑定 ID 和存在的父 Capture 引用必须匹配；金额/币种错配和 Webhook 父引用冲突先保存成功资金，再对账，不能提前回库。
 
 Order ID 是批准对象，Capture ID 才是资金引用；只有 COMPLETED 消费库存，PENDING 等后续事件。
-REVERSED 记录外部退款方向异常、阻止继续退款并触发对账；即使先于 completed 到达，也不消费库存、标记已支付或伪造本地退款。
-pending Refund 由 Worker 查询具体资源，`PAYMENT.CAPTURE.REFUNDED` 仅作聚合唤醒信号；候选用 `SKIP LOCKED` 公平领取并设置最短重查间隔。
+REVERSED 记录外部退款方向异常、阻止继续退款并触发对账；即使先于 completed 到达，也不消费库存、标记已支付或伪造本地退款。关联订单只要存在 action_required 资金事实就暂停履约，包括新增履约及 pending → shipped；暂停状态变化写父订单版本，使旧 RR 快照不能绕过。履约余额 DTO 返回 payment_hold，暂停期间可履约量为零，不篡改已履约事实。
+`PAYMENT.CAPTURE.REFUNDED` 的资源是 Refund：资源 ID 是退款 ID，`links.up` 标识原 Capture；与 API 退款观察共用入账路径。未绑定退款先保存资金事实并告警，仅凭已验证且 matched 的 Capture 资金事实关联订单；手工账本的渠道引用不保证真实或唯一，不用于推导归属。缺少该证据时保留 order_id=null，不凭 `custom_id` 认领请求或猜测数量/税/回库；可信绑定后仍可重试入账。pending Refund 由 Worker 查询具体资源；候选用 `SKIP LOCKED` 公平领取并设置最短重查间隔。
+
+已观察到退款资金事实的请求不再进入自动 GET 轮询；其本地处理由 Inbox 的累计 25 次预算负责，避免轮询重新入箱绕过耗尽上限。受信人工重投仍保留原事件身份与累计次数。
 
 ### 服务端卡认证策略
 
@@ -148,7 +152,7 @@ pending Refund 由 Worker 查询具体资源，`PAYMENT.CAPTURE.REFUNDED` 仅作
 ### 退款与未自动化范围
 
 退款请求先预留金额/数量，渠道成功后才在单事务写成功账本、更新订单；`restock` 仅按原扣减仓释放预留的未发货取消量，已发货退款不回库。failed/cancelled 释放退款预留。
-Refund POST 前必须调用 service-only `prepare_paypal_refund`，重新检查管理员及请求状态并持久化不可清除的发出标记。已发出但未绑定不等于未退款：不明网络结果保留额度，同键重试使用原请求 UUID；取消必须先取得可信渠道终态确认。未绑定的终态请求禁止 POST，已绑定重试仅 GET 已知 Refund。未绑定且发出超过一小时的请求停止 POST 重试并保留预留，必须通过可信渠道查询/绑定后恢复；这是本店保守重试窗口，不假定 PayPal 幂等键无限期有效。
+Refund POST 前必须调用 service-only `prepare_paypal_refund`，重新检查管理员及请求状态并持久化不可清除的发出标记。已发出但未绑定不等于未退款：不明网络结果保留额度，同键重试使用原 Refund 操作键；取消必须先取得可信渠道终态确认。未绑定的终态请求禁止 POST，已绑定重试仅 GET 已知 Refund。未绑定且发出超过一小时的请求停止 POST 重试并保留预留，必须通过可信渠道查询/绑定后恢复；这是本店保守重试窗口，不假定 PayPal 幂等键无限期有效。
 同步 `refund_order` 仅用于手工/测试流程，不能穿透活跃渠道退款请求。
 PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard 人工监控；没有专用账本前不接入自动退款/库存状态机。
 
@@ -223,6 +227,10 @@ Metafield 类型使用封闭 CHECK，未知类型拒绝；任意 JSON 必须显�
 
 定义与值的类型校验共用 `(owner_type,namespace,key)` 事务锁，范围跨同类 owner，而非单个 owner_id。竞争返回 55P03，内部持久 key guard 的真实版本写入让旧 REPEATABLE READ 快照以 40001 失败；调用方重试整笔事务。无定义的值仍允许写入，但并发新增定义也受同一保护；guard 在内容删除后保留，不能因暂时没有定义/值而删除并失去旧快照防护。
 
+新增定义或修改 validations 时，以与值写入相同的 min/max/choices 规则检查全部既有值；不兼容变更整笔拒绝，不静默改写内容。validations 修改同样推进 key guard。
+
+类型化 Metaobject 引用通过私有派生关系表维护真实外键：删除引用值清理关系，被引用目标及其定义禁止删除，先解除引用再删除。列表 JSON 保留顺序和重复项，完整性关系只存不同目标。该关系不扩展读取权限，也不解释任意 json 字段中的 UUID。
+
 shop 继续沿用单店约定。历史 owner 引用实验、性能计数及重建回归见 [归档设计复审](reviews/76cba7b.md)。
 
 ## ADR-020：显式目录读合同与扩展可见性
@@ -279,6 +287,8 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 完整转单校验后若 total=0，客户命令在同一事务消费预占并将 financial_status 设为 paid、填写 paid_at，Quote 变为 completed。无需管理员或支付渠道，不创建 PaymentIntent 或虚构 capture；促销用量、库存、事件和幂等身份只落一次。零价格与全额优惠同样适用，过期/改价报价仍拒绝。
 
+已结算零对价行通过 `cancel_zero_value_order_item` 记录独立、不可改写的取消数量；与履约及退款预留共用余额和父订单锁，按原扣减事实回库，不伪造零金额退款。零总额订单全部取消后 status=cancelled、financial_status=paid；部分发货与取消覆盖全部数量则完成订单。付费订单中的免费行使用相同数量合同，不退付费行、运费或税。
+
 所有客户下单统一使用 Quote，过期统一由 `expire_checkout_quotes` 处理。取消或超时仅释放未付款预占，未知 Capture 与迟到资金遵循 ADR-009。唯一支付账本见 ADR-025；履约 JSON/关系表仍有调用与回归，尚未收敛。
 
 ## ADR-025：唯一支付账本
@@ -286,5 +296,7 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 手工收款、PayPal 捕获、手工退款及渠道退款直接写 `commerce.payment_transactions`；删除 `public.payments`、双写触发器和 `legacy_payment_id` 关联，不保留兼容视图。实收统一使用 `capture`，退款使用 `refund`，金额恒正。零元订单不虚构资金交易。
 
 交易、订单状态、退款明细/金额组件、库存和 Outbox 保持单事务提交；支付交易的金额、币种、父交易、幂等键及已绑定渠道引用不可改写。异步退款直接引用请求中的捕获交易，手工退款沿用原捕获关联规则；异步请求活跃时禁止手工退款或直接插入退款交易穿透预留。
+
+每次账本写入以 NOWAIT 锁定并实际更新父订单版本，再检查捕获/退款总额；直接 INSERT 与 pending → succeeded 都不能使用旧 RR 快照超收或超退。
 
 客户、管理员及 service 通过 `get_order_ledger.transactions` 读取安全 DTO，不暴露账本底表或任意 metadata。删除原 `capture_payment_intent.raw` 参数，不再另存渠道 payload 副本；可信事件的 allowlist 字段与 hash 仍保存在 Inbox，真实外部资金仍由 `provider_money_movements` 独立记录并对账。它们分别代表渠道事件、实际资金和本地入账，不是应合并的重复账本。手工收退款不代表线上渠道发生了资金操作。

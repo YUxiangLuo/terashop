@@ -59,6 +59,12 @@ INSERT INTO private.category_tree_guard DEFAULT VALUES;
 ALTER TABLE private.category_tree_guard ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.category_tree_guard FROM PUBLIC, anon, authenticated, service_role;
 
+-- Role commands need a row-version conflict, not just an advisory lock.
+CREATE TABLE private.role_management_guard (singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), revision bigint NOT NULL DEFAULT 0);
+INSERT INTO private.role_management_guard DEFAULT VALUES;
+ALTER TABLE private.role_management_guard ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.role_management_guard FROM PUBLIC, anon, authenticated, service_role;
+
 -- A key may exist before its optional public definition. Keep a real row
 -- version for both writers so REPEATABLE READ cannot validate stale metadata.
 CREATE TABLE private.metafield_key_guards (
@@ -1703,6 +1709,33 @@ CREATE UNIQUE INDEX promotion_targets_unique ON public.promotion_targets USING b
 CREATE INDEX promotion_targets_variant_idx ON public.promotion_targets USING btree (variant_id);
 CREATE UNIQUE INDEX tax_rates_one_active_country_idx ON public.tax_rates USING btree (country) WHERE is_active;
 CREATE INDEX variant_option_values_value_idx ON public.variant_option_values USING btree (option_value_id);
+
+-- Zero consideration still has a quantity lifecycle; it is not a money refund.
+CREATE TABLE commerce.zero_value_cancellations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id uuid NOT NULL REFERENCES public.orders(id) ON DELETE RESTRICT,
+  order_item_id uuid NOT NULL,
+  quantity integer NOT NULL CHECK (quantity > 0),
+  restocked_quantity integer NOT NULL DEFAULT 0 CHECK (restocked_quantity BETWEEN 0 AND quantity),
+  idempotency_key text NOT NULL CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 200),
+  reason text CHECK (length(reason) <= 2000),
+  actor_id uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (order_id, idempotency_key),
+  FOREIGN KEY (order_item_id, order_id) REFERENCES public.order_items(id, order_id) ON DELETE RESTRICT
+);
+CREATE INDEX zero_value_cancellations_item_idx ON commerce.zero_value_cancellations(order_item_id);
+ALTER TABLE commerce.zero_value_cancellations ENABLE ROW LEVEL SECURITY;
+
+-- JSON remains the ordered content; these derived edges enforce target lifetime.
+CREATE TABLE private.metafield_metaobject_refs (
+  metafield_id uuid NOT NULL REFERENCES public.metafields(id) ON DELETE CASCADE,
+  target_id uuid NOT NULL REFERENCES public.metaobjects(id) ON DELETE RESTRICT,
+  PRIMARY KEY (metafield_id, target_id)
+);
+CREATE INDEX metafield_metaobject_refs_target_idx ON private.metafield_metaobject_refs(target_id);
+ALTER TABLE private.metafield_metaobject_refs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.metafield_metaobject_refs FROM PUBLIC, anon, authenticated, service_role;
 
 ALTER TABLE commerce.order_shipping_lines ENABLE ROW LEVEL SECURITY;
 ALTER TABLE commerce.order_tax_lines ENABLE ROW LEVEL SECURITY;

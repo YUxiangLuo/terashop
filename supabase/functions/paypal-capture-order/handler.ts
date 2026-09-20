@@ -81,7 +81,7 @@ export async function handlePayPalCaptureOrder(request: Request): Promise<Respon
         `/v2/checkout/orders/${encodeURIComponent(local.provider_reference)}/capture`,
         {
           ...config,
-          idempotencyKey: local.id,
+          idempotencyKey: `cap_${local.id.replaceAll('-', '')}`,
           preferRepresentation: true,
           body: {},
         },

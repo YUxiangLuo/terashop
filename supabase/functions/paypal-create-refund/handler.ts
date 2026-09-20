@@ -62,7 +62,7 @@ export async function handlePayPalCreateRefund(request: Request): Promise<Respon
           `/v2/payments/captures/${encodeURIComponent(local.parent_provider_reference)}/refund`,
           {
             ...config,
-            idempotencyKey: local.id,
+            idempotencyKey: `ref_${local.id.replaceAll('-', '')}`,
             preferRepresentation: true,
             body: {
               amount: {

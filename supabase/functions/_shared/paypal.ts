@@ -238,7 +238,7 @@ async function accessToken(config: PayPalClientConfig, forceRefresh = false): Pr
 
 interface PayPalRequestOptions extends PayPalClientConfig {
   method?: 'GET' | 'POST';
-  body?: Record<string, unknown>;
+  body?: Record<string, unknown> | string;
   idempotencyKey?: string;
   preferRepresentation?: boolean;
 }
@@ -269,7 +269,9 @@ export async function payPalRequest<T extends Record<string, unknown>>(
     const response = await fetchPayPal(`${apiBase}${path}`, {
       method,
       headers,
-      body: method === 'POST' ? JSON.stringify(options.body ?? {}) : undefined,
+      body: method === 'POST'
+        ? typeof options.body === 'string' ? options.body : JSON.stringify(options.body ?? {})
+        : undefined,
     }, options);
     const parsed = await responseJson(response);
     if (response.status === 401 && attempt === 0) {
@@ -343,7 +345,7 @@ export function parsePayPalWebhookHeaders(
 }
 
 export async function verifyPayPalWebhook(
-  event: Record<string, unknown>,
+  rawEvent: string,
   headers: PayPalWebhookHeaders,
   webhookId: string,
   config: PayPalClientConfig,
@@ -355,15 +357,16 @@ export async function verifyPayPalWebhook(
     '/v1/notifications/verify-webhook-signature',
     {
       ...config,
-      body: {
+      // The handler validates the JSON object, but verification must preserve
+      // its original representation, including whitespace and numeric lexemes.
+      body: JSON.stringify({
         auth_algo: headers.authAlgo,
         cert_url: headers.certUrl,
         transmission_id: headers.transmissionId,
         transmission_sig: headers.transmissionSig,
         transmission_time: headers.transmissionTime,
         webhook_id: webhookId,
-        webhook_event: event,
-      },
+      }).slice(0, -1) + ',"webhook_event":' + rawEvent + '}',
     },
   );
   if (result.verification_status !== 'SUCCESS') {
@@ -471,7 +474,7 @@ export function normalizePayPalEvent(input: unknown): NormalizedPayPalEvent {
   if (!resource) throw new PayPalIntegrationError('PayPal event resource is invalid', 400, 'invalid_event');
   const reference = typeof resource.id === 'string' ? resource.id : null;
 
-  if (eventType.startsWith('PAYMENT.CAPTURE.')) {
+  if (eventType.startsWith('PAYMENT.CAPTURE.') && eventType !== 'PAYMENT.CAPTURE.REFUNDED') {
     const amount = record(resource.amount);
     if (!reference || !amount) {
       throw new PayPalIntegrationError('PayPal capture event is invalid', 400, 'invalid_event');
@@ -498,7 +501,7 @@ export function normalizePayPalEvent(input: unknown): NormalizedPayPalEvent {
     };
   }
 
-  if (eventType.startsWith('PAYMENT.REFUND.')) {
+  if (eventType === 'PAYMENT.CAPTURE.REFUNDED' || eventType.startsWith('PAYMENT.REFUND.')) {
     const amount = record(resource.amount);
     if (!reference || !amount) {
       throw new PayPalIntegrationError('PayPal refund event is invalid', 400, 'invalid_event');
