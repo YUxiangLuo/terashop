@@ -14,6 +14,21 @@ export const search = z.string().max(200).optional();
 export const reason = z.string().max(2000).optional();
 export const order = z.strictObject({ order_id: id });
 export const createdCursor = z.strictObject({ created_at: z.string().min(1), id }).optional();
+// Bound inline protocol payloads independently of Storage's 5 MiB limit.
+export const uploadProductMedia = z.strictObject({
+  product_id: id,
+  media_id: id,
+  content_type: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+  data_base64: z
+    .string()
+    .min(4)
+    .max(1398104)
+    .refine((value) => {
+      if (value.length > 1398104) return false;
+      const bytes = Buffer.from(value, 'base64');
+      return bytes.length > 0 && bytes.length <= 1048576 && bytes.toString('base64') === value;
+    }, 'Expected canonical base64 for 1 byte to 1 MiB'),
+});
 export const itemQuantities = z
   .array(z.strictObject({ order_item_id: id, quantity: version }))
   .min(1)

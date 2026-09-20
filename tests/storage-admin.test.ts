@@ -1,6 +1,8 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import { API, ANON_KEY, SERVICE_KEY, api, checked, makeAdmin, rpc, signup, type TestUser } from './helpers';
 import { Cleanup } from './support/cleanup';
+import { AdminBackend } from '../mcp/src/backend';
+import { mcpSession, toolData } from './support/mcp';
 
 const cleanup = new Cleanup();
 let admin: TestUser, customer: TestUser;
@@ -38,7 +40,7 @@ async function removeObject(key: string) {
   if (!response.ok) throw new Error(`Storage cleanup failed: ${response.status} ${await response.text()}`);
 }
 
-test('admin saves a draft, uploads an immutable object, publicly downloads it, and saves its URL', async () => {
+test('MCP uploads an immutable public object, rejects overwrite, and attaches through product revision', async () => {
   const productId = crypto.randomUUID(), imageId = crypto.randomUUID();
   const key = `products/${productId}/${imageId}.png`;
   cleanup.defer(() => checked(api(`/rest/v1/products?id=eq.${productId}`, { service: true, method: 'DELETE' })));
@@ -46,12 +48,19 @@ test('admin saves a draft, uploads an immutable object, publicly downloads it, a
     product_id: productId, changes: { product: { slug: productId, name: 'Storage draft' } },
   }, admin.token));
 
-  const upload = await objectRequest('catalog-media', key, admin.token, {
-    method: 'POST', body: png,
-    headers: { 'Content-Type': 'image/png', 'Cache-Control': 'max-age=31536000', 'x-upsert': 'false' },
-  });
-  expect(upload.status).toBe(200);
+  const session = await mcpSession(new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }), true);
+  cleanup.defer(() => session.close());
+  const args = { product_id: productId, media_id: imageId, content_type: 'image/png', data_base64: Buffer.from(png).toString('base64') };
+  const upload = await toolData(session.client, 'upload_product_media', args);
   cleanup.defer(() => removeObject(key));
+  expect(upload).toEqual({ path: key, url: `${API}/storage/v1/object/public/catalog-media/${key}` });
+  expect((await session.client.callTool({ name: 'upload_product_media', arguments: args })).isError).toBe(true);
+  expect((await session.client.callTool({ name: 'upload_product_media', arguments: {
+    ...args, product_id: crypto.randomUUID(),
+  } })).isError).toBe(true);
+  expect(await checked(rpc('get_admin_product', { product_id: productId }, admin.token))).toMatchObject({
+    revision: draft.revision, images: [],
+  });
 
   const publicUrl = `${API}/storage/v1/object/public/catalog-media/${key}`;
   const download = await fetch(publicUrl, { cache: 'no-store' });

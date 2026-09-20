@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { AdminBackend } from '../../mcp/src/backend';
-import { productChanges } from '../../mcp/src/schemas';
+import { productChanges, uploadProductMedia } from '../../mcp/src/schemas';
 import { mcpSession, toolData } from '../support/mcp';
 
 const config = { url: 'http://127.0.0.1:54321', anonKey: 'public-key', accessToken: 'private-session' };
@@ -26,7 +26,7 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
     expect(readTools.length).toBe(16);
-    expect(writeTools.length).toBe(38);
+    expect(writeTools.length).toBe(39);
     expect(readTools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(writeTools.find((tool) => tool.name === 'adjust_inventory')?.annotations).toMatchObject({
       readOnlyHint: false,
@@ -48,6 +48,9 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
     await expect(
       readonly.client.callTool({ name: 'create_customer', arguments: { idempotency_key: 'not-permitted' } }),
     ).rejects.toThrow('not found');
+    await expect(readonly.client.callTool({ name: 'upload_product_media', arguments: {} })).rejects.toThrow(
+      'not found',
+    );
     expect(calls).toHaveLength(0);
   } finally {
     await readonly.close();
@@ -201,5 +204,68 @@ test('拒绝非 TLS 远程端点和带凭据/路径的 URL；拒绝匿名或 ser
     });
     await expect(backend.assertAdmin()).rejects.toThrow('ADMIN_REQUIRED');
     expect(calls).toBe(1);
+  }
+});
+
+test('媒体仅接受有界规范 base64 和固定 MIME，拒绝路径、URL、bucket 注入', () => {
+  const args = {
+    product_id: crypto.randomUUID(),
+    media_id: crypto.randomUUID(),
+    content_type: 'image/png',
+    data_base64: 'AA==',
+  };
+  expect(uploadProductMedia.safeParse(args).success).toBe(true);
+  for (const changes of [
+    { data_base64: '' },
+    { data_base64: 'AB==' },
+    { data_base64: 'AA' },
+    { data_base64: 'AA==\n' },
+    { data_base64: 'data:image/png;base64,AA==' },
+    { content_type: 'image/svg+xml' },
+    { media_id: '../file' },
+    { bucket: 'other' },
+    { url: 'https://example.test/image.png' },
+    { data_base64: Buffer.alloc(1048577).toString('base64') },
+  ])
+    expect(uploadProductMedia.safeParse({ ...args, ...changes }).success).toBe(false);
+  expect(
+    uploadProductMedia.safeParse({ ...args, data_base64: Buffer.alloc(1048576).toString('base64') }).success,
+  ).toBe(true);
+});
+
+test('媒体上传发送原始字节、不覆盖、不泄漏或重试未知结果，权限拒绝不访问 Storage', async () => {
+  const args = {
+    product_id: crypto.randomUUID(),
+    media_id: crypto.randomUUID(),
+    content_type: 'image/png',
+    data_base64: 'AP+A',
+  };
+  for (const denied of [true, false]) {
+    const { backend, calls } = fakeBackend(async (request) => {
+      if (request.url.endsWith('/get_admin_product')) return Response.json({ id: args.product_id });
+      throw new Error('private-session');
+    }, !denied);
+    const session = await mcpSession(backend, true);
+    try {
+      const result = await session.client.callTool({ name: 'upload_product_media', arguments: args });
+      expect(result.isError).toBe(true);
+      const text = JSON.stringify(result);
+      expect(text).not.toContain('private-session');
+      expect(text).toContain(denied ? 'ADMIN_REQUIRED' : 'BACKEND_UNAVAILABLE');
+      const content = result.content as Array<{ text: string }>;
+      expect(JSON.parse(content[0].text).outcome_unknown).toBe(!denied);
+      expect(calls).toHaveLength(denied ? 2 : 4);
+      if (!denied) {
+        const request = calls[3];
+        expect(request.url).toBe(
+          `${config.url}/storage/v1/object/catalog-media/products/${args.product_id}/${args.media_id}.png`,
+        );
+        expect(request.headers.get('x-upsert')).toBe('false');
+        expect(request.headers.get('content-type')).toBe('image/png');
+        expect(new Uint8Array(await request.arrayBuffer())).toEqual(new Uint8Array([0, 255, 128]));
+      }
+    } finally {
+      await session.close();
+    }
   }
 });

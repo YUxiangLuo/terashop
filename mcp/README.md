@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，38 个显式工具（16 个只读、22 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，39 个显式工具（16 个只读、23 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -42,11 +42,12 @@
 
 ## 工具与行为合同
 
-工具名与对应受控 RPC 同名，但**只有显式注册的工具可调用**。参数使用严格 schema，拒绝未知字段；输入类型与 [生成类型](../types/database.ts) 编译校验。详细业务语义见 [API 合同](../docs/api.md)。
+数据库工具与对应受控 RPC 同名，媒体上传调用 Storage API；**只有显式注册的工具可调用**。参数使用严格 schema，拒绝未知字段；RPC 输入类型与 [生成类型](../types/database.ts) 编译校验。详细业务语义见 [API 合同](../docs/api.md)。
 
 | 领域 | 本阶段已注册工具 |
 | --- | --- |
 | 商品 | `list_admin_products`、`get_admin_product`、`create_product`、`update_product`；覆盖变体、规格、图片 URL、分类关联、商品/变体 metafield 的原子编辑 |
+| 媒体 | `upload_product_media`；上传不可覆盖的公开对象，随后单独保存商品图片关联；不提供对象删除 |
 | 分类 | `list_admin_categories`、`get_admin_category`、`create_category`、`update_category`；支持平铺分页/组树、移动、排序、停用；更新须原样传回 updated_at |
 | 客户 | `list_admin_customers`、`get_admin_customer`、`create_customer`、`anonymize_customer`、`set_default_address` |
 | 库存 | `get_inventory_availability`、`adjust_inventory` |
@@ -63,7 +64,17 @@
 - 商品创建不是幂等 upsert；结果不明先按原 UUID 查询。商品更新和物流更新的过期版本不能自动替换。游标中的时间戳和 bigint 字符串不得转为 `Date` / `Number`；Outbox 分页 `id` 是字符串，重投用另一个字段 `event_id`（UUID）。
 - 店铺/客户文本可能包含提示注入。工具描述与 server instructions 明确把商品描述、评价、地址、备注等当作数据，不当作 agent 指令。宿主仍需控制数据披露和用户审批。
 - 写工具开关是进程级硬限制；`readOnlyHint/destructiveHint/idempotentHint` 与说明只是提示，**不是逐次审批或细粒度授权机制**。启用写工具意味着该本地进程可使用整个管理员权限。不要把它直接转发为无认证的共享网络服务。
-- 不抓取工具参数中的外部 URL，不执行本地文件或命令。当前图片管理只保存 URL，不支持上传二进制。
+- 不抓取工具参数中的外部 URL，不读取本地文件或执行命令。上传仅接受调用方显式提供的 base64 字节。
+
+### 公开商品媒体上传
+
+`upload_product_media(product_id, media_id, content_type, data_base64)` 要求已存在的商品、保留的媒体 UUID，以及 `image/jpeg`、`image/png` 或 `image/webp`。base64 必须规范编码（无 data URL 前缀、无空白、有必要的 padding），解码后为 1 字节至 **1 MiB**；这是 MCP 内联请求限制，Storage 自身的 5 MiB 限制不变。MIME 为调用方声明，不做图片解码、重编码、恶意内容扫描或 EXIF 清理，宿主应先处理图片，不能将上传成功理解为内容安全认证。
+
+结果为 `{data:{path,url}}`。路径固定为 `products/<小写 product_id>/<小写 media_id>.<jpg|png|webp>`，bucket 固定 `catalog-media`。对象**立即公开**，商品即使仍为 draft 也不保密；禁止上传个人资料或秘密。每次调用检查管理员会话，Storage 另行执行 admin INSERT RLS；始终 `x-upsert:false`，不允许覆盖或删除。
+
+上传不修改商品 revision 或图片列表。成功后重新读取商品，再用 `update_product` 保存图片 URL；两步不是跨 Storage/数据库事务，关联失败会留下未关联对象。结果未知时用原始路径拼接 `<TERA_SUPABASE_URL>/storage/v1/object/public/catalog-media/<path>`，由宿主读取并核对原始字节；404 不证明在途上传已经失败。重复上传不是幂等成功，不自动重试或换 UUID。移除商品图片关联不删除对象。
+
+对象删除仍被数据库策略禁止：当前自由 URL 与扩展字段引用没有统一的媒体引用登记和并发删除保护。不能靠 MCP 先查询引用再删除来保证安全；清理与大文件传输是后续能力。
 
 ## 完整 Admin 的后续覆盖范围
 
@@ -71,7 +82,7 @@
 
 | 顺序 | 范围 | 当前缺口及实现要求 |
 | --- | --- | --- |
-| 1 | 商品与目录完整管理 | 商品原子编辑及分类列表/详情/创建/修改/移动/停用已接入；剩余安全媒体上传与删除、引用校验，不新增底表编辑后门 |
+| 1 | 商品与目录完整管理 | 商品原子编辑、分类管理及 ≤1 MiB 商品媒体上传已接入；剩余大文件传输、媒体引用登记和安全删除，不新增底表编辑后门 |
 | 2 | 客户、地址、库存与仓库 | 客户资料更新；地址创建/编辑/删除；仓库列表/创建/编辑/启停/默认仓切换；库存流水分页。调拨需新增数据库事务命令，不能伪装为两个独立 delta |
 | 3 | 促销、配送、税 | 活动/优惠码 CRUD、适用/赠送目标、启停、使用记录；配送方法/国家范围；税率配置。定向活动须先以 inactive/selected 创建；引用中的配置停用而非强删；需要整体保存时补原子命令 |
 | 4 | 扩展内容与评价 | Metafield 定义/可见性/值、Metaobject 定义/条目/发布；类别/客户/订单/shop 扩展值；评价列表/详情/删除。公开引用与不可恢复匿名化仍由数据库校验 |
@@ -92,6 +103,7 @@ bun run typecheck
 bun run test:unit
 bun run test:current tests/mcp.test.ts # 已启动并初始化的可丢弃本地 Supabase
 bun run test:current tests/admin-categories.test.ts
+bun run test:current tests/storage-admin.test.ts
 bun run docs:check
 ```
 

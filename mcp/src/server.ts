@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { AdminBackend, BackendError, type Functions } from './backend';
+import type { Json } from '../../types/database';
 import {
   id,
   version,
@@ -13,6 +14,7 @@ import {
   itemQuantities,
   productChanges,
   categoryChanges,
+  uploadProductMedia,
   refund,
 } from './schemas';
 
@@ -28,10 +30,11 @@ const resultSchema = z.strictObject({ data: z.json() });
 export function createAdminServer(backend: AdminBackend, options: { allowWrites?: boolean } = {}) {
   const server = new McpServer({ name: 'tera-admin', version: '0.1.0' }, { instructions });
 
-  function rpc<N extends keyof Functions>(
-    name: N,
+  function tool<A>(
+    name: string,
     description: string,
-    schema: z.ZodType<NoInfer<Functions[N]['Args']>>,
+    schema: z.ZodType<A>,
+    execute: (args: A) => Promise<Json>,
     mutation = false,
     idempotent = false,
   ) {
@@ -51,7 +54,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       },
       async (args) => {
         try {
-          const result = { data: await backend.rpc(name, args, mutation) };
+          const result = { data: await execute(args) };
           return {
             content: [{ type: 'text' as const, text: JSON.stringify(result) }],
             structuredContent: result,
@@ -71,6 +74,24 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       },
     );
   }
+
+  function rpc<N extends keyof Functions>(
+    name: N,
+    description: string,
+    schema: z.ZodType<NoInfer<Functions[N]['Args']>>,
+    mutation = false,
+    idempotent = false,
+  ) {
+    tool(name, description, schema, (args) => backend.rpc(name, args, mutation), mutation, idempotent);
+  }
+
+  tool(
+    'upload_product_media',
+    'Upload PUBLIC immutable JPEG/PNG/WebP bytes (canonical base64, max 1 MiB) for an existing product. Retain media_id and content_type. Never upload private data. No URL fetching or local file access. Does not attach the image: use update_product separately. No overwrite/delete. On uncertain outcome inspect the original public URL and compare bytes before retrying; never silently allocate another ID.',
+    uploadProductMedia,
+    (args) => backend.uploadProductMedia(args),
+    true,
+  );
 
   rpc(
     'list_admin_products',
