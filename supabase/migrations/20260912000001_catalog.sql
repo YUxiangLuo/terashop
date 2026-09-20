@@ -2279,7 +2279,7 @@ $$;
 
 CREATE FUNCTION private.admin_metafield_definition_json(d public.metafield_definitions) RETURNS jsonb
     LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
-  select jsonb_build_object('id',d.id,'owner_type',d.owner_type,'namespace',d.namespace,'key',d.key,
+  select jsonb_build_object('id',d.id,'revision',d.revision,'owner_type',d.owner_type,'namespace',d.namespace,'key',d.key,
     'name',d.name,'type',d.type,'access',d.access,'description',d.description,'validations',d.validations,
     'position',d.position,'created_at',d.created_at,'updated_at',d.updated_at);
 $$;
@@ -2351,6 +2351,98 @@ begin
     case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
   into v_items,v_next from page p;
   return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION private.bump_metafield_definition_revision() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO '' AS $$
+begin
+  if tg_op='INSERT' then new.revision := 1; else new.revision := old.revision+1; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION public.update_metafield_definition(definition_id uuid, expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_old public.metafield_definitions; v_new public.metafield_definitions; v_key text; v_value jsonb; v_kind text;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if definition_id is null or expected_revision is null or expected_revision<1
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid metafield definition patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('name','description','type','access','validations','position')
+      or (v_key in ('name','description','type','access') and jsonb_typeof(v_value)<>'string')
+      or (v_key='validations' and jsonb_typeof(v_value)<>'object')
+      or (v_key='position' and jsonb_typeof(v_value)<>'number') then
+      raise exception using errcode='22023', message='unknown or invalid metafield definition field';
+    end if;
+    if v_key='position' and (v_value#>>'{}')::numeric<>trunc((v_value#>>'{}')::numeric) then
+      raise exception using errcode='22023', message='position must be an integer';
+    end if;
+  end loop;
+  select * into v_old from public.metafield_definitions d where d.id=definition_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='metafield definition not found'; end if;
+  if v_old.revision<>expected_revision then
+    raise exception using errcode='PT409', message='metafield definition was modified';
+  end if;
+  v_new := jsonb_populate_record(v_old,changes);
+  if btrim(v_new.name)='' or jsonb_typeof(v_new.validations)<>'object' then
+    raise exception using errcode='22023', message='name and validation object required';
+  end if;
+  -- Only expose rules the existing validator actually enforces. Lists and JSON
+  -- do not get a pretend choices validator; {} clears the entire rule set.
+  for v_key,v_value in select * from jsonb_each(v_new.validations) loop
+    if v_key in ('min','max') then
+      if v_new.type<>'number' or jsonb_typeof(v_value)<>'number' then
+        raise exception using errcode='22023', message='min/max require numeric bounds on number fields';
+      end if;
+    elsif v_key='choices' then
+      v_kind := case when v_new.type='number' then 'number' when v_new.type='boolean' then 'boolean'
+        when v_new.type in ('text','rich_text','date','datetime','url','color','metaobject_reference') then 'string' end;
+      if v_kind is null or jsonb_typeof(v_value)<>'array' then
+        raise exception using errcode='22023', message='choices require an array on a scalar field';
+      end if;
+      if exists (select 1 from jsonb_array_elements(v_value) e where jsonb_typeof(e.value)<>v_kind) then
+        raise exception using errcode='22023', message='choice types must match the field type';
+      end if;
+    else
+      raise exception using errcode='22023', message='unsupported metafield validation';
+    end if;
+  end loop;
+  if (v_new.validations->>'min')::numeric>(v_new.validations->>'max')::numeric then
+    raise exception using errcode='22023', message='min must not exceed max';
+  end if;
+  if v_new is distinct from v_old then
+    update public.metafield_definitions d set name=v_new.name,description=v_new.description,type=v_new.type,
+      access=v_new.access,validations=v_new.validations,position=v_new.position where d.id=definition_id;
+  end if;
+  return public.get_admin_metafield_definition(definition_id);
+end;
+$$;
+
+CREATE FUNCTION public.create_metafield_definition(definition_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if definition_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or octet_length(changes::text)>262144
+    or jsonb_typeof(changes->'owner_type') is distinct from 'string'
+    or jsonb_typeof(changes->'key') is distinct from 'string'
+    or jsonb_typeof(changes->'name') is distinct from 'string'
+    or jsonb_typeof(changes->'type') is distinct from 'string'
+    or (changes ? 'namespace' and jsonb_typeof(changes->'namespace')<>'string')
+    or btrim(changes->>'key')='' or btrim(coalesce(changes->>'namespace','custom'))='' then
+    raise exception using errcode='22023', message='definition identity, name and type required';
+  end if;
+  insert into public.metafield_definitions(id,owner_type,namespace,key,name,type)
+    values(definition_id,changes->>'owner_type',coalesce(changes->>'namespace','custom'),changes->>'key',changes->>'name',changes->>'type');
+  return public.update_metafield_definition(definition_id,1,changes-'owner_type'-'namespace'-'key');
 end;
 $$;
 

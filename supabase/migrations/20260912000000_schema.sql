@@ -700,6 +700,7 @@ CREATE TABLE public.locations (
 
 CREATE TABLE public.metafield_definitions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     owner_type text NOT NULL,
     namespace text DEFAULT 'custom'::text NOT NULL,
     key text NOT NULL,

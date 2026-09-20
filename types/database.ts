@@ -423,6 +423,7 @@ export type Database = {
           namespace: string
           owner_type: string
           position: number
+          revision: number
           type: string
           updated_at: string
           validations: Json
@@ -437,6 +438,7 @@ export type Database = {
           namespace?: string
           owner_type: string
           position?: number
+          revision?: number
           type: string
           updated_at?: string
           validations?: Json
@@ -451,6 +453,7 @@ export type Database = {
           namespace?: string
           owner_type?: string
           position?: number
+          revision?: number
           type?: string
           updated_at?: string
           validations?: Json
@@ -1718,6 +1721,10 @@ export type Database = {
         Args: { changes: Json; location_id: string }
         Returns: Json
       }
+      create_metafield_definition: {
+        Args: { changes: Json; definition_id: string }
+        Returns: Json
+      }
       create_order: {
         Args: {
           address?: Json
@@ -2277,6 +2284,14 @@ export type Database = {
       }
       update_location: {
         Args: { changes: Json; expected_revision: number; location_id: string }
+        Returns: Json
+      }
+      update_metafield_definition: {
+        Args: {
+          changes: Json
+          definition_id: string
+          expected_revision: number
+        }
         Returns: Json
       }
       update_order_address: {

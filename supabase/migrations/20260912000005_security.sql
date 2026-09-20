@@ -196,6 +196,7 @@ CREATE TRIGGER inventory_movements_no_truncate BEFORE TRUNCATE ON public.invento
 CREATE CONSTRAINT TRIGGER inventory_transfer_balanced AFTER INSERT ON public.inventory_movements
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_inventory_transfer();
 CREATE TRIGGER metafield_definitions_existing_values_compatible BEFORE INSERT OR UPDATE OF owner_type, namespace, key, type, validations ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_definition_compatibility();
+CREATE TRIGGER metafield_definitions_revision BEFORE INSERT OR UPDATE ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION private.bump_metafield_definition_revision();
 CREATE TRIGGER metafield_definitions_updated_at BEFORE UPDATE ON public.metafield_definitions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER metafields_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_metafield();
 CREATE TRIGGER metafields_definition_integrity BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_integrity();
@@ -723,6 +724,11 @@ REVOKE ALL ON FUNCTION private.admin_metafield_definition_json(public.metafield_
 GRANT EXECUTE ON FUNCTION public.get_admin_metafield_definition(uuid),
   public.list_admin_metafield_definitions(integer,uuid,text,text,text),
   public.list_admin_metafields(text,uuid,integer,uuid,text,text) TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION private.bump_metafield_definition_revision(),
+  public.create_metafield_definition(uuid,jsonb), public.update_metafield_definition(uuid,integer,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_metafield_definition(uuid,jsonb),
+  public.update_metafield_definition(uuid,integer,jsonb) TO authenticated,service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

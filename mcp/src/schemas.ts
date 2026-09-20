@@ -99,6 +99,35 @@ const money = z
   .nonnegative()
   .max(Number.MAX_SAFE_INTEGER / 100);
 const position = z.number().int().min(-2147483648).max(2147483647);
+export const metafieldType = z.enum([
+  'text',
+  'rich_text',
+  'number',
+  'boolean',
+  'date',
+  'datetime',
+  'url',
+  'color',
+  'json',
+  'list_text',
+  'list_number',
+  'metaobject_reference',
+  'list_metaobject_reference',
+]);
+export const metafieldDefinitionChanges = z.strictObject({
+  name: z.string().optional(),
+  description: z.string().optional(),
+  type: metafieldType.optional(),
+  access: z.enum(['admin', 'public', 'customer']).optional(),
+  validations: z
+    .strictObject({
+      min: z.number().optional(),
+      max: z.number().optional(),
+      choices: z.array(z.union([z.string(), z.number(), z.boolean()])).optional(),
+    })
+    .optional(),
+  position: position.optional(),
+});
 export const taxFraction = z.number().min(0).max(1);
 export const taxRateChanges = z.strictObject({
   name: z.string().optional(),
