@@ -2110,6 +2110,14 @@ export type Database = {
         }
         Returns: Json
       }
+      list_admin_reconciliation_issues: {
+        Args: {
+          after_cursor?: Json
+          page_size?: number
+          status_filter?: string
+        }
+        Returns: Json
+      }
       list_admin_reviews: {
         Args: {
           after_id?: string

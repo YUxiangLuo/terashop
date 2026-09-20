@@ -787,3 +787,13 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 只允许在当前 exhausted 且累计 attempts 等于 expected_attempt 时开启新 25 次重试窗口。资源不存在或状态／次数不匹配返回 false；相同事件、耗尽次数、操作者及原因的成功重放返回 true，不重置后续 processing/published 状态。不同管理员或原因不能冒充同一次重放；每次调用重新验证权限。此操作只重新入队，不表示消息已成功投递。
 
 `claim_outbox_events`、`complete_outbox_event`、`retry_payment_provider_events` 和 `ingest_payment_provider_event` 仍为 service-only。Inbox 只开放查询，不提供管理员重跑资金记账入口；恢复步骤见 [支付运维](../supabase/functions/README.md#outbox-与-inbox-恢复)。
+
+### 全店待对账资金诊断
+
+`list_admin_reconciliation_issues(page_size=20,status_filter='unmatched',after_cursor?)` 仅 admin/service 可调用，同名 MCP 工具只读。status_filter 只能是 unmatched 或 action_required，分别查询，不能传 null 或 matched。包括尚未关联订单的记录，不依赖 order_id；已有按订单查询的 `list_admin_payment_operations` 保持不变。
+
+按 created_at、id 升序（最早优先），每页 1–100 条，返回 `{items,next_cursor}`；游标为 `{created_at,id}`，原样保留微秒，末页为 null，更换状态需清空游标。权限不足 `42501`，非法页大小/状态/游标结构或无限时间 `22023`；无效时间与 UUID 文本使用 PostgreSQL 类型解析错误。
+
+DTO 仅含 id/provider_event_id/provider/kind/amount/currency/order_id/payment_intent_id/refund_request_id/reconciliation_status/has_error/created_at。不返回 provider_reference、last_error 或事件载荷。amount 保留渠道原始八位小数的字符串，currency 不一定是 USD，不换算、舍入或跨币种合计；这些观察记录不等于已匹配的账本资金。
+
+无跨页快照，后台处理会改变列表；空结果不证明没有遗漏渠道事件或系统健康。发现 action_required 后走受信运维流程，本工具不自动匹配、不重放资金处理，也不代替 Inbox/Outbox 诊断。

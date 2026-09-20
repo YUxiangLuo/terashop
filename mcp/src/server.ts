@@ -918,6 +918,15 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
   );
   rpc(
+    'list_admin_reconciliation_issues',
+    'List global unresolved provider money movements, including those with no order link. Defaults to unmatched; query action_required separately, reset cursor when changing status. Oldest created_at then UUID ascending, preserve full timestamp cursor. Amount is an exact decimal string in its ORIGINAL currency, not necessarily USD; never sum different currencies or treat these observations as settled ledger money. Safe IDs and has_error only, no raw errors or provider references. No automatic retry, matching or money replay. Empty page is not proof that all provider events were received or that the system is healthy; no cross-page snapshot.',
+    z.strictObject({
+      page_size: pageSize,
+      status_filter: z.enum(['unmatched', 'action_required']).optional(),
+      after_cursor: createdCursor,
+    }),
+  );
+  rpc(
     'redrive_outbox_event',
     'Requeue an exhausted Outbox event at its expected attempt. false means missing or state/attempt mismatch. Does not confirm delivery. Actor is derived from current admin; no worker identity input.',
     z.strictObject({

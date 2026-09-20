@@ -2065,4 +2065,45 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.list_admin_reconciliation_issues(page_size integer DEFAULT 20,
+    status_filter text DEFAULT 'unmatched', after_cursor jsonb DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_time timestamptz; v_id uuid; v_items jsonb; v_next jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100
+    or status_filter is null or status_filter not in ('unmatched','action_required') then
+    raise exception using errcode='22023', message='invalid reconciliation filters';
+  end if;
+  if after_cursor is not null then
+    if jsonb_typeof(after_cursor) is distinct from 'object'
+      or jsonb_typeof(after_cursor->'created_at') is distinct from 'string'
+      or jsonb_typeof(after_cursor->'id') is distinct from 'string'
+      or after_cursor-array['created_at','id']<>'{}'::jsonb then
+      raise exception using errcode='22023', message='cursor requires created_at and id';
+    end if;
+    v_time := (after_cursor->>'created_at')::timestamptz;
+    v_id := (after_cursor->>'id')::uuid;
+    if not isfinite(v_time) then raise exception using errcode='22023', message='cursor timestamp must be finite'; end if;
+  end if;
+  with candidates as materialized (
+    select m.* from commerce.provider_money_movements m
+    where m.reconciliation_status<>'matched' and m.reconciliation_status=status_filter
+      and (v_time is null or (m.created_at,m.id)>(v_time,v_id))
+    order by m.created_at,m.id limit page_size+1
+  ), page as materialized (select * from candidates order by created_at,id limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'provider_event_id',p.provider_event_id,
+    'provider',p.provider,'kind',p.kind,'amount',p.amount::text,'currency',p.currency,
+    'order_id',p.order_id,'payment_intent_id',p.payment_intent_id,'refund_request_id',p.refund_request_id,
+    'reconciliation_status',p.reconciliation_status,'has_error',p.last_error is not null,'created_at',p.created_at)
+    order by p.created_at,p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then
+      (select jsonb_build_object('created_at',created_at,'id',id) from page order by created_at desc,id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;
