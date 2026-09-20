@@ -11,6 +11,10 @@ const paypalRefundResult = z.object({
 });
 
 export type Functions = Database['public']['Functions'];
+// Supabase emits Args: never for parameterless RPCs; PostgREST accepts {}.
+export type RpcArgs<N extends keyof Functions> = [Functions[N]['Args']] extends [never]
+  ? Record<string, never>
+  : Functions[N]['Args'];
 
 export class BackendError extends Error {
   constructor(
@@ -112,11 +116,7 @@ export class AdminBackend {
     }
   }
 
-  async rpc<N extends keyof Functions>(
-    name: N,
-    args: Functions[N]['Args'],
-    mutation: boolean,
-  ): Promise<Json> {
+  async rpc<N extends keyof Functions>(name: N, args: RpcArgs<N>, mutation: boolean): Promise<Json> {
     // Recheck on every call, including replay, so role revocation takes effect.
     // The target RPC also checks permissions within its own transaction.
     await this.assertAdmin();

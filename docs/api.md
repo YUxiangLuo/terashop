@@ -456,6 +456,16 @@ POST /rest/v1/rpc/receive_return
 
 客户创建只规范化邮箱首尾空白及空串，不按邮箱合并客户；匿名化后的重放不会恢复或返回旧 PII。库存首次成功绑定实际仓库，之后默认仓变化不改变重放目标；省略仓库与显式指定仓库是不同请求。手工收款重放可返回已退款订单，不再次记账。这三个命令的键格式错误为 `22023`，同键参数冲突为 `PT409`，权限不足为 `42501`，已绑定资源不存在为 `PT404`；其他业务校验仍遵循各命令原有错误合同。
 
+### 单店基础设置
+
+`get_admin_shop_settings()` 和 `update_shop_settings(expected_revision, changes)` 仅 admin/service 可调用，同名 MCP 工具分别只读/写入。设置存储在私有单例表，不开放底表写入，也不与现有 shop metafield 的任意 owner UUID 自动绑定。
+
+DTO 为 `{name,timezone,currency,revision,updated_at}`，初始 name=`Tera`、timezone=`UTC`、revision=1；currency 始终只读 `USD`。changes 只允许 name（1–200 字符、不能全是普通空格）与 timezone（1–100 字符，大小写精确匹配 PostgreSQL `pg_timezone_names`，例如 `Asia/Shanghai`）。保留原文，不自动修剪；null、未知字段、伪造版本、修改币种均拒绝。不接受密钥、Auth 配置、结算政策或任意 JSON 设置。
+
+更新先锁单例并核对正整数 expected_revision，实际改变时 revision 加一并更新 updated_at；空补丁或同值保留二者，旧版本即使目标值相同也拒绝。非法输入 `22023`，无权限 `42501`，版本冲突 `PT409`，锁竞争 `55P03`，旧 REPEATABLE READ 快照可能 `40001`。结果不明先重读，不自动替换版本重试。
+
+这是管理配置存储合同，当前前台尚未消费名称/时区，也没有公开读取接口。时区只用于未来展示/统计，不改变数据库会话时区、订单时间戳、历史交易或促销有效期；不改变 USD 结算约束。
+
 ### 管理员账户身份查询与角色流程
 
 `list_admin_users(page_size=20, after_id?, role_filter?, search?)` 与 `get_admin_user(user_id)` 仅 admin/service 可调用，同名 MCP 工具只读。数据源是应用 profiles，不是 Auth 管理 API；不返回密码、会话、身份提供商 metadata、封禁/验证/登录状态。不能根据 profile 存在、角色或邮箱推断可登录性，邮箱也不是已验证归属的证明。

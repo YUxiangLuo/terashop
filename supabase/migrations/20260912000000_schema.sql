@@ -22,6 +22,18 @@ alter default privileges for role postgres in schema private
 alter default privileges for role postgres in schema commerce
   revoke all on functions from public, anon, authenticated, service_role;
 
+-- Single-shop administrative presentation settings; no credentials or checkout policy.
+CREATE TABLE private.shop_settings (
+  singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
+  name text NOT NULL DEFAULT 'Tera' CHECK (char_length(name) BETWEEN 1 AND 200 AND btrim(name)<>''),
+  timezone text NOT NULL DEFAULT 'UTC',
+  revision integer NOT NULL DEFAULT 1 CHECK (revision>0),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+INSERT INTO private.shop_settings DEFAULT VALUES;
+ALTER TABLE private.shop_settings ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.shop_settings FROM PUBLIC, anon, authenticated, service_role;
+
 -- Constraint helpers
 
 CREATE FUNCTION private.valid_country_codes(p_countries text[]) RETURNS boolean

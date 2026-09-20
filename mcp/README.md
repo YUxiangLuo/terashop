@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，92 个显式工具（41 个只读、51 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，94 个显式工具（42 个只读、52 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -65,6 +65,7 @@
 | 退货 | `get_order_returns`、`create_return`、`receive_return`、`dispose_return_receipt`、`close_return` |
 | 评价 | `list_admin_reviews`、`get_admin_review`、`moderate_review`、`delete_review`；全部状态查询、版本化审核与删除；作者编辑后重新待审，不代写客户内容 |
 | 权限 | `list_admin_users`、`get_admin_user`、`set_user_role`、`anonymize_user`；区分 Auth 用户与商业客户 ID，不返回 Auth 凭据或登录状态，不提供邀请/创建账号 |
+| 店铺 | `get_admin_shop_settings`、`update_shop_settings`；版本化名称/展示时区，USD 只读；当前未接前台展示，不改交易时区或 Auth/项目配置 |
 | 运维 | `list_admin_outbox_events`、`list_admin_payment_provider_events`、`redrive_outbox_event` |
 
 - 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。`outputSchema` 当前约束统一 JSON 信封，不把数据库 DTO 的全部字段伪装成已静态验证的输出类型；后续逐领域收紧。
@@ -96,7 +97,7 @@
 | 3 | 促销、配送、税 | 三类配置的查询、版本化创建/编辑/启停已接入。促销目标整组替换最多 100 个；配送 countries=[] 为不限国家；税率 0.13 为 13%，停用国家规则可能启用 * 兜底。引用中的配置不强删；不提供复杂税制或承运商服务 |
 | 4 | 扩展内容与评价 | Metafield 定义查询/创建/版本化规则与可见性编辑、六类 owner 值查询及分类/客户/订单/shop 值增删改已接入；Metaobject 定义/条目查询、创建、版本化编辑、公开状态与安全删除已接入；评价列表/详情/版本化审核与删除已接入。暂不提供嵌套 Metaobject 引用或 Metafield 定义删除。商品/变体值写入已有商品聚合命令；公开引用与不可恢复匿名化仍由数据库校验 |
 | 5 | 订单与渠道运营 | 内部备注、订单事件、脱敏支付操作及 PayPal 退款 Edge 适配已接入；真实 Sandbox/部署验收待完成。旧 `get_payment_operations` 不作为 MCP 工具；手工退款不替代渠道退款 |
-| 6 | 身份、店铺设置与运营 | 账户身份查询及既有角色/匿名化流程已接入；待补店铺扩展设置、受控统计/导出、运维诊断。当前无通用 shop settings 表或报表 API，先定义数据库合同；不让 MCP 写 Supabase 项目密钥/Auth 配置 |
+| 6 | 身份、店铺设置与运营 | 账户身份查询及既有角色/匿名化流程、单店名称/展示时区版本化设置已接入；待补设置消费端、受控统计/导出、运维诊断。当前无报表 API，先定义数据库合同；不让 MCP 写 Supabase 项目密钥/Auth 配置 |
 | 7 | HTTP 与生产接入 | Streamable HTTP、受保护资源元数据、OAuth issuer/audience/resource/scope 校验、用户授权撤销、限流/请求预算/日志脱敏、部署测试与客户端兼容验收 |
 
 HTTP 必须先解决 **MCP 专用访问令牌 → 当前管理员数据库身份** 的受信映射/令牌交换。普通 Supabase session JWT 不能直接作为 MCP HTTP 的 bearer token；也不能先验证外部 OAuth，再用无用户约束的 service role 代执行。当前没有实现或启用此链路，不开放占位 HTTP endpoint。
@@ -133,6 +134,7 @@ bun run test:current tests/admin-order-operations.test.ts
 bun run test:current tests/admin-payment-operations.test.ts
 bun run test:current tests/paypal-endpoints.test.ts
 bun run test:current tests/admin-users.test.ts
+bun run test:current tests/admin-shop-settings.test.ts
 bun run docs:check
 ```
 

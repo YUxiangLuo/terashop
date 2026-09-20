@@ -778,6 +778,10 @@ GRANT EXECUTE ON FUNCTION public.list_admin_payment_operations(uuid,text,integer
 REVOKE ALL ON FUNCTION public.list_admin_users(integer,uuid,text,text), public.get_admin_user(uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.list_admin_users(integer,uuid,text,text), public.get_admin_user(uuid) TO authenticated,service_role;
 
+REVOKE ALL ON FUNCTION public.get_admin_shop_settings(), public.update_shop_settings(integer,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_admin_shop_settings(), public.update_shop_settings(integer,jsonb)
+  TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;

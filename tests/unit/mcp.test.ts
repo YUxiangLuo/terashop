@@ -90,8 +90,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(41);
-    expect(writeTools.length).toBe(92);
+    expect(readTools.length).toBe(42);
+    expect(writeTools.length).toBe(94);
     expect(writeTools.find((t) => t.name === 'refund_paypal')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
@@ -196,6 +196,9 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
       ['list_admin_metafields', { owner_type_filter: 'customer' }],
       ['list_admin_metaobjects', {}],
       ['list_admin_reviews', { rating_filter: 6 }],
+      ['update_shop_settings', { expected_revision: 1, changes: { currency: 'EUR' } }],
+      ['update_shop_settings', { expected_revision: 1, changes: { name: null } }],
+      ['update_shop_settings', { changes: { name: 'Store' } }],
       ['list_admin_payment_operations', { order_id: id, kind: 'payment_intent', metadata: {} }],
       ['list_admin_payment_operations', { order_id: id, kind: 'provider_events' }],
       ['update_order_admin_note', { order_id: id, changes: { admin_note: 'missing expected' } }],

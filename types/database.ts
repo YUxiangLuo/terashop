@@ -1882,6 +1882,7 @@ export type Database = {
         Args: { shipping_method_id: string }
         Returns: Json
       }
+      get_admin_shop_settings: { Args: never; Returns: Json }
       get_admin_tax_rate: { Args: { tax_rate_id: string }; Returns: Json }
       get_admin_user: { Args: { user_id: string }; Returns: Json }
       get_cart: {
@@ -2442,6 +2443,10 @@ export type Database = {
           expected_revision: number
           shipping_method_id: string
         }
+        Returns: Json
+      }
+      update_shop_settings: {
+        Args: { changes: Json; expected_revision: number }
         Returns: Json
       }
       update_tax_rate: {

@@ -1,6 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
-import { AdminBackend, BackendError, type Functions } from './backend';
+import { AdminBackend, BackendError, type Functions, type RpcArgs } from './backend';
 import type { Json } from '../../types/database';
 import {
   id,
@@ -93,7 +93,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
   function rpc<N extends keyof Functions>(
     name: N,
     description: string,
-    schema: z.ZodType<NoInfer<Functions[N]['Args']>>,
+    schema: z.ZodType<NoInfer<RpcArgs<N>>>,
     mutation = false,
     idempotent = false,
   ) {
@@ -105,6 +105,29 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'Upload PUBLIC immutable JPEG/PNG/WebP bytes (canonical base64, max 1 MiB) for an existing product. Retain media_id and content_type. Never upload private data. No URL fetching or local file access. Does not attach the image: use update_product separately. No overwrite/delete. On uncertain outcome inspect the original public URL and compare bytes before retrying; never silently allocate another ID.',
     uploadProductMedia,
     (args) => backend.uploadProductMedia(args),
+    true,
+  );
+
+  rpc(
+    'get_admin_shop_settings',
+    'Read the single shop presentation settings and revision. Currency is fixed USD. Name and timezone are stored configuration, not currently consumed by storefront rendering. Does not expose credentials, Auth configuration or public shop metafields.',
+    z.strictObject({}),
+  );
+  rpc(
+    'update_shop_settings',
+    'Update single-shop name and presentation timezone after reading its revision. Timezone must exactly match a PostgreSQL timezone name such as Asia/Shanghai or UTC. Does not change checkout currency, stored timestamps, database timezone or existing storefront UI. Unknown/null fields rejected; empty or unchanged patch preserves revision. Never replace a stale expected_revision automatically.',
+    z.strictObject({
+      expected_revision: z.number().int().min(1).max(2147483647),
+      changes: z.strictObject({
+        name: z
+          .string()
+          .min(1)
+          .max(200)
+          .refine((v) => v.replace(/^ +| +$/g, '').length > 0)
+          .optional(),
+        timezone: z.string().min(1).max(100).optional(),
+      }),
+    }),
     true,
   );
 

@@ -3026,4 +3026,49 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.get_admin_shop_settings() RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select jsonb_build_object('name',s.name,'timezone',s.timezone,'currency','USD',
+    'revision',s.revision,'updated_at',s.updated_at) from private.shop_settings s where s.singleton);
+end;
+$$;
+
+CREATE FUNCTION public.update_shop_settings(expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_old private.shop_settings; v_new private.shop_settings; v_key text; v_value jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if expected_revision is null or expected_revision<1 or jsonb_typeof(changes) is distinct from 'object'
+    or octet_length(changes::text)>8192 then
+    raise exception using errcode='22023', message='invalid shop settings patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('name','timezone') or jsonb_typeof(v_value)<>'string' then
+      raise exception using errcode='22023', message='unknown or invalid shop settings field';
+    end if;
+  end loop;
+  select * into strict v_old from private.shop_settings s where s.singleton for no key update nowait;
+  if v_old.revision<>expected_revision then
+    raise exception using errcode='PT409', message='shop settings were modified';
+  end if;
+  v_new := jsonb_populate_record(v_old,changes);
+  if char_length(v_new.name) not between 1 and 200 or btrim(v_new.name)=''
+    or char_length(v_new.timezone) not between 1 and 100
+    or not exists (select 1 from pg_catalog.pg_timezone_names t where t.name=v_new.timezone) then
+    raise exception using errcode='22023', message='invalid shop name or timezone';
+  end if;
+  if v_new is distinct from v_old then
+    update private.shop_settings s set name=v_new.name,timezone=v_new.timezone,
+      revision=s.revision+1,updated_at=clock_timestamp() where s.singleton;
+  end if;
+  return public.get_admin_shop_settings();
+end;
+$$;
+
 commit;
