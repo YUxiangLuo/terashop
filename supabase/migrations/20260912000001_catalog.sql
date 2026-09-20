@@ -1577,4 +1577,81 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.admin_location_json(p_location public.locations) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
+  select jsonb_build_object('id',p_location.id,'code',p_location.code,'name',p_location.name,
+    'address',p_location.address,'is_default',p_location.is_default,'is_active',p_location.is_active,
+    'created_at',p_location.created_at);
+$$;
+
+CREATE FUNCTION public.get_admin_location(location_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.admin_location_json(l) from public.locations l where l.id=location_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_locations(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    active boolean DEFAULT NULL, search text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or length(search)>200 then
+    raise exception using errcode='22023', message='invalid location list filters';
+  end if;
+  with candidates as materialized (
+    select l as location,l.id from public.locations l where (after_id is null or l.id>after_id)
+      and (active is null or l.is_active=active)
+      and (nullif(btrim(search),'') is null or strpos(lower(l.name),lower(btrim(search)))>0
+        or strpos(lower(l.code),lower(btrim(search)))>0)
+    order by l.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(private.admin_location_json(p.location) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_inventory_movements(page_size integer DEFAULT 20, after_id text DEFAULT NULL,
+    variant_id uuid DEFAULT NULL, location_id uuid DEFAULT NULL, order_id uuid DEFAULT NULL,
+    reason_filter text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next text; v_after bigint;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100
+    or (after_id is not null and (length(after_id)>19 or after_id !~ '^[1-9][0-9]*$'))
+    or (reason_filter is not null and reason_filter not in ('order','cancel','restock','adjust','return')) then
+    raise exception using errcode='22023', message='invalid inventory movement filters';
+  end if;
+  begin v_after := after_id::bigint;
+  exception when numeric_value_out_of_range then
+    raise exception using errcode='22023', message='invalid inventory movement cursor';
+  end;
+  with candidates as materialized (
+    select m.* from public.inventory_movements m where (v_after is null or m.id<v_after)
+      and (list_admin_inventory_movements.variant_id is null or m.variant_id=list_admin_inventory_movements.variant_id)
+      and (list_admin_inventory_movements.location_id is null or m.location_id=list_admin_inventory_movements.location_id)
+      and (list_admin_inventory_movements.order_id is null or m.order_id=list_admin_inventory_movements.order_id)
+      and (reason_filter is null or m.reason=reason_filter)
+    order by m.id desc limit page_size+1
+  ), page as materialized (select * from candidates order by id desc limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id::text,'variant_id',p.variant_id,
+    'location_id',p.location_id,'delta',p.delta,'on_hand_after',p.on_hand_after,'reason',p.reason,
+    'order_id',p.order_id,'actor_id',p.actor_id,'note',p.note,'created_at',p.created_at) order by p.id desc),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id::text from page order by id limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;

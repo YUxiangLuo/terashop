@@ -666,6 +666,12 @@ GRANT EXECUTE ON FUNCTION public.update_customer(uuid,timestamptz,jsonb),
   public.create_customer_address(uuid,uuid,jsonb), public.update_customer_address(uuid,uuid,timestamptz,jsonb),
   public.delete_customer_address(uuid,uuid,timestamptz) TO authenticated,service_role;
 
+REVOKE ALL ON FUNCTION private.admin_location_json(public.locations) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.get_admin_location(uuid), public.list_admin_locations(integer,uuid,boolean,text),
+  public.list_admin_inventory_movements(integer,text,uuid,uuid,uuid,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_admin_location(uuid), public.list_admin_locations(integer,uuid,boolean,text),
+  public.list_admin_inventory_movements(integer,text,uuid,uuid,uuid,text) TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;

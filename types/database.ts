@@ -1786,6 +1786,7 @@ export type Database = {
       }
       get_admin_category: { Args: { category_id: string }; Returns: Json }
       get_admin_customer: { Args: { customer_id: string }; Returns: Json }
+      get_admin_location: { Args: { location_id: string }; Returns: Json }
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
       get_cart: {
@@ -1842,6 +1843,26 @@ export type Database = {
         Args: {
           after_cursor?: Json
           anonymized?: boolean
+          page_size?: number
+          search?: string
+        }
+        Returns: Json
+      }
+      list_admin_inventory_movements: {
+        Args: {
+          after_id?: string
+          location_id?: string
+          order_id?: string
+          page_size?: number
+          reason_filter?: string
+          variant_id?: string
+        }
+        Returns: Json
+      }
+      list_admin_locations: {
+        Args: {
+          active?: boolean
+          after_id?: string
           page_size?: number
           search?: string
         }

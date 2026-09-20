@@ -421,6 +421,18 @@ POST /rest/v1/rpc/receive_return
 
 客户创建只规范化邮箱首尾空白及空串，不按邮箱合并客户；匿名化后的重放不会恢复或返回旧 PII。库存首次成功绑定实际仓库，之后默认仓变化不改变重放目标；省略仓库与显式指定仓库是不同请求。手工收款重放可返回已退款订单，不再次记账。这三个命令的键格式错误为 `22023`，同键参数冲突为 `PT409`，权限不足为 `42501`，已绑定资源不存在为 `PT404`；其他业务校验仍遵循各命令原有错误合同。
 
+### 管理员仓库与库存流水查询
+
+以下只读 RPC 仅 admin/service 可用，同时作为同名 MCP 工具。普通客户即使能读取部分仓库底表，也不能调用这组管理员入口。
+
+- `get_admin_location(location_id)`：不存在返回 null，包含停用仓库。DTO 为 `id/code/name/address/is_default/is_active/created_at`，不返回库存。address 为既有 JSON 值，不保证特定地址格式；仓库没有编辑版本字段，created_at 不能用作编辑令牌。
+- `list_admin_locations(page_size=20, after_id=null, active=null, search=null)`：UUID 升序分页，返回 `{items,next_cursor}`；active 省略包含启用与停用，search 按名称/code 不区分大小写的字面子串搜索，去除首尾普通空格，最多 200 字符，`%/_` 不作通配符。is_default 与 is_active 分开表达；默认仓必须同时启用才用于新结账。
+- `list_admin_inventory_movements(page_size=20, after_id=null, variant_id=null, location_id=null, order_id=null, reason_filter=null)`：按流水 bigint ID 倒序返回 `{items,next_cursor}`，筛选按 AND 组合；reason_filter 为 `order/cancel/restock/adjust/return`。每行显式返回 `id/variant_id/location_id/delta/on_hand_after/reason/order_id/actor_id/note/created_at`。actor_id 是可为 null 的 Auth ID，不是客户 ID；note 是不可信商家文本。
+
+两种列表 page_size 为 1–100，末页 next_cursor 为 null，修改筛选应清除游标。流水 id、next_cursor 和 after_id **均为十进制字符串**，不能转 Number；after_id 范围 1–9223372036854775807，不接受符号、空白或前导零。非法分页/筛选为 `22023`。列表不保证跨请求快照；流水 ID 是分配顺序，不是提交顺序，迟提交行可能被翻页跳过，不能用作可靠消费队列。
+
+`on_hand_after` 是该流水记录的历史实物库存，不代表当前可用量；预占及释放未必产生实物流水。当前精确库存与预占仍查 `get_inventory_availability`，不能只加总一页流水。本阶段不提供仓库写入、默认仓切换、库存调拨或流水修改工具。
+
 ## 促销范围与扩展字段管理
 
 商品百分比及买赠的 `promotions.apply_scope` 为 `all`（默认）或 `selected`；买赠的 `get_scope` 为 `same_as_apply`（默认）或 `selected`。定向活动应以 selected 或 inactive 创建，再配置目标，避免先公开全店优惠。INSERT `promotion_targets` 自动将对应范围收窄为 selected，删除最后一条仍匹配零商品；扩大范围须先删除对应目标，再显式 PATCH scope。规则、范围与目标一起进入交易快照。整单百分比/固定金额与免邮仍按原有整单语义执行，不借此改变算法或增加条件 DSL。
