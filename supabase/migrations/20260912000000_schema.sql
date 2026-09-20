@@ -429,6 +429,7 @@ CREATE TABLE public.inventory_levels (
 
 CREATE TABLE public.product_reviews (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     product_id uuid NOT NULL,
     customer_id uuid DEFAULT public.current_customer_id() NOT NULL,
     rating integer NOT NULL,

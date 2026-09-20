@@ -1080,6 +1080,7 @@ export type Database = {
           id: string
           product_id: string
           rating: number
+          revision: number
           status: string
           title: string
           updated_at: string
@@ -1091,6 +1092,7 @@ export type Database = {
           id?: string
           product_id: string
           rating: number
+          revision?: number
           status?: string
           title?: string
           updated_at?: string
@@ -1102,6 +1104,7 @@ export type Database = {
           id?: string
           product_id?: string
           rating?: number
+          revision?: number
           status?: string
           title?: string
           updated_at?: string
@@ -1841,6 +1844,10 @@ export type Database = {
         Args: { definition_id: string; expected_revision: number }
         Returns: Json
       }
+      delete_review: {
+        Args: { expected_revision: number; review_id: string }
+        Returns: Json
+      }
       dispose_return_receipt: {
         Args: {
           disposition: string
@@ -1870,6 +1877,7 @@ export type Database = {
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
       get_admin_promotion: { Args: { promotion_id: string }; Returns: Json }
+      get_admin_review: { Args: { review_id: string }; Returns: Json }
       get_admin_shipping_method: {
         Args: { shipping_method_id: string }
         Returns: Json
@@ -2065,6 +2073,17 @@ export type Database = {
         }
         Returns: Json
       }
+      list_admin_reviews: {
+        Args: {
+          after_id?: string
+          customer_id_filter?: string
+          page_size?: number
+          product_id_filter?: string
+          rating_filter?: number
+          status_filter?: string
+        }
+        Returns: Json
+      }
       list_admin_shipping_methods: {
         Args: {
           active?: boolean
@@ -2153,7 +2172,7 @@ export type Database = {
         }
       }
       moderate_review: {
-        Args: { review_id: string; status: string }
+        Args: { expected_revision?: number; review_id: string; status: string }
         Returns: {
           body: string
           created_at: string
@@ -2161,6 +2180,7 @@ export type Database = {
           id: string
           product_id: string
           rating: number
+          revision: number
           status: string
           title: string
           updated_at: string

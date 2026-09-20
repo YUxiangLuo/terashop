@@ -258,6 +258,7 @@ CREATE CONSTRAINT TRIGGER variant_option_values_catalog_check AFTER INSERT OR UP
 CREATE TRIGGER product_images_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.product_images FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
 CREATE CONSTRAINT TRIGGER product_images_catalog_check AFTER INSERT OR UPDATE OR DELETE ON public.product_images DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
 CREATE TRIGGER product_reviews_remoderate BEFORE UPDATE ON public.product_reviews FOR EACH ROW EXECUTE FUNCTION public.review_edit_requires_moderation();
+CREATE TRIGGER product_reviews_revision BEFORE INSERT OR UPDATE ON public.product_reviews FOR EACH ROW EXECUTE FUNCTION private.bump_review_revision();
 CREATE TRIGGER product_reviews_updated_at BEFORE UPDATE ON public.product_reviews FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER product_variants_updated_at BEFORE UPDATE ON public.product_variants FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER products_updated_at BEFORE UPDATE ON public.products FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -531,7 +532,7 @@ REVOKE ALL ON FUNCTION public.ingest_payment_provider_event(provider text, provi
 REVOKE ALL ON FUNCTION public.list_pending_paypal_captures(max_requests integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.list_pending_provider_refunds(provider text, max_requests integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.mark_order_paid(order_id uuid, idempotency_key text, provider text, provider_ref text) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.moderate_review(review_id uuid, status text) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.moderate_review(review_id uuid, status text, expected_revision integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.normalize_promotion_code() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.prepare_paypal_refund(refund_request_id uuid, actor_id uuid) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.prepare_paypal_capture(payment_intent_id uuid, actor_id uuid) FROM PUBLIC;
@@ -602,7 +603,7 @@ GRANT ALL ON FUNCTION public.is_admin() TO anon, authenticated, service_role;
 GRANT ALL ON FUNCTION public.list_pending_paypal_captures(max_requests integer) TO service_role;
 GRANT ALL ON FUNCTION public.list_pending_provider_refunds(provider text, max_requests integer) TO service_role;
 GRANT ALL ON FUNCTION public.mark_order_paid(order_id uuid, idempotency_key text, provider text, provider_ref text) TO service_role, authenticated;
-GRANT ALL ON FUNCTION public.moderate_review(review_id uuid, status text) TO service_role, authenticated;
+GRANT ALL ON FUNCTION public.moderate_review(review_id uuid, status text, expected_revision integer) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.normalize_promotion_code() TO service_role;
 GRANT EXECUTE ON FUNCTION public.prepare_paypal_refund(refund_request_id uuid, actor_id uuid) TO service_role;
 GRANT ALL ON FUNCTION public.prepare_paypal_capture(payment_intent_id uuid, actor_id uuid) TO service_role;
@@ -760,6 +761,11 @@ GRANT EXECUTE ON FUNCTION public.create_metaobject(uuid,jsonb), public.update_me
 REVOKE ALL ON FUNCTION public.delete_metaobject(uuid,integer), public.delete_metaobject_definition(uuid,integer) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.delete_metaobject(uuid,integer), public.delete_metaobject_definition(uuid,integer)
   TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION private.bump_review_revision(), public.list_admin_reviews(integer,uuid,uuid,uuid,text,integer),
+  public.get_admin_review(uuid), public.delete_review(uuid,integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.list_admin_reviews(integer,uuid,uuid,uuid,text,integer),
+  public.get_admin_review(uuid), public.delete_review(uuid,integer) TO authenticated,service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

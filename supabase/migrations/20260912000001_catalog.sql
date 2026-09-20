@@ -803,7 +803,7 @@ CREATE FUNCTION public.is_admin() RETURNS boolean
   );
 $$;
 
-CREATE FUNCTION public.moderate_review(review_id uuid, status text) RETURNS public.product_reviews
+CREATE FUNCTION public.moderate_review(review_id uuid, status text, expected_revision integer DEFAULT NULL) RETURNS public.product_reviews
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -811,20 +811,22 @@ declare
   v_review public.product_reviews;
 begin
   if not public.is_admin() then
-    raise exception 'admin only';
+    raise exception using errcode='42501', message='admin only';
   end if;
-  if status not in ('pending', 'approved', 'rejected') then
-    raise exception 'invalid status';
+  if review_id is null or status is null or status not in ('pending', 'approved', 'rejected')
+    or expected_revision<1 then
+    raise exception using errcode='22023', message='invalid review, status or revision';
   end if;
-
+  select * into v_review from public.product_reviews r where r.id=review_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='review not found'; end if;
+  if expected_revision is not null and v_review.revision<>expected_revision then
+    raise exception using errcode='PT409', message='review was modified';
+  end if;
+  if v_review.status=status then return v_review; end if;
   update public.product_reviews r
   set status = moderate_review.status
   where r.id = moderate_review.review_id
   returning * into v_review;
-
-  if not found then
-    raise exception 'review not found';
-  end if;
   return v_review;
 end;
 $$;
@@ -2911,6 +2913,76 @@ begin
   end if;
   delete from public.metaobject_definitions d where d.id=definition_id;
   return jsonb_build_object('id',definition_id,'deleted',true);
+end;
+$$;
+
+CREATE FUNCTION private.bump_review_revision() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO '' AS $$
+begin
+  if tg_op='INSERT' then new.revision:=1; else new.revision:=old.revision+1; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_reviews(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    product_id_filter uuid DEFAULT NULL, customer_id_filter uuid DEFAULT NULL,
+    status_filter text DEFAULT NULL, rating_filter integer DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100
+    or (status_filter is not null and status_filter not in ('pending','approved','rejected'))
+    or (rating_filter is not null and rating_filter not between 1 and 5) then
+    raise exception using errcode='22023', message='invalid review filters';
+  end if;
+  with candidates as materialized (
+    select r.id,r.revision,r.product_id,r.customer_id,r.rating,r.title,r.status,r.created_at,r.updated_at
+    from public.product_reviews r
+    where (after_id is null or r.id>after_id)
+      and (product_id_filter is null or r.product_id=product_id_filter)
+      and (customer_id_filter is null or r.customer_id=customer_id_filter)
+      and (status_filter is null or r.status=status_filter)
+      and (rating_filter is null or r.rating=rating_filter)
+    order by r.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(to_jsonb(p) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.get_admin_review(review_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if review_id is null then raise exception using errcode='22023', message='review id required'; end if;
+  return (select jsonb_build_object('id',r.id,'revision',r.revision,'product_id',r.product_id,
+    'customer_id',r.customer_id,'rating',r.rating,'title',r.title,'body',r.body,'status',r.status,
+    'created_at',r.created_at,'updated_at',r.updated_at) from public.product_reviews r where r.id=review_id);
+end;
+$$;
+
+CREATE FUNCTION public.delete_review(review_id uuid, expected_revision integer) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_review public.product_reviews;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if review_id is null or expected_revision is null or expected_revision<1 then
+    raise exception using errcode='22023', message='review id and revision required';
+  end if;
+  select * into v_review from public.product_reviews r where r.id=review_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='review not found'; end if;
+  if v_review.revision<>expected_revision then raise exception using errcode='PT409', message='review was modified'; end if;
+  delete from public.product_reviews r where r.id=review_id;
+  return jsonb_build_object('id',review_id,'deleted',true);
 end;
 $$;
 
