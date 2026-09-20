@@ -98,6 +98,14 @@ const money = z
   .nonnegative()
   .max(Number.MAX_SAFE_INTEGER / 100);
 const position = z.number().int().min(-2147483648).max(2147483647);
+export const taxFraction = z.number().min(0).max(1);
+export const taxRateChanges = z.strictObject({
+  name: z.string().optional(),
+  country: z.string().optional(),
+  rate: taxFraction.optional(),
+  include_shipping: z.boolean().optional(),
+  is_active: z.boolean().optional(),
+});
 export const shippingMoney = z.number().nonnegative().max(9999999999.99);
 export const shippingMethodChanges = z.strictObject({
   name: z.string().optional(),

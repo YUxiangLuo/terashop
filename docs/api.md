@@ -482,6 +482,25 @@ changes 只允许 name/description/countries/price/free_above/estimated_days/pos
 
 revision 由 trigger 在每次实际表 UPDATE 时推进，旧 SPA/service 直写也不可伪造；创建时使用返回的版本，不假定固定值。命令空 PATCH 或完全相同值不 UPDATE。使用行级 `FOR NO KEY UPDATE NOWAIT`，缺失为 `PT404`，过期版本为 `PT409`，锁竞争为 `55P03`，旧事务快照可能为 `40001`；非法字段/金额为 `22023`，重复 UUID 为 `23505`。任何失败整笔回滚。创建不是 upsert，不缓存历史响应；结果不明先读取原 UUID，冲突后须重新读取并确认意图，不自动替换版本。没有删除、承运商 API、面单购买或历史订单重定价工具。
 
+## 管理员税率配置
+
+以下 RPC 仅 admin/service 可调用，均有同名 MCP 工具；MCP 使用管理员 JWT，写操作须启用写开关。
+
+| RPC | 参数与返回 |
+| --- | --- |
+| `get_admin_tax_rate` | `tax_rate_id`；返回当前 DTO，包含停用规则，不存在为 null |
+| `list_admin_tax_rates` | `page_size=20, after_id=null, active=null, country=null, search=null`；返回 `{items,next_cursor}` |
+| `create_tax_rate` | `tax_rate_id, changes`；必须显式提供 name/country/rate，默认停用、不对运费计税；显式 is_active=true 可原子发布 |
+| `update_tax_rate` | `tax_rate_id, expected_revision, changes`；原子 PATCH，返回最新 DTO |
+
+DTO 为 `id/revision/name/country/rate/include_shipping/is_active/created_at`。列表按 UUID 升序，页大小 1–100，末页游标 null，无精确总数或跨请求快照。active 省略包含停用规则；country 去空格转大写后**精确匹配**，JP 不包含 `*` 兜底规则，查询兜底需显式传 `*`；这是配置查询，不是目的地税额预览。search 为名称不区分大小写的字面子串，去首尾普通空格，最多 200 字符；各筛选以 AND 组合。
+
+changes 只允许 name/country/rate/include_shipping/is_active，最大 256 KiB；省略不变，所有字段拒绝 null，name 不可仅为空格。country 为两个英文字母或 `*`，不验证税务管辖合法性。**rate 为 0–1 的比例而不是百分数：0.13 表示 13%**；最多四位小数，拒绝字符串、越界及超精度输入，不静默舍入。include_shipping 表示对折后净运费计税。
+
+现有唯一索引保证同一国家（包括 `*`）最多一条启用规则；国家专属规则优先于兜底，不叠加。启用的零税率仍是已匹配规则，覆盖兜底；停用国家规则可能启用兜底，不等于免税。无规则时 tax_context 为 no_rule，显式零税率为 calculated。配置修改不改写既有订单的税额与规则快照；旧 Quote 转单仍校验当前定价。这里只管理既有单一国家税率模型，不支持复合税、含税价格、州/邮编规则、免税证明或税务合规判断。
+
+每次实际表 UPDATE 由 trigger 推进 revision，旧 SPA/service 直写不能伪造版本。空 PATCH 或规范化后相同的值不 UPDATE；使用创建返回的版本，不假定固定值。行锁采用 `FOR NO KEY UPDATE NOWAIT`；缺失为 `PT404`，旧版本为 `PT409`，行锁竞争为 `55P03`，旧事务快照可能为 `40001`，无效 PATCH 为 `22023`，重复 UUID/启用国家冲突为 `23505`。唯一索引竞争仍可能等待；所有失败整笔回滚。不提供删除或跨规则原子替换工具；修改现有启用规则可避免先停后启的空窗。结果不明先读取原 UUID，不能换 UUID 重建或自动替换版本。
+
 ## 促销范围与扩展字段管理
 
 ### 管理员促销查询

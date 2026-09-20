@@ -1430,6 +1430,7 @@ export type Database = {
           is_active: boolean
           name: string
           rate: number
+          revision: number
         }
         Insert: {
           country?: string
@@ -1439,6 +1440,7 @@ export type Database = {
           is_active?: boolean
           name: string
           rate: number
+          revision?: number
         }
         Update: {
           country?: string
@@ -1448,6 +1450,7 @@ export type Database = {
           is_active?: boolean
           name?: string
           rate?: number
+          revision?: number
         }
         Relationships: []
       }
@@ -1785,6 +1788,10 @@ export type Database = {
         Args: { changes: Json; shipping_method_id: string }
         Returns: Json
       }
+      create_tax_rate: {
+        Args: { changes: Json; tax_rate_id: string }
+        Returns: Json
+      }
       current_customer_id: { Args: never; Returns: string }
       delete_customer_address: {
         Args: {
@@ -1818,6 +1825,7 @@ export type Database = {
         Args: { shipping_method_id: string }
         Returns: Json
       }
+      get_admin_tax_rate: { Args: { tax_rate_id: string }; Returns: Json }
       get_cart: {
         Args: { cart_id: string; guest_token?: string }
         Returns: Json
@@ -1968,6 +1976,16 @@ export type Database = {
         Returns: Json
       }
       list_admin_shipping_methods: {
+        Args: {
+          active?: boolean
+          after_id?: string
+          country?: string
+          page_size?: number
+          search?: string
+        }
+        Returns: Json
+      }
+      list_admin_tax_rates: {
         Args: {
           active?: boolean
           after_id?: string
@@ -2254,6 +2272,10 @@ export type Database = {
           expected_revision: number
           shipping_method_id: string
         }
+        Returns: Json
+      }
+      update_tax_rate: {
+        Args: { changes: Json; expected_revision: number; tax_rate_id: string }
         Returns: Json
       }
     }

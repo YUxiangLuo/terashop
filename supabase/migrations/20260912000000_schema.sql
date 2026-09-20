@@ -931,6 +931,7 @@ CREATE TABLE public.shipping_methods (
 
 CREATE TABLE public.tax_rates (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     name text NOT NULL,
     country text DEFAULT '*'::text NOT NULL,
     rate numeric(5,4) NOT NULL CONSTRAINT tax_rates_rate_finite CHECK (rate NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),

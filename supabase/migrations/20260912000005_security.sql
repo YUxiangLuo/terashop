@@ -270,6 +270,7 @@ CREATE TRIGGER shipping_methods_normalize_countries BEFORE INSERT OR UPDATE OF c
 CREATE TRIGGER shipping_methods_revision BEFORE INSERT OR UPDATE ON public.shipping_methods FOR EACH ROW EXECUTE FUNCTION private.bump_shipping_method_revision();
 CREATE TRIGGER shipping_methods_updated_at BEFORE UPDATE ON public.shipping_methods FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER tax_rates_normalize_country BEFORE INSERT OR UPDATE OF country ON public.tax_rates FOR EACH ROW EXECUTE FUNCTION private.normalize_tax_country();
+CREATE TRIGGER tax_rates_revision BEFORE INSERT OR UPDATE ON public.tax_rates FOR EACH ROW EXECUTE FUNCTION private.bump_tax_rate_revision();
 
 -- Supabase Auth integration triggers
 
@@ -709,6 +710,12 @@ REVOKE ALL ON FUNCTION private.bump_shipping_method_revision(),
 GRANT EXECUTE ON FUNCTION public.get_admin_shipping_method(uuid),
   public.list_admin_shipping_methods(integer,uuid,boolean,text,text),
   public.create_shipping_method(uuid,jsonb), public.update_shipping_method(uuid,integer,jsonb) TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION private.bump_tax_rate_revision(), private.admin_tax_rate_json(public.tax_rates),
+  public.get_admin_tax_rate(uuid), public.list_admin_tax_rates(integer,uuid,boolean,text,text),
+  public.create_tax_rate(uuid,jsonb), public.update_tax_rate(uuid,integer,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_admin_tax_rate(uuid), public.list_admin_tax_rates(integer,uuid,boolean,text,text),
+  public.create_tax_rate(uuid,jsonb), public.update_tax_rate(uuid,integer,jsonb) TO authenticated,service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

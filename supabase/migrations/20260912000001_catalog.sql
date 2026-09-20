@@ -2169,4 +2169,112 @@ begin
 end;
 $$;
 
+CREATE FUNCTION private.bump_tax_rate_revision() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO '' AS $$
+begin
+  if tg_op='INSERT' then new.revision := 1; else new.revision := old.revision+1; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION private.admin_tax_rate_json(t public.tax_rates) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
+  select jsonb_build_object('id',t.id,'revision',t.revision,'name',t.name,'country',t.country,
+    'rate',t.rate,'include_shipping',t.include_shipping,'is_active',t.is_active,'created_at',t.created_at);
+$$;
+
+CREATE FUNCTION public.get_admin_tax_rate(tax_rate_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.admin_tax_rate_json(t) from public.tax_rates t where t.id=tax_rate_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_tax_rates(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    active boolean DEFAULT NULL, country text DEFAULT NULL, search text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid; v_country text;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or length(search)>200 then
+    raise exception using errcode='22023', message='invalid tax rate filters';
+  end if;
+  if country is not null then v_country := private.normalize_country_code(country,true); end if;
+  with candidates as materialized (
+    select t as rule,t.id from public.tax_rates t where (after_id is null or t.id>after_id)
+      and (active is null or t.is_active=active) and (v_country is null or t.country=v_country)
+      and (nullif(btrim(search),'') is null or strpos(lower(t.name),lower(btrim(search)))>0)
+    order by t.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(private.admin_tax_rate_json(p.rule) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.update_tax_rate(tax_rate_id uuid, expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_old public.tax_rates; v_new public.tax_rates; v_key text; v_value jsonb; v_rate numeric;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if tax_rate_id is null or expected_revision is null or expected_revision<1
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid tax rate patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('name','country','rate','include_shipping','is_active')
+      or (v_key in ('name','country') and jsonb_typeof(v_value)<>'string')
+      or (v_key='rate' and jsonb_typeof(v_value)<>'number')
+      or (v_key in ('include_shipping','is_active') and jsonb_typeof(v_value)<>'boolean') then
+      raise exception using errcode='22023', message='unknown or invalid tax rate field';
+    end if;
+    if v_key='rate' then
+      v_rate := (v_value#>>'{}')::numeric;
+      if v_rate<0 or v_rate>1 or v_rate<>round(v_rate,4) then
+        raise exception using errcode='22023', message='rate must be a fraction between zero and one with at most four decimals';
+      end if;
+    end if;
+  end loop;
+  select * into v_old from public.tax_rates t where t.id=tax_rate_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='tax rate not found'; end if;
+  if v_old.revision<>expected_revision then
+    raise exception using errcode='PT409', message='tax rate was modified';
+  end if;
+  v_new := jsonb_populate_record(v_old,changes);
+  if btrim(v_new.name)='' then raise exception using errcode='22023', message='tax rate name required'; end if;
+  v_new.country := private.normalize_country_code(v_new.country,true);
+  if v_new is distinct from v_old then
+    update public.tax_rates t set name=v_new.name,country=v_new.country,rate=v_new.rate,
+      include_shipping=v_new.include_shipping,is_active=v_new.is_active where t.id=tax_rate_id;
+  end if;
+  return public.get_admin_tax_rate(tax_rate_id);
+end;
+$$;
+
+CREATE FUNCTION public.create_tax_rate(tax_rate_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if tax_rate_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or jsonb_typeof(changes->'name') is distinct from 'string'
+    or jsonb_typeof(changes->'country') is distinct from 'string'
+    or jsonb_typeof(changes->'rate') is distinct from 'number' then
+    raise exception using errcode='22023', message='tax rate id, name, country and rate required';
+  end if;
+  insert into public.tax_rates(id,name,country,rate,is_active)
+    values(tax_rate_id,changes->>'name',changes->>'country',0,false);
+  return public.update_tax_rate(tax_rate_id,1,changes);
+end;
+$$;
+
 commit;
