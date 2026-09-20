@@ -1684,6 +1684,10 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      create_customer_address: {
+        Args: { address_id: string; changes: Json; customer_id: string }
+        Returns: Json
+      }
       create_fulfillment: {
         Args: {
           carrier?: string
@@ -1758,6 +1762,14 @@ export type Database = {
         Returns: Json
       }
       current_customer_id: { Args: never; Returns: string }
+      delete_customer_address: {
+        Args: {
+          address_id: string
+          customer_id: string
+          expected_updated_at: string
+        }
+        Returns: Json
+      }
       dispose_return_receipt: {
         Args: {
           disposition: string
@@ -2080,6 +2092,23 @@ export type Database = {
         Args: {
           category_id: string
           changes: Json
+          expected_updated_at: string
+        }
+        Returns: Json
+      }
+      update_customer: {
+        Args: {
+          changes: Json
+          customer_id: string
+          expected_updated_at: string
+        }
+        Returns: Json
+      }
+      update_customer_address: {
+        Args: {
+          address_id: string
+          changes: Json
+          customer_id: string
           expected_updated_at: string
         }
         Returns: Json

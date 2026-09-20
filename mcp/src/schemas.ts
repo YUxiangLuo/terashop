@@ -14,6 +14,22 @@ export const search = z.string().max(200).optional();
 export const reason = z.string().max(2000).optional();
 export const order = z.strictObject({ order_id: id });
 export const createdCursor = z.strictObject({ created_at: z.string().min(1), id }).optional();
+export const customerChanges = z.strictObject({
+  email: z.string().nullable().optional(),
+  full_name: z.string().optional(),
+  phone: z.string().nullable().optional(),
+});
+export const addressChanges = z.strictObject({
+  label: z.string().optional(),
+  recipient_name: z.string().optional(),
+  phone: z.string().nullable().optional(),
+  country: z.string().optional(),
+  region: z.string().nullable().optional(),
+  city: z.string().nullable().optional(),
+  line1: z.string().optional(),
+  line2: z.string().nullable().optional(),
+  postal_code: z.string().nullable().optional(),
+});
 // Bound inline protocol payloads independently of Storage's 5 MiB limit.
 export const uploadProductMedia = z.strictObject({
   product_id: id,

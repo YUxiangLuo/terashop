@@ -26,7 +26,7 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
     expect(readTools.length).toBe(16);
-    expect(writeTools.length).toBe(39);
+    expect(writeTools.length).toBe(43);
     expect(readTools.every((tool) => tool.annotations?.readOnlyHint === true)).toBe(true);
     expect(writeTools.find((tool) => tool.name === 'adjust_inventory')?.annotations).toMatchObject({
       readOnlyHint: false,
@@ -67,6 +67,21 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
       ['redrive_outbox_event', { event_id: id, expected_attempt: 25, reason: 'test', worker_id: 'forged' }],
       ['list_admin_products', { page_size: 101 }],
       ['create_product', { product_id: id, changes: {} }],
+      [
+        'update_customer',
+        { customer_id: id, expected_updated_at: '2026-09-20T00:00:00Z', changes: { auth_user_id: id } },
+      ],
+      ['create_customer_address', { customer_id: id, address_id: id, changes: { country: 'US' } }],
+      [
+        'update_customer_address',
+        {
+          customer_id: id,
+          address_id: id,
+          expected_updated_at: '2026-09-20T00:00:00Z',
+          changes: { is_default: true },
+        },
+      ],
+      ['delete_customer_address', { customer_id: id, address_id: id }],
       ['create_category', { category_id: id, changes: { name: 'Missing slug' } }],
       ['list_admin_categories', { root_only: true, parent_id: id }],
       [

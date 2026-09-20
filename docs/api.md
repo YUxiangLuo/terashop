@@ -179,6 +179,25 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 - 详情增加 `addresses`（默认地址优先、再按 UUID 排序）和 `metafields`；不暴露 Auth ID、角色、凭据或 Auth 登录邮箱。匿名化后不从订单历史回填联系资料；客户地址为空不代表历史订单地址已擦除。
 - 查询客户订单使用 `list_admin_orders(customer_id=...)`，不在客户详情无限嵌套订单。子串搜索成本仍随客户数量增长，不是全文检索或已验证的生产性能承诺。
 
+### 管理员客户资料与地址命令
+
+以下 RPC 仅 admin/service 可用，也作为同名 MCP 工具开放，成功均返回最新 `get_admin_customer` DTO。普通客户修改自己的资料仍沿用 RLS 表接口，这些命令不扩大自助权限。
+
+| RPC | 参数与合同 |
+| --- | --- |
+| `update_customer` | `customer_id, expected_updated_at, changes`；只改联系 `email/full_name/phone` |
+| `create_customer_address` | `customer_id, address_id, changes`；保留调用方 UUID，必填 `recipient_name/country/line1`，默认非默认地址 |
+| `update_customer_address` | `customer_id, address_id, expected_updated_at, changes`；地址必须属于所传客户 |
+| `delete_customer_address` | `customer_id, address_id, expected_updated_at`；删除地址簿记录，不选替代默认地址 |
+
+客户更新使用客户 DTO 的 updated_at；地址更新/删除使用 `addresses[]` 对应项新增的 updated_at，**不是客户时间戳**。原样保留微秒，不经 Date 转换。过期令牌为 `PT409`，不存在/地址归属不符为 `PT404`；行锁竞争可能为 `55P03`，旧事务快照可能为 `40001`，重试时保留原令牌并重新确认意图。不自动替换令牌覆盖新状态；无变化 PATCH 不推进时间戳。
+
+PATCH 省略保留，只允许显式字段，JSONB 文本最多 256 KiB。客户 email/phone 可 null，full_name 不可 null；沿用底表长度规则（邮箱按 SQL btrim 后为 1–320 字符、姓名最多 200、电话最多 50），实际保存时不自动清空或 trim 联系字段，不代表验证邮箱归属。不会改变 Auth 邮箱、身份关联、角色或历史订单快照；已匿名化客户拒绝更新。
+
+地址白名单为 `label/recipient_name/phone/country/region/city/line1/line2/postal_code`；phone/region/city/line2/postal_code 可 null，其他不可。国家沿用既有规范化规则，保存两位大写码；收件人和 line1 不可空白。不能修改 ID、归属、时间戳或 is_default；默认地址使用已有 `set_default_address`。地址创建、修改和删除仅允许活跃客户，按客户→地址加锁，与匿名化及默认地址命令协调。新增/实际修改/删除会推进客户 updated_at；删除默认地址允许留下零个默认地址。
+
+创建不是 upsert，重复 UUID 为 `23505`，非法字段或类型为 `22023`，任意失败原子回滚。响应丢失先按原客户读取地址列表核对 UUID，不能换 ID 盲目重建。编辑/删除没有历史响应缓存，删除后的重试为 `PT404`；先读取事实判断结果。地址簿 CRUD 不修改已保存的 Quote 或订单地址快照。
+
 ## 客户／后台订单查询
 
 | RPC | 参数与权限 |

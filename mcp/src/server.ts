@@ -14,6 +14,8 @@ import {
   itemQuantities,
   productChanges,
   categoryChanges,
+  customerChanges,
+  addressChanges,
   uploadProductMedia,
   refund,
 } from './schemas';
@@ -158,6 +160,39 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'anonymize_customer',
     'Irreversibly anonymize customer contact data, addresses, carts and metafields. Historical order snapshots remain. Does not delete or revoke the Auth account.',
     z.strictObject({ customer_id: id }),
+    true,
+  );
+  rpc(
+    'update_customer',
+    'Edit contact email, name and phone only. Not Auth login, account linking or merging; cannot restore anonymized customers. Supply exact customer updated_at from get_admin_customer, never convert through Date. Returns refreshed customer details; does not change order snapshots.',
+    z.strictObject({ customer_id: id, expected_updated_at: z.string().min(1), changes: customerChanges }),
+    true,
+  );
+  rpc(
+    'create_customer_address',
+    'Create an address with a retained UUID for an active customer. Not an upsert; read customer details on uncertain outcome. Defaults non-default; use set_default_address separately. Returns refreshed customer details, not an order address change.',
+    z.strictObject({
+      customer_id: id,
+      address_id: id,
+      changes: addressChanges.extend({ recipient_name: z.string(), country: z.string(), line1: z.string() }),
+    }),
+    true,
+  );
+  rpc(
+    'update_customer_address',
+    'Edit an address belonging to the specified active customer. Supply the exact ADDRESS updated_at from get_admin_customer.addresses, not the customer timestamp. Null clears optional fields; omitted fields remain. Cannot change owner or default flag. Returns refreshed customer details; historical orders are unchanged.',
+    z.strictObject({
+      customer_id: id,
+      address_id: id,
+      expected_updated_at: z.string().min(1),
+      changes: addressChanges,
+    }),
+    true,
+  );
+  rpc(
+    'delete_customer_address',
+    'Delete an address at its exact ADDRESS updated_at. Returns refreshed customer details. Deleting the default does not select a replacement; historical order snapshots remain. Missing address is an error; read customer details before retrying an uncertain deletion.',
+    z.strictObject({ customer_id: id, address_id: id, expected_updated_at: z.string().min(1) }),
     true,
   );
   rpc(

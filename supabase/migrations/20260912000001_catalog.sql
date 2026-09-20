@@ -112,7 +112,8 @@ begin
     'metafields',private.catalog_metafields_json('customer',c.id,true),
     'addresses',coalesce((select jsonb_agg(jsonb_build_object('id',a.id,'label',a.label,
       'recipient_name',a.recipient_name,'phone',a.phone,'country',a.country,'region',a.region,'city',a.city,
-      'line1',a.line1,'line2',a.line2,'postal_code',a.postal_code,'is_default',a.is_default)
+      'line1',a.line1,'line2',a.line2,'postal_code',a.postal_code,'is_default',a.is_default,
+      'updated_at',a.updated_at)
       order by a.is_default desc,a.id) from public.addresses a where a.customer_id = c.id),'[]'::jsonb))
     from public.customers c where c.id = customer_id);
 end;
@@ -1455,6 +1456,124 @@ begin
   insert into public.categories(id,slug,name) values(category_id,changes->>'slug',changes->>'name')
     returning * into v_category;
   return public.update_category(category_id,v_category.updated_at,changes);
+end;
+$$;
+
+CREATE FUNCTION public.update_customer(customer_id uuid, expected_updated_at timestamptz, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_customer public.customers; v_new public.customers; v_key text; v_value jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if customer_id is null or expected_updated_at is null or not isfinite(expected_updated_at)
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid customer patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('email','full_name','phone')
+      or (v_key='full_name' and jsonb_typeof(v_value)<>'string')
+      or (v_key in ('email','phone') and jsonb_typeof(v_value) not in ('string','null')) then
+      raise exception using errcode='22023', message='unknown or invalid customer field';
+    end if;
+  end loop;
+  select * into v_customer from public.customers c where c.id=customer_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='customer not found'; end if;
+  if v_customer.anonymized_at is not null then
+    raise exception using errcode='PT409', message='customer is anonymized';
+  end if;
+  if v_customer.updated_at is distinct from expected_updated_at then
+    raise exception using errcode='PT409', message='customer was modified; reread before editing';
+  end if;
+  v_new := jsonb_populate_record(v_customer,changes);
+  if v_new is distinct from v_customer then
+    update public.customers c set email=v_new.email,full_name=v_new.full_name,phone=v_new.phone where c.id=customer_id;
+  end if;
+  return public.get_admin_customer(customer_id);
+end;
+$$;
+
+CREATE FUNCTION public.update_customer_address(customer_id uuid, address_id uuid,
+    expected_updated_at timestamptz, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_address public.addresses; v_new public.addresses; v_key text; v_value jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if customer_id is null or address_id is null or expected_updated_at is null or not isfinite(expected_updated_at)
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid address patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('label','recipient_name','phone','country','region','city','line1','line2','postal_code')
+      or (v_key in ('label','recipient_name','country','line1') and jsonb_typeof(v_value)<>'string')
+      or (v_key in ('phone','region','city','line2','postal_code') and jsonb_typeof(v_value) not in ('string','null')) then
+      raise exception using errcode='22023', message='unknown or invalid address field';
+    end if;
+  end loop;
+  -- Same parent -> child lock order as anonymization and default selection.
+  perform 1 from public.customers c where c.id=customer_id and c.anonymized_at is null for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='active customer not found'; end if;
+  select * into v_address from public.addresses a
+    where a.id=address_id and a.customer_id=update_customer_address.customer_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='address not found'; end if;
+  if v_address.updated_at is distinct from expected_updated_at then
+    raise exception using errcode='PT409', message='address was modified; reread before editing';
+  end if;
+  v_new := jsonb_populate_record(v_address,changes);
+  if v_new is distinct from v_address then
+    update public.addresses a set label=v_new.label,recipient_name=v_new.recipient_name,phone=v_new.phone,
+      country=v_new.country,region=v_new.region,city=v_new.city,line1=v_new.line1,line2=v_new.line2,postal_code=v_new.postal_code
+      where a.id=address_id;
+  end if;
+  return public.get_admin_customer(customer_id);
+end;
+$$;
+
+CREATE FUNCTION public.create_customer_address(customer_id uuid, address_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_address public.addresses;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if customer_id is null or address_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or jsonb_typeof(changes->'recipient_name') is distinct from 'string'
+    or jsonb_typeof(changes->'country') is distinct from 'string'
+    or jsonb_typeof(changes->'line1') is distinct from 'string' then
+    raise exception using errcode='22023', message='customer, address, recipient, country and line1 are required';
+  end if;
+  perform 1 from public.customers c where c.id=customer_id and c.anonymized_at is null for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='active customer not found'; end if;
+  insert into public.addresses(id,customer_id,recipient_name,country,line1)
+    values(address_id,customer_id,changes->>'recipient_name',changes->>'country',changes->>'line1')
+    returning * into v_address;
+  return public.update_customer_address(customer_id,address_id,v_address.updated_at,changes);
+end;
+$$;
+
+CREATE FUNCTION public.delete_customer_address(customer_id uuid, address_id uuid, expected_updated_at timestamptz) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_address public.addresses;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if customer_id is null or address_id is null or expected_updated_at is null or not isfinite(expected_updated_at) then
+    raise exception using errcode='22023', message='invalid address deletion';
+  end if;
+  perform 1 from public.customers c where c.id=customer_id and c.anonymized_at is null for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='active customer not found'; end if;
+  select * into v_address from public.addresses a
+    where a.id=address_id and a.customer_id=delete_customer_address.customer_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='address not found'; end if;
+  if v_address.updated_at is distinct from expected_updated_at then
+    raise exception using errcode='PT409', message='address was modified; reread before deleting';
+  end if;
+  delete from public.addresses a where a.id=address_id;
+  update public.customers c set updated_at=now() where c.id=customer_id;
+  return public.get_admin_customer(customer_id);
 end;
 $$;
 

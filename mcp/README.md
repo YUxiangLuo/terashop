@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，39 个显式工具（16 个只读、23 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，43 个显式工具（16 个只读、27 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -49,7 +49,8 @@
 | 商品 | `list_admin_products`、`get_admin_product`、`create_product`、`update_product`；覆盖变体、规格、图片 URL、分类关联、商品/变体 metafield 的原子编辑 |
 | 媒体 | `upload_product_media`；上传不可覆盖的公开对象，随后单独保存商品图片关联；不提供对象删除 |
 | 分类 | `list_admin_categories`、`get_admin_category`、`create_category`、`update_category`；支持平铺分页/组树、移动、排序、停用；更新须原样传回 updated_at |
-| 客户 | `list_admin_customers`、`get_admin_customer`、`create_customer`、`anonymize_customer`、`set_default_address` |
+| 客户 | `list_admin_customers`、`get_admin_customer`、`create_customer`、`update_customer`、`anonymize_customer` |
+| 地址 | `create_customer_address`、`update_customer_address`、`delete_customer_address`、`set_default_address`；读取使用客户详情；编辑/删除使用地址自身 updated_at，返回最新客户详情 |
 | 库存 | `get_inventory_availability`、`adjust_inventory` |
 | 订单 | `list_admin_orders`、`get_admin_order`、`get_order_pricing`、`get_order_checkout_quote`、`get_order_ledger`、`get_order_fulfillment_balance`、`cancel_order`、`cancel_zero_value_order_item` |
 | 手工资金 | `mark_order_paid`、`refund_order`；仅记账，不调用真实支付渠道 |
@@ -83,7 +84,7 @@
 | 顺序 | 范围 | 当前缺口及实现要求 |
 | --- | --- | --- |
 | 1 | 商品与目录完整管理 | 商品原子编辑、分类管理及 ≤1 MiB 商品媒体上传已接入；剩余大文件传输、媒体引用登记和安全删除，不新增底表编辑后门 |
-| 2 | 客户、地址、库存与仓库 | 客户资料更新；地址创建/编辑/删除；仓库列表/创建/编辑/启停/默认仓切换；库存流水分页。调拨需新增数据库事务命令，不能伪装为两个独立 delta |
+| 2 | 客户、地址、库存与仓库 | 客户资料更新及地址创建/编辑/删除已接入；剩余仓库列表/创建/编辑/启停/默认仓切换、库存流水分页。调拨需新增数据库事务命令，不能伪装为两个独立 delta |
 | 3 | 促销、配送、税 | 活动/优惠码 CRUD、适用/赠送目标、启停、使用记录；配送方法/国家范围；税率配置。定向活动须先以 inactive/selected 创建；引用中的配置停用而非强删；需要整体保存时补原子命令 |
 | 4 | 扩展内容与评价 | Metafield 定义/可见性/值、Metaobject 定义/条目/发布；类别/客户/订单/shop 扩展值；评价列表/详情/删除。公开引用与不可恢复匿名化仍由数据库校验 |
 | 5 | 订单与渠道运营 | 内部备注编辑、订单事件分页、脱敏支付操作 DTO、真实 PayPal 退款 Edge 调用。先完善 DTO，不能把 `get_payment_operations` 的内部原始 error 原样送给 agent；手工退款不替代渠道退款 |
@@ -104,6 +105,7 @@ bun run test:unit
 bun run test:current tests/mcp.test.ts # 已启动并初始化的可丢弃本地 Supabase
 bun run test:current tests/admin-categories.test.ts
 bun run test:current tests/storage-admin.test.ts
+bun run test:current tests/admin-customer-commands.test.ts
 bun run docs:check
 ```
 
