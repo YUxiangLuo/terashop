@@ -764,6 +764,7 @@ CREATE TABLE public.metaobject_definitions (
 
 CREATE TABLE public.metaobjects (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     definition_id uuid NOT NULL,
     handle text NOT NULL,
     "values" jsonb DEFAULT '{}'::jsonb NOT NULL,

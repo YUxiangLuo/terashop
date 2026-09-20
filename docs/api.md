@@ -579,11 +579,11 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 - `list_admin_metaobject_definitions(page_size=20, after_id=null, type_filter=null, access_filter=null, active=null)`：包括私有和停用定义；access 为 admin/public，active 区分启用/停用，省略时均返回。
 - `get_admin_metaobject_definition(definition_id)`：缺失返回 null。定义 DTO 为 `id/revision/type/name/description/fields/access/is_active/created_at/updated_at`。
 - `list_admin_metaobjects(definition_id_filter, page_size=20, after_id=null, status_filter=null, handle_filter=null)`：必须指定定义 UUID；包括 active/draft 条目，不允许省略定义退化成全店内容查询。
-- `get_admin_metaobject(metaobject_id)`：缺失返回 null。条目 DTO 为 `id/definition_id/handle/values/status/created_at/updated_at/definition_type/definition_access/definition_is_active/is_public`。
+- `get_admin_metaobject(metaobject_id)`：缺失返回 null。条目 DTO 为 `id/revision/definition_id/handle/values/status/created_at/updated_at/definition_type/definition_access/definition_is_active/is_public`。
 
 列表返回 `{items,next_cursor}`，按 UUID 升序，页大小 1–100，末页游标 null；所有筛选 AND 组合，type/handle 精确区分大小写，不去空格、不解释通配符。空列表不证明定义存在；没有精确总数或跨请求快照。非法枚举、页大小及缺失定义筛选为 `22023`，非管理员为 `42501`。
 
-`is_public` 仅在条目 active、定义启用且 access=public 时为 true，与当前数据库公开读取规则一致；不表示店面页面已引用该条目，也不是历史公开状态或披露批准。fields/values 原样返回，不递归展开引用、不抓取 URL、不执行文本指令；通过类型校验不等于内容安全。时间戳保留原始字符串。定义写入见下，尚不提供条目写入/发布或删除工具。
+`is_public` 仅在条目 active、定义启用且 access=public 时为 true，与当前数据库公开读取规则一致；不表示店面页面已引用该条目，也不是历史公开状态或披露批准。fields/values 原样返回，不递归展开引用、不抓取 URL、不执行文本指令；通过类型校验不等于内容安全。时间戳保留原始字符串。定义与条目写入见下，尚不提供删除工具。
 
 ### 管理员 Metaobject 定义命令与值校验
 
@@ -598,6 +598,16 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 - **将定义公开或重新启用公开定义可能立即暴露所有 active 条目**；先读取和审查条目并取得批准。改回 admin 或停用撤回后续读取，但无法撤回已读取内容。
 - revision 对每次实际定义表 UPDATE 推进，不能经旧入口伪造；命令中的空 PATCH/相同最终值不推进。它只表示定义版本，条目写入不推进该版本，也不提供“审查后内容未变”的保证。共享的数据库写锁与持久冲突记录保证定义/条目校验的并发一致性。
 - 缺失定义 `PT404`、旧版本 `PT409`、行锁/定义锁竞争 `55P03`、旧事务快照 `40001`；非法声明/值形状通常 `22023`，越界或候选值失败沿用 `P0001`。失败整体回滚；不确定结果先读取原 UUID，冲突后重新确认意图，不自动更换 UUID 或版本。
+
+### 管理员 Metaobject 条目命令
+
+`create_metaobject(metaobject_id, changes)` 和 `update_metaobject(metaobject_id, expected_revision, changes)` 仅 admin/service 可调用；MCP 写工具须显式启用，返回条目 DTO。
+
+- 创建必填调用方保留的 UUID、definition_id、handle 和完整 values 对象。**命令默认 draft**，可显式指定 active；不改变底表旧直写默认值。草稿也必须满足全部字段规则，不允许缺失必填内容。定义须存在；重复 UUID 或同定义下 handle 为 `23505`，不是 upsert。
+- 编辑仅允许 handle/values/status；id/definition_id 不可变。handle 不可仅为空格，不自动去空格、转小写或生成别名；改名可能影响依赖 handle 的外部链接，不影响 UUID 引用。省略保持，values 整体替换而非合并；values:null 拒绝，对象内 null 按字段规则校验。changes 最大 256 KiB，未知属性拒绝。
+- 用 status=active 发布、status=draft 撤回。实际公开仍取决于当前定义启用且 access=public；编辑已公开条目的值会立即改变公开内容，应先审查并取得批准。撤回也使指向该对象的公开类型化 Metafield 引用不可读，但不删除引用或对象，也不能撤回缓存。定义稍后公开/启用可能暴露当前 active 条目。
+- revision 对每次实际条目表 UPDATE 推进，包括旧直写，调用方不能伪造；空 PATCH/相同最终值不推进。只覆盖条目，定义变更不推进条目版本；须读取当前定义，不能将条目版本当成可见性/规则快照。写入继续使用共享定义锁和完整字段校验，失败连同 handle/发布变更整体回滚。
+- 缺失 `PT404`、旧版本 `PT409`、行锁/定义锁竞争 `55P03`、旧事务快照 `40001`；非法 PATCH 为 `22023`，字段值错误沿用定义校验错误。结果不明先读原 UUID，不自动生成新 UUID 重建；版本冲突后重新确认意图，不自动替换版本。不提供条目删除或定义迁移。
 
 ### 范围与扩展字段规则
 

@@ -2545,7 +2545,7 @@ $$;
 
 CREATE FUNCTION private.admin_metaobject_json(o public.metaobjects, d public.metaobject_definitions) RETURNS jsonb
     LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
-  select jsonb_build_object('id',o.id,'definition_id',o.definition_id,'handle',o.handle,'values',o.values,
+  select jsonb_build_object('id',o.id,'revision',o.revision,'definition_id',o.definition_id,'handle',o.handle,'values',o.values,
     'status',o.status,'created_at',o.created_at,'updated_at',o.updated_at,'definition_type',d.type,
     'definition_access',d.access,'definition_is_active',d.is_active,
     'is_public',o.status='active' and d.is_active and d.access='public');
@@ -2768,6 +2768,7 @@ begin
   select d.fields into v_fields from public.metaobject_definitions d where d.id=new.definition_id;
   if not found then raise exception using errcode='23503', message='metaobject definition not found'; end if;
   perform private.assert_metaobject_values(v_fields,new.values);
+  if tg_op='INSERT' then new.revision := 1; else new.revision := old.revision+1; end if;
   return new;
 end;
 $$;
@@ -2816,6 +2817,56 @@ begin
   insert into public.metaobject_definitions(id,type,name,fields)
     values(definition_id,changes->>'type',changes->>'name',changes->'fields');
   return public.update_metaobject_definition(definition_id,1,changes-'type');
+end;
+$$;
+
+CREATE FUNCTION public.update_metaobject(metaobject_id uuid, expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_old public.metaobjects; v_new public.metaobjects; k text; v jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if metaobject_id is null or expected_revision is null or expected_revision<1
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid metaobject patch';
+  end if;
+  for k,v in select * from jsonb_each(changes) loop
+    if k not in ('handle','values','status')
+      or (k in ('handle','status') and jsonb_typeof(v)<>'string')
+      or (k='values' and jsonb_typeof(v)<>'object') then
+      raise exception using errcode='22023', message='unknown or invalid metaobject field';
+    end if;
+  end loop;
+  select * into v_old from public.metaobjects o where o.id=metaobject_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='metaobject not found'; end if;
+  if v_old.revision<>expected_revision then raise exception using errcode='PT409', message='metaobject was modified'; end if;
+  v_new := jsonb_populate_record(v_old,changes);
+  if btrim(v_new.handle)='' or v_new.status not in ('draft','active') then
+    raise exception using errcode='22023', message='nonblank handle and draft/active status required';
+  end if;
+  if v_new is distinct from v_old then
+    update public.metaobjects o set handle=v_new.handle,values=v_new.values,status=v_new.status where o.id=metaobject_id;
+  end if;
+  return public.get_admin_metaobject(metaobject_id);
+end;
+$$;
+
+CREATE FUNCTION public.create_metaobject(metaobject_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if metaobject_id is null or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144
+    or jsonb_typeof(changes->'definition_id') is distinct from 'string'
+    or jsonb_typeof(changes->'handle') is distinct from 'string'
+    or jsonb_typeof(changes->'values') is distinct from 'object' then
+    raise exception using errcode='22023', message='metaobject id, definition, handle and values required';
+  end if;
+  insert into public.metaobjects(id,definition_id,handle,values,status)
+    values(metaobject_id,(changes->>'definition_id')::uuid,changes->>'handle',changes->'values','draft');
+  return public.update_metaobject(metaobject_id,1,changes-'definition_id');
 end;
 $$;
 

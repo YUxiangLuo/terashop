@@ -146,6 +146,7 @@ test('条目按定义隔离，UUID 而非 handle 分页，保留原始内容/时
   expect(Object.keys(detail).sort()).toEqual(
     [
       'id',
+      'revision',
       'definition_id',
       'handle',
       'values',

@@ -602,6 +602,7 @@ export type Database = {
           definition_id: string
           handle: string
           id: string
+          revision: number
           status: string
           updated_at: string
           values: Json
@@ -611,6 +612,7 @@ export type Database = {
           definition_id: string
           handle: string
           id?: string
+          revision?: number
           status?: string
           updated_at?: string
           values?: Json
@@ -620,6 +622,7 @@ export type Database = {
           definition_id?: string
           handle?: string
           id?: string
+          revision?: number
           status?: string
           updated_at?: string
           values?: Json
@@ -1735,6 +1738,10 @@ export type Database = {
         Args: { changes: Json; definition_id: string }
         Returns: Json
       }
+      create_metaobject: {
+        Args: { changes: Json; metaobject_id: string }
+        Returns: Json
+      }
       create_metaobject_definition: {
         Args: { changes: Json; definition_id: string }
         Returns: Json
@@ -2338,6 +2345,14 @@ export type Database = {
           changes: Json
           definition_id: string
           expected_revision: number
+        }
+        Returns: Json
+      }
+      update_metaobject: {
+        Args: {
+          changes: Json
+          expected_revision: number
+          metaobject_id: string
         }
         Returns: Json
       }

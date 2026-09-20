@@ -753,6 +753,10 @@ REVOKE ALL ON FUNCTION private.lock_metaobject_definition(uuid), private.assert_
 GRANT EXECUTE ON FUNCTION public.create_metaobject_definition(uuid,jsonb),
   public.update_metaobject_definition(uuid,integer,jsonb) TO authenticated,service_role;
 
+REVOKE ALL ON FUNCTION public.create_metaobject(uuid,jsonb), public.update_metaobject(uuid,integer,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_metaobject(uuid,jsonb), public.update_metaobject(uuid,integer,jsonb)
+  TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;
