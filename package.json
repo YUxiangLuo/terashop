@@ -28,7 +28,7 @@
     "db:lint": "bun scripts/db-lint.ts",
     "docs:check": "bun scripts/docs-check.ts",
     "typecheck": "bunx tsc --noEmit",
-    "types:generate": "bunx supabase gen types typescript --local --network-id tera-headless-loopback > types/database.ts",
-    "types:check": "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; bunx supabase gen types typescript --local --network-id tera-headless-loopback > \"$tmp\" && diff -u types/database.ts \"$tmp\""
+    "types:generate": "bunx supabase@2.116.0 gen types typescript --local --network-id tera-headless-loopback > types/database.ts",
+    "types:check": "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; bunx supabase@2.116.0 gen types typescript --local --network-id tera-headless-loopback > \"$tmp\" && diff -u types/database.ts \"$tmp\""
   }
 }
