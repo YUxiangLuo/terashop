@@ -651,6 +651,14 @@ GRANT SELECT (id, product_id, sku, barcode, price, compare_at_price, track_inven
 -- RLS membership predicate: explicitly callable, but only checks the current auth.uid().
 grant execute on function public.is_admin() to public;
 
+REVOKE ALL ON FUNCTION private.admin_category_json(public.categories) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.get_admin_category(uuid),
+  public.list_admin_categories(integer,uuid,uuid,boolean,boolean,text),
+  public.create_category(uuid,jsonb), public.update_category(uuid,timestamptz,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_admin_category(uuid),
+  public.list_admin_categories(integer,uuid,uuid,boolean,boolean,text),
+  public.create_category(uuid,jsonb), public.update_category(uuid,timestamptz,jsonb) TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;

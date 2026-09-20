@@ -23,6 +23,15 @@ const money = z
   .nonnegative()
   .max(Number.MAX_SAFE_INTEGER / 100);
 const position = z.number().int().min(-2147483648).max(2147483647);
+export const categoryChanges = z.strictObject({
+  slug: z.string().optional(),
+  name: z.string().optional(),
+  description: z.string().optional(),
+  parent_id: id.nullable().optional(),
+  image_url: z.string().nullable().optional(),
+  position: position.optional(),
+  is_active: z.boolean().optional(),
+});
 const deletion = z.strictObject({ id, delete: z.literal(true) });
 const resources = <S extends z.ZodType>(schema: S) =>
   z

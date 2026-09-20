@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为第一阶段：可运行的 stdio MCP，34 个显式工具（14 个只读、20 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，38 个显式工具（16 个只读、22 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -47,6 +47,7 @@
 | 领域 | 本阶段已注册工具 |
 | --- | --- |
 | 商品 | `list_admin_products`、`get_admin_product`、`create_product`、`update_product`；覆盖变体、规格、图片 URL、分类关联、商品/变体 metafield 的原子编辑 |
+| 分类 | `list_admin_categories`、`get_admin_category`、`create_category`、`update_category`；支持平铺分页/组树、移动、排序、停用；更新须原样传回 updated_at |
 | 客户 | `list_admin_customers`、`get_admin_customer`、`create_customer`、`anonymize_customer`、`set_default_address` |
 | 库存 | `get_inventory_availability`、`adjust_inventory` |
 | 订单 | `list_admin_orders`、`get_admin_order`、`get_order_pricing`、`get_order_checkout_quote`、`get_order_ledger`、`get_order_fulfillment_balance`、`cancel_order`、`cancel_zero_value_order_item` |
@@ -70,7 +71,7 @@
 
 | 顺序 | 范围 | 当前缺口及实现要求 |
 | --- | --- | --- |
-| 1 | 商品与目录完整管理 | 分类树列表/详情/创建/修改/移动/停用；安全媒体上传与删除、引用校验。商品本体原子编辑已接入，不新增底表编辑后门 |
+| 1 | 商品与目录完整管理 | 商品原子编辑及分类列表/详情/创建/修改/移动/停用已接入；剩余安全媒体上传与删除、引用校验，不新增底表编辑后门 |
 | 2 | 客户、地址、库存与仓库 | 客户资料更新；地址创建/编辑/删除；仓库列表/创建/编辑/启停/默认仓切换；库存流水分页。调拨需新增数据库事务命令，不能伪装为两个独立 delta |
 | 3 | 促销、配送、税 | 活动/优惠码 CRUD、适用/赠送目标、启停、使用记录；配送方法/国家范围；税率配置。定向活动须先以 inactive/selected 创建；引用中的配置停用而非强删；需要整体保存时补原子命令 |
 | 4 | 扩展内容与评价 | Metafield 定义/可见性/值、Metaobject 定义/条目/发布；类别/客户/订单/shop 扩展值；评价列表/详情/删除。公开引用与不可恢复匿名化仍由数据库校验 |
@@ -90,6 +91,7 @@ Worker 的 claim/complete、Inbox ingest/retry、原始渠道资金处理始终�
 bun run typecheck
 bun run test:unit
 bun run test:current tests/mcp.test.ts # 已启动并初始化的可丢弃本地 Supabase
+bun run test:current tests/admin-categories.test.ts
 bun run docs:check
 ```
 

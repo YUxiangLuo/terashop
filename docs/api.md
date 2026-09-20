@@ -103,6 +103,25 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 
 管理员优先使用 `create_product` / `update_product` 原子编辑。多个底表请求须先转 `draft`，完成变体、规格关联和图片后再发布；草稿也不允许跨商品关联。发布完整性见 [ADR-013](architecture-decisions.md#adr-013目录完整性与发布)。并发修改遇到 `55P03` / `40001` 时重试整笔事务，不绕过约束。
 
+### 管理员分类管理
+
+以下 RPC 仅 admin/service 可用，也作为同名 MCP 工具开放。DTO 明确返回 `id/slug/name/description/parent_id/image_url/position/is_active/created_at/updated_at`，不递归嵌套商品或子分类。
+
+| RPC | 参数与合同 |
+| --- | --- |
+| `get_admin_category` | `category_id`；不存在返回 null，包含停用分类 |
+| `list_admin_categories` | `page_size=20`（1–100）、`after_id`、`parent_id`、`root_only=false`、`active`、`search`；返回 `{items,next_cursor}` |
+| `create_category` | 调用方保留的 `category_id` UUID、`changes`；必须包含字符串 `slug/name`，默认启用 |
+| `update_category` | `category_id`、读取时的原始 `expected_updated_at`、`changes` PATCH；返回更新后 DTO |
+
+列表按 UUID 升序分页，将 `next_cursor` 原样传入 `after_id`；null 表示末页。不保证跨请求快照。`parent_id` 精确查询直接子分类，不含孙辈；`root_only=true` 只查根分类，不可同时指定 parent_id。两者省略则查询全部层级。active 省略包含启用与停用；search 至多 200 字符，按名称或 slug 不区分大小写的字面子串查询，`%/_` 不作通配符。客户端分页获取后按 parent_id 组树，再以 `(position,id)` 排列同级节点；`position` 不控制翻页顺序。
+
+`changes` 只允许 `slug/name/description/parent_id/image_url/position/is_active`；省略保留，只有 parent_id/image_url 可传 null。position 为有符号 32 位整数。PATCH JSONB 文本最多 256 KiB；不允许改 ID、时间戳或注入其他表字段。移动到根传 `parent_id:null`，停用传 `is_active:false`；**停用不会停用子分类或商品，也不删除关联**。图片 URL 只保存，不负责上传或抓取。
+
+更新必须保留 updated_at 的微秒精度，不经 JavaScript Date 转换；旧时间戳返回 `PT409`，应重新读取并确认意图，不能自动覆盖。无变化 PATCH 不推进时间戳；底表正常更新仍由既有 trigger 更新时间。数据库保护自环、祖先循环、悬空父节点和唯一 slug；任意失败回滚全部字段。锁竞争 `55P03` / 旧快照 `40001` 应重试完整请求，保留原时间戳。
+
+创建不是 upsert；重复 UUID/slug 为 `23505`，响应丢失先按原 UUID 查询，不换 UUID 盲目重建。更新无历史响应缓存，结果未知先重新读取；不存在为 `PT404`，非法字段为 `22023`，非管理员为 `42501`。这组工具不提供级联删除分类树，删除和批量重组需另行明确业务合同。
+
 ## Customer 与登录身份
 
 `customers.id` 是独立商业 UUID，**不等于 Auth user ID**。`auth_user_id` 是唯一、可空的登录关联；联系邮箱非唯一，不用邮箱或客户端 metadata 自动认领/合并客户。注册创建新 Customer，后台 `create_customer` 可创建无账号客户；目前没有客户合并、账号重关联或为无账号客户代下单的 RPC。

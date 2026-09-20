@@ -1359,4 +1359,103 @@ begin
 end;
 $$;
 
+-- Explicit administrator category DTO; do not expose future table columns.
+CREATE FUNCTION private.admin_category_json(p_category public.categories) RETURNS jsonb
+    LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
+  select jsonb_build_object('id',p_category.id,'slug',p_category.slug,'name',p_category.name,
+    'description',p_category.description,'parent_id',p_category.parent_id,'image_url',p_category.image_url,
+    'position',p_category.position,'is_active',p_category.is_active,
+    'created_at',p_category.created_at,'updated_at',p_category.updated_at);
+$$;
+
+CREATE FUNCTION public.get_admin_category(category_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.admin_category_json(c) from public.categories c where c.id=category_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_categories(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    parent_id uuid DEFAULT NULL, root_only boolean DEFAULT false, active boolean DEFAULT NULL,
+    search text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100 or root_only is null
+    or (root_only and parent_id is not null) or length(search)>200 then
+    raise exception using errcode='22023', message='invalid category list filters';
+  end if;
+  with candidates as materialized (
+    select c as category,c.id from public.categories c where (after_id is null or c.id>after_id)
+      and (list_admin_categories.parent_id is null or c.parent_id=list_admin_categories.parent_id)
+      and (not root_only or c.parent_id is null) and (active is null or c.is_active=active)
+      and (nullif(btrim(search),'') is null or strpos(lower(c.name),lower(btrim(search)))>0
+        or strpos(lower(c.slug),lower(btrim(search)))>0)
+    order by c.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(private.admin_category_json(p.category) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION public.update_category(category_id uuid, expected_updated_at timestamptz, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_category public.categories; v_new public.categories; v_key text; v_value jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if category_id is null or expected_updated_at is null or not isfinite(expected_updated_at)
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid category patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('slug','name','description','parent_id','image_url','position','is_active')
+      or (v_key in ('slug','name','description') and jsonb_typeof(v_value)<>'string')
+      or (v_key in ('parent_id','image_url') and jsonb_typeof(v_value) not in ('string','null'))
+      or (v_key='position' and (jsonb_typeof(v_value)<>'number' or v_value::text !~ '^-?[0-9]+$'))
+      or (v_key='is_active' and jsonb_typeof(v_value)<>'boolean') then
+      raise exception using errcode='22023', message='unknown or invalid category field';
+    end if;
+  end loop;
+  select * into v_category from public.categories c where c.id=category_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='category not found'; end if;
+  if v_category.updated_at is distinct from expected_updated_at then
+    raise exception using errcode='PT409', message='category was modified; reread before editing';
+  end if;
+  v_new := jsonb_populate_record(v_category,changes);
+  if v_new is not distinct from v_category then return private.admin_category_json(v_category); end if;
+  update public.categories c set slug=v_new.slug,name=v_new.name,description=v_new.description,
+    parent_id=v_new.parent_id,image_url=v_new.image_url,position=v_new.position,is_active=v_new.is_active
+  where c.id=category_id returning c.* into v_category;
+  return private.admin_category_json(v_category);
+end;
+$$;
+
+CREATE FUNCTION public.create_category(category_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_category public.categories;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if category_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or jsonb_typeof(changes->'slug') is distinct from 'string'
+    or jsonb_typeof(changes->'name') is distinct from 'string' then
+    raise exception using errcode='22023', message='category id, slug and name are required';
+  end if;
+  insert into public.categories(id,slug,name) values(category_id,changes->>'slug',changes->>'name')
+    returning * into v_category;
+  return public.update_category(category_id,v_category.updated_at,changes);
+end;
+$$;
+
 commit;

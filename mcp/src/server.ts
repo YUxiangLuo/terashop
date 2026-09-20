@@ -12,6 +12,7 @@ import {
   createdCursor,
   itemQuantities,
   productChanges,
+  categoryChanges,
   refund,
 } from './schemas';
 
@@ -367,6 +368,42 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       reason: z.string().trim().min(1).max(4000),
     }),
     true,
+    true,
+  );
+  rpc(
+    'get_admin_category',
+    'Read category details, including inactive categories and the exact updated_at edit token. Missing categories return null.',
+    z.strictObject({ category_id: id }),
+  );
+  rpc(
+    'list_admin_categories',
+    'List categories by UUID with an opaque after_id cursor. parent_id selects direct children; root_only selects roots. Includes inactive categories unless filtered. Build the tree from parent_id after pagination; position is sibling ordering, not page ordering.',
+    z
+      .strictObject({
+        page_size: pageSize,
+        after_id: id.optional(),
+        parent_id: id.optional(),
+        root_only: z.boolean().optional(),
+        active: z.boolean().optional(),
+        search,
+      })
+      .refine((value) => !value.root_only || value.parent_id === undefined, {
+        message: 'root_only and parent_id are mutually exclusive',
+      }),
+  );
+  rpc(
+    'create_category',
+    'Create a category using a retained UUID; defaults active. Not an upsert: if the response is lost, read that UUID before retrying. No product associations are changed.',
+    z.strictObject({
+      category_id: id,
+      changes: categoryChanges.extend({ slug: z.string(), name: z.string() }),
+    }),
+    true,
+  );
+  rpc(
+    'update_category',
+    'Atomically edit, move or deactivate a category. Supply the exact updated_at string from get_admin_category; never convert through Date. Omitted fields are preserved; parent_id:null moves to root. Deactivation does not deactivate children or products. Reread on conflicts; cycles are rejected.',
+    z.strictObject({ category_id: id, expected_updated_at: z.string().min(1), changes: categoryChanges }),
     true,
   );
   return server;

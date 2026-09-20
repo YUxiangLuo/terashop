@@ -1643,6 +1643,10 @@ export type Database = {
         Args: { idempotency_key?: string; ttl_seconds?: number }
         Returns: Json
       }
+      create_category: {
+        Args: { category_id: string; changes: Json }
+        Returns: Json
+      }
       create_checkout_quote: {
         Args: {
           address?: Json
@@ -1768,6 +1772,7 @@ export type Database = {
         Args: { as_of?: string; max_quotes?: number }
         Returns: Json
       }
+      get_admin_category: { Args: { category_id: string }; Returns: Json }
       get_admin_customer: { Args: { customer_id: string }; Returns: Json }
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_product: { Args: { product_id: string }; Returns: Json }
@@ -1810,6 +1815,17 @@ export type Database = {
         Returns: Json
       }
       is_admin: { Args: never; Returns: boolean }
+      list_admin_categories: {
+        Args: {
+          active?: boolean
+          after_id?: string
+          page_size?: number
+          parent_id?: string
+          root_only?: boolean
+          search?: string
+        }
+        Returns: Json
+      }
       list_admin_customers: {
         Args: {
           after_cursor?: Json
@@ -2057,6 +2073,14 @@ export type Database = {
           items: Json
           note?: string
           shipping_method_id?: string
+        }
+        Returns: Json
+      }
+      update_category: {
+        Args: {
+          category_id: string
+          changes: Json
+          expected_updated_at: string
         }
         Returns: Json
       }
