@@ -456,6 +456,14 @@ POST /rest/v1/rpc/receive_return
 
 客户创建只规范化邮箱首尾空白及空串，不按邮箱合并客户；匿名化后的重放不会恢复或返回旧 PII。库存首次成功绑定实际仓库，之后默认仓变化不改变重放目标；省略仓库与显式指定仓库是不同请求。手工收款重放可返回已退款订单，不再次记账。这三个命令的键格式错误为 `22023`，同键参数冲突为 `PT409`，权限不足为 `42501`，已绑定资源不存在为 `PT404`；其他业务校验仍遵循各命令原有错误合同。
 
+### 账本收退款汇总
+
+`get_admin_payment_summary(start_at, end_at)` 仅 admin/service 可调用，同名 MCP 工具只读。按 `commerce.payment_transactions.created_at` 的 `[start_at,end_at)` 区间，统计当前 succeeded 的 capture/refund；不是按订单创建时间、provider occurred_at 或 processed_at 统计。包含手工记账，不包含未匹配渠道资金、支付意图、退款请求或 pending/failed 记录，零元订单没有资金记录则不计入。不能将结果称为营业收入、利润、银行结算或渠道实际到账。
+
+返回 start_at/end_at、currency=`USD`、time_basis=`payment_transactions.created_at`、capture_count/refund_count、captured_amount/refunded_amount/net_amount。笔数和金额均为字符串，金额固定两位小数；net_amount=本区间收款−本区间退款，可为负数，不要求退款的原始收款也在区间内。没有订单、客户、渠道引用或任意 metadata。
+
+必须提供有限、递增的时间边界，跨度不超过 744 小时。MCP 要求带 Z 或偏移量的 ISO 时间，不自动应用店铺/用户时区，数据库 RPC 采用 timestamptz 解析规则。恰好 31 天允许；空结果返回零，非法范围 `22023`，无权限 `42501`。单次最多 10,000 条匹配账本记录，超过返回 `PT422`，应缩小区间，不返回截断总额。索引与 limit 限制候选记录量；不提供任意分组/SQL/导出，也不保证跨多次请求的共同快照。数据晚到或状态变化可能改变历史区间结果，不能当作封账报表。
+
 ### 单店基础设置
 
 `get_admin_shop_settings()` 和 `update_shop_settings(expected_revision, changes)` 仅 admin/service 可调用，同名 MCP 工具分别只读/写入。设置存储在私有单例表，不开放底表写入，也不与现有 shop metafield 的任意 owner UUID 自动绑定。

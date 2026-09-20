@@ -2037,4 +2037,32 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.get_admin_payment_summary(start_at timestamptz, end_at timestamptz) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_count bigint; v_captures bigint; v_refunds bigint; v_captured numeric; v_refunded numeric;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if start_at is null or end_at is null or not isfinite(start_at) or not isfinite(end_at)
+    or end_at<=start_at or end_at-start_at>interval '744 hours' then
+    raise exception using errcode='22023', message='require finite increasing range of at most 31 days';
+  end if;
+  select count(*),count(*) filter (where t.kind='capture'),count(*) filter (where t.kind='refund'),
+    coalesce(sum(t.amount) filter (where t.kind='capture'),0),
+    coalesce(sum(t.amount) filter (where t.kind='refund'),0)
+  into v_count,v_captures,v_refunds,v_captured,v_refunded
+  from (select p.kind,p.amount from commerce.payment_transactions p
+    where p.status='succeeded' and p.kind in ('capture','refund')
+      and p.created_at>=start_at and p.created_at<end_at limit 10001) t;
+  if v_count>10000 then
+    raise exception using errcode='PT422', message='report exceeds 10000 records; narrow the time range';
+  end if;
+  return jsonb_build_object('start_at',start_at,'end_at',end_at,'currency','USD',
+    'time_basis','payment_transactions.created_at','capture_count',v_captures::text,'refund_count',v_refunds::text,
+    'captured_amount',round(v_captured,2)::text,'refunded_amount',round(v_refunded,2)::text,
+    'net_amount',round(v_captured-v_refunded,2)::text);
+end;
+$$;
+
 commit;

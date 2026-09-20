@@ -1669,6 +1669,8 @@ CREATE INDEX payment_provider_events_object_idx ON commerce.payment_provider_eve
 CREATE INDEX payment_provider_events_retry_idx ON commerce.payment_provider_events USING btree (status, created_at, id) WHERE (status = ANY (ARRAY['received'::text, 'failed'::text]));
 CREATE INDEX payment_transactions_intent_idx ON commerce.payment_transactions USING btree (payment_intent_id, created_at DESC) WHERE (payment_intent_id IS NOT NULL);
 CREATE INDEX payment_transactions_order_idx ON commerce.payment_transactions USING btree (order_id, created_at DESC);
+CREATE INDEX payment_transactions_reporting_idx ON commerce.payment_transactions (created_at)
+    INCLUDE (kind, amount) WHERE status='succeeded' AND kind IN ('capture','refund');
 CREATE INDEX payment_transactions_parent_idx ON commerce.payment_transactions USING btree (parent_transaction_id) WHERE (parent_transaction_id IS NOT NULL);
 CREATE UNIQUE INDEX payment_transactions_provider_idempotency_uk ON commerce.payment_transactions USING btree (provider, idempotency_key) WHERE (idempotency_key IS NOT NULL);
 CREATE INDEX provider_money_movements_order_idx ON commerce.provider_money_movements USING btree (order_id, created_at DESC) WHERE (order_id IS NOT NULL);

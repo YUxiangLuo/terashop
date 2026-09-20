@@ -114,6 +114,11 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     z.strictObject({}),
   );
   rpc(
+    'get_admin_payment_summary',
+    'Summarize succeeded USD capture/refund ledger entries by their database created_at in [start_at,end_at), not order creation or provider event time. Require explicit ISO timestamps with offsets, at most 744 hours and 10000 matching entries; PT422 means narrow the range, never truncated totals. Counts and amounts are decimal strings. Includes manual bookkeeping; excludes intents, pending/failed entries and unmatched provider movements. Net may be negative. Not revenue, profit, bank settlement or verified provider cash. No PII or per-order data. Separate calls are not a shared snapshot; shop timezone is not applied.',
+    z.strictObject({ start_at: z.iso.datetime({ offset: true }), end_at: z.iso.datetime({ offset: true }) }),
+  );
+  rpc(
     'update_shop_settings',
     'Update single-shop name and presentation timezone after reading its revision. Timezone must exactly match a PostgreSQL timezone name such as Asia/Shanghai or UTC. Does not change checkout currency, stored timestamps, database timezone or existing storefront UI. Unknown/null fields rejected; empty or unchanged patch preserves revision. Never replace a stale expected_revision automatically.',
     z.strictObject({

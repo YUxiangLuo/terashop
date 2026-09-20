@@ -782,6 +782,9 @@ REVOKE ALL ON FUNCTION public.get_admin_shop_settings(), public.update_shop_sett
 GRANT EXECUTE ON FUNCTION public.get_admin_shop_settings(), public.update_shop_settings(integer,jsonb)
   TO authenticated,service_role;
 
+REVOKE ALL ON FUNCTION public.get_admin_payment_summary(timestamptz,timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.get_admin_payment_summary(timestamptz,timestamptz) TO authenticated,service_role;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;
