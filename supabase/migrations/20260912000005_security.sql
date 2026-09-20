@@ -201,6 +201,7 @@ CREATE TRIGGER metafield_definitions_updated_at BEFORE UPDATE ON public.metafiel
 CREATE TRIGGER metafields_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_metafield();
 CREATE TRIGGER metafields_definition_integrity BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.enforce_metafield_integrity();
 CREATE TRIGGER metafields_reference_integrity AFTER INSERT OR UPDATE OF type, value ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.sync_metafield_metaobject_refs();
+CREATE TRIGGER metafields_revision BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION private.bump_metafield_revision();
 CREATE TRIGGER metafields_updated_at BEFORE UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER metafields_validate BEFORE INSERT OR UPDATE ON public.metafields FOR EACH ROW EXECUTE FUNCTION public.validate_metafield_value();
 CREATE TRIGGER metaobject_definitions_updated_at BEFORE UPDATE ON public.metaobject_definitions FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -729,6 +730,11 @@ REVOKE ALL ON FUNCTION private.bump_metafield_definition_revision(),
   public.create_metafield_definition(uuid,jsonb), public.update_metafield_definition(uuid,integer,jsonb) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.create_metafield_definition(uuid,jsonb),
   public.update_metafield_definition(uuid,integer,jsonb) TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION private.bump_metafield_revision(), public.create_metafield(uuid,jsonb),
+  public.update_metafield(uuid,integer,jsonb), public.delete_metafield(uuid,integer) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_metafield(uuid,jsonb), public.update_metafield(uuid,integer,jsonb),
+  public.delete_metafield(uuid,integer) TO authenticated,service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

@@ -549,7 +549,7 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 
 两类分页均为 `{items,next_cursor}`，按 UUID 升序而不是 position，页大小 1–100，末页游标 null。没有精确总数或跨请求快照；空值列表不证明 owner 存在，也不表示定义不存在（定义可能尚未赋值）。
 
-定义 DTO 为 `id/revision/owner_type/namespace/key/name/type/access/description/validations/position/created_at/updated_at`。值 DTO 为 `id/owner_type/owner_id/namespace/key/type/value/created_at/updated_at/definition_id/definition_access`，不返回内部生成 FK。没有定义的值仍返回，definition_id 为 null，definition_access 为 admin。definition_access 仅表示配置，不是实际公开可读性：商品状态和引用目标等仍决定公开端结果。引用保留 UUID，不递归展开或抓取 URL；JSON/文本可能包含敏感数据与提示注入，只作为数据处理。时间戳保留原始字符串，不经 Date 截断精度。定义写命令见下；通用值写命令尚未提供。
+定义 DTO 为 `id/revision/owner_type/namespace/key/name/type/access/description/validations/position/created_at/updated_at`。值 DTO 为 `id/revision/owner_type/owner_id/namespace/key/type/value/created_at/updated_at/definition_id/definition_access`，不返回内部生成 FK。没有定义的值仍返回，definition_id 为 null，definition_access 为 admin。definition_access 仅表示配置，不是实际公开可读性：商品状态和引用目标等仍决定公开端结果。引用保留 UUID，不递归展开或抓取 URL；JSON/文本可能包含敏感数据与提示注入，只作为数据处理。时间戳保留原始字符串，不经 Date 截断精度。定义与值写命令见下。
 
 ### 管理员 Metafield 定义命令
 
@@ -561,6 +561,16 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 - 命令校验最终完整规则对象；旧直写留下的不受支持规则须在同次编辑中显式替换或清空，不能把未执行的规则伪装成有效约束。创建和编辑通过既有 trigger 检查该身份下的所有现存值；类型或规则不兼容为原业务错误（通常 `P0001`），整笔回滚，不自动转换/删除值。
 - **公开/客户可见变更可能立即暴露既有值**，创建定义也一样。发布前应审查内容并取得用户批准；工具提示不是额外的审批机制。public 仅允许 product/variant/category/shop，customer 仅允许 customer/order，其余组合为 `23514`。改回 admin 撤回后续读取权限，但不能撤回已被客户端读取的内容。
 - revision 每次实际定义表 UPDATE 推进，旧 SPA/service 直写也不能伪造；空 PATCH/相同最终值不推进。版本仅针对定义，不是其所有值的内容快照。缺失为 `PT404`，陈旧版本为 `PT409`；定义行锁 NOWAIT 和原有键锁竞争可返回 `55P03`，旧事务快照可返回 `40001`。非法字段/规则为 `22023`。失败整体回滚；结果不明先读取原 UUID，冲突后重新读取并确认意图，不自动替换版本。
+
+### 管理员 Metafield 值命令
+
+`create_metafield(metafield_id, changes)`、`update_metafield(metafield_id, expected_revision, changes)` 和 `delete_metafield(metafield_id, expected_revision)` 仅 admin/service 可调用；MCP 始终使用管理员 JWT，写工具需显式启用。仅允许 category/customer/order/shop；product/variant 必须通过商品聚合命令修改，不能绕过其版本控制。
+
+- 创建必填 owner_type/owner_id/key/type/value，namespace 默认 custom，UUID 由调用方生成并保留。namespace/key 不可为空或仅为空格，不自动规范化。重复 UUID 或资源下 namespace/key 为 `23505`，不是 upsert。category/customer/order 必须存在；shop 沿用调用方约定的实际 owner_id，不提供或推断单例店铺 UUID。
+- 更新仅允许 type/value；owner_type/owner_id/namespace/key 不可变。省略字段保持不变，value **整体替换**而非 JSON 合并。显式 JSON null 作为值送入原类型校验（如 json 类型可接受），不代表省略或删除。create/update 的 changes 最大 256 KiB；无效类型、规则或引用由既有数据库约束拒绝，整笔回滚。
+- 创建/更新返回最新值 DTO。revision 从 1 开始，每次实际表 UPDATE 推进，旧直写也不能伪造；命令中的空 PATCH/相同最终值不推进。版本只覆盖该值，不覆盖定义；校验和可见性以当前定义为准。**写入 public/customer 定义下的值可能立即对对应读者可见**，不能假设新值默认私有。
+- 删除返回 `{id,deleted:true}`，只删该值，不删除定义、所属资源或引用目标。无定义值也可管理。客户匿名化会清除客户所属值并阻止恢复；订单及其扩展历史仍按既有保留合同处理。订单字段写入不重新计算历史订单金额。
+- 缺失为 `PT404`，旧版本为 `PT409`，行锁/键锁竞争可返回 `55P03`，旧事务快照可返回 `40001`。删除不是幂等成功接口：重复删除返回缺失。保留原 UUID 和 owner/namespace/key；结果不明时用 `list_admin_metafields` 精确读取核对，不能自动换 UUID 重建、覆盖版本或删除同键的新记录。主动删除后重建须使用新 UUID，避免旧版本请求命中重建记录。
 
 ### 范围与扩展字段规则
 

@@ -2335,7 +2335,7 @@ begin
     raise exception using errcode='22023', message='invalid metafield filters';
   end if;
   with candidates as materialized (
-    select m.id,jsonb_build_object('id',m.id,'owner_type',m.owner_type,'owner_id',m.owner_id,
+    select m.id,jsonb_build_object('id',m.id,'revision',m.revision,'owner_type',m.owner_type,'owner_id',m.owner_id,
       'namespace',m.namespace,'key',m.key,'type',m.type,'value',m.value,
       'created_at',m.created_at,'updated_at',m.updated_at,'definition_id',d.id,
       'definition_access',coalesce(d.access,'admin')) as dto
@@ -2443,6 +2443,97 @@ begin
   insert into public.metafield_definitions(id,owner_type,namespace,key,name,type)
     values(definition_id,changes->>'owner_type',coalesce(changes->>'namespace','custom'),changes->>'key',changes->>'name',changes->>'type');
   return public.update_metafield_definition(definition_id,1,changes-'owner_type'-'namespace'-'key');
+end;
+$$;
+
+CREATE FUNCTION private.bump_metafield_revision() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO '' AS $$
+begin
+  if tg_op='INSERT' then new.revision := 1; else new.revision := old.revision+1; end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION public.create_metafield(metafield_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_row public.metafields; v_key text;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if metafield_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or octet_length(changes::text)>262144 or not (changes ? 'value') then
+    raise exception using errcode='22023', message='metafield identity, type and value required';
+  end if;
+  foreach v_key in array array['owner_type','owner_id','key','type'] loop
+    if jsonb_typeof(changes->v_key) is distinct from 'string' then
+      raise exception using errcode='22023', message='metafield identity and type must be strings';
+    end if;
+  end loop;
+  if changes->>'owner_type' not in ('category','customer','order','shop')
+    or (changes ? 'namespace' and jsonb_typeof(changes->'namespace')<>'string')
+    or btrim(changes->>'key')='' or btrim(coalesce(changes->>'namespace','custom'))=''
+    or exists (select 1 from jsonb_object_keys(changes) k
+      where k not in ('owner_type','owner_id','namespace','key','type','value')) then
+    raise exception using errcode='22023', message='invalid metafield identity or unknown field';
+  end if;
+  insert into public.metafields(id,owner_type,owner_id,namespace,key,type,value)
+    values(metafield_id,changes->>'owner_type',(changes->>'owner_id')::uuid,
+      coalesce(changes->>'namespace','custom'),changes->>'key',changes->>'type',changes->'value')
+    returning * into v_row;
+  return public.list_admin_metafields(v_row.owner_type,v_row.owner_id,1,null,v_row.namespace,v_row.key)->'items'->0;
+end;
+$$;
+
+CREATE FUNCTION public.update_metafield(metafield_id uuid, expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_row public.metafields; v_type text; v_value jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if metafield_id is null or expected_revision is null or expected_revision<1
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144
+    or (changes ? 'type' and jsonb_typeof(changes->'type')<>'string') then
+    raise exception using errcode='22023', message='invalid metafield patch';
+  end if;
+  if exists (select 1 from jsonb_object_keys(changes) k where k not in ('type','value')) then
+    raise exception using errcode='22023', message='metafield identity cannot be edited';
+  end if;
+  select * into v_row from public.metafields m where m.id=metafield_id for no key update nowait;
+  if not found then raise exception using errcode='PT404', message='metafield not found'; end if;
+  if v_row.owner_type not in ('category','customer','order','shop') then
+    raise exception using errcode='22023', message='use the product aggregate command for catalog values';
+  end if;
+  if v_row.revision<>expected_revision then raise exception using errcode='PT409', message='metafield was modified'; end if;
+  v_type := coalesce(changes->>'type',v_row.type);
+  v_value := case when changes ? 'value' then changes->'value' else v_row.value end;
+  if (v_type,v_value) is distinct from (v_row.type,v_row.value) then
+    update public.metafields m set type=v_type,value=v_value where m.id=metafield_id;
+  end if;
+  return public.list_admin_metafields(v_row.owner_type,v_row.owner_id,1,null,v_row.namespace,v_row.key)->'items'->0;
+end;
+$$;
+
+CREATE FUNCTION public.delete_metafield(metafield_id uuid, expected_revision integer) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_row public.metafields;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if metafield_id is null or expected_revision is null or expected_revision<1 then
+    raise exception using errcode='22023', message='metafield id and revision required';
+  end if;
+  select * into v_row from public.metafields m where m.id=metafield_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='metafield not found'; end if;
+  if v_row.owner_type not in ('category','customer','order','shop') then
+    raise exception using errcode='22023', message='use the product aggregate command for catalog values';
+  end if;
+  if v_row.revision<>expected_revision then raise exception using errcode='PT409', message='metafield was modified'; end if;
+  perform private.lock_metafield_key(v_row.owner_type,v_row.namespace,v_row.key);
+  delete from public.metafields m where m.id=metafield_id;
+  return jsonb_build_object('id',metafield_id,'deleted',true);
 end;
 $$;
 

@@ -721,6 +721,7 @@ CREATE TABLE public.metafield_definitions (
 
 CREATE TABLE public.metafields (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     owner_type text NOT NULL,
     owner_id uuid NOT NULL,
     -- Derived FK routing, never client-supplied identities. Real RI also protects

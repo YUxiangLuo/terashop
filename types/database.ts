@@ -473,6 +473,7 @@ export type Database = {
           owner_product_id: string | null
           owner_type: string
           owner_variant_id: string | null
+          revision: number
           type: string
           updated_at: string
           value: Json
@@ -489,6 +490,7 @@ export type Database = {
           owner_product_id?: string | null
           owner_type: string
           owner_variant_id?: string | null
+          revision?: number
           type: string
           updated_at?: string
           value: Json
@@ -505,6 +507,7 @@ export type Database = {
           owner_product_id?: string | null
           owner_type?: string
           owner_variant_id?: string | null
+          revision?: number
           type?: string
           updated_at?: string
           value?: Json
@@ -1721,6 +1724,10 @@ export type Database = {
         Args: { changes: Json; location_id: string }
         Returns: Json
       }
+      create_metafield: {
+        Args: { changes: Json; metafield_id: string }
+        Returns: Json
+      }
       create_metafield_definition: {
         Args: { changes: Json; definition_id: string }
         Returns: Json
@@ -1806,6 +1813,10 @@ export type Database = {
           customer_id: string
           expected_updated_at: string
         }
+        Returns: Json
+      }
+      delete_metafield: {
+        Args: { expected_revision: number; metafield_id: string }
         Returns: Json
       }
       dispose_return_receipt: {
@@ -2284,6 +2295,10 @@ export type Database = {
       }
       update_location: {
         Args: { changes: Json; expected_revision: number; location_id: string }
+        Returns: Json
+      }
+      update_metafield: {
+        Args: { changes: Json; expected_revision: number; metafield_id: string }
         Returns: Json
       }
       update_metafield_definition: {

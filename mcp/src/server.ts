@@ -304,6 +304,38 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
   );
 
   rpc(
+    'create_metafield',
+    'Create one category/customer/order/shop metafield with retained UUID, explicit owner UUID, key, type and JSON value; namespace defaults custom. Not an upsert. Product/variant fields use product aggregate commands. Current definition controls validation and visibility: this may immediately publish content, inspect definition and approve disclosure first. Undefined values are private. Shop requires the actual agreed owner UUID, not an inferred default. No URL fetching or reference expansion. Recover uncertain outcomes by listing the original owner/key and checking ID, never recreate with a new UUID.',
+    z.strictObject({
+      metafield_id: id,
+      changes: z.strictObject({
+        owner_type: z.enum(['category', 'customer', 'order', 'shop']),
+        owner_id: id,
+        namespace: z.string().optional(),
+        key: z.string(),
+        type: metafieldType,
+        value: z.json(),
+      }),
+    }),
+    true,
+  );
+  rpc(
+    'update_metafield',
+    'Replace type and/or the entire JSON value for a category/customer/order/shop field at expected_revision; identity is immutable. Omitted fields stay. value:null is JSON null (only valid for types accepting it), NOT deletion. Arrays/objects replace wholesale, no merge. Current definition and customer anonymization guards still apply. May immediately change public/customer-visible data; inspect and approve first. Does not change order pricing or historical snapshots. Reread conflicts, never automatically replace revision.',
+    z.strictObject({
+      metafield_id: id,
+      expected_revision: version,
+      changes: z.strictObject({ type: metafieldType.optional(), value: z.json().optional() }),
+    }),
+    true,
+  );
+  rpc(
+    'delete_metafield',
+    'Permanently remove one category/customer/order/shop field at expected_revision. Does not delete its definition, owner, or referenced Metaobjects. No undo or idempotent replay: missing returns PT404. After uncertain outcome list the original owner/key and check UUID; do not delete a replacement automatically. Product/variant removal uses product aggregate commands.',
+    z.strictObject({ metafield_id: id, expected_revision: version }),
+    true,
+  );
+  rpc(
     'create_metafield_definition',
     'Create a metafield definition using retained UUID, owner_type, key, name and type; namespace defaults custom, access defaults admin. Validates all existing values for that identity atomically. Explicit public/customer access may immediately expose EXISTING values: inspect content and obtain approval before publishing. Not an upsert; read original UUID after uncertain outcome. No value conversion or automatic content sanitization.',
     z.strictObject({

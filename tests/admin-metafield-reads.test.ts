@@ -111,6 +111,7 @@ test('按 owner 隔离读取无定义私有值；保留 JSON 与时间戳，不�
   expect(Object.keys(first.items[0]).sort()).toEqual(
     [
       'id',
+      'revision',
       'owner_type',
       'owner_id',
       'namespace',
