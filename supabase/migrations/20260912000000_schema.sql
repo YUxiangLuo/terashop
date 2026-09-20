@@ -688,6 +688,7 @@ CREATE TABLE public.locations (
     address jsonb,
     is_default boolean DEFAULT false NOT NULL,
     is_active boolean DEFAULT true NOT NULL,
+    revision integer DEFAULT 1 NOT NULL CHECK (revision > 0),
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

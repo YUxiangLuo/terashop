@@ -385,6 +385,7 @@ export type Database = {
           is_active: boolean
           is_default: boolean
           name: string
+          revision: number
         }
         Insert: {
           address?: Json | null
@@ -394,6 +395,7 @@ export type Database = {
           is_active?: boolean
           is_default?: boolean
           name: string
+          revision?: number
         }
         Update: {
           address?: Json | null
@@ -403,6 +405,7 @@ export type Database = {
           is_active?: boolean
           is_default?: boolean
           name?: string
+          revision?: number
         }
         Relationships: []
       }
@@ -1699,6 +1702,10 @@ export type Database = {
         }
         Returns: Json
       }
+      create_location: {
+        Args: { changes: Json; location_id: string }
+        Returns: Json
+      }
       create_order: {
         Args: {
           address?: Json
@@ -2080,6 +2087,14 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      set_default_location: {
+        Args: {
+          expected_default_id?: string
+          expected_revision: number
+          location_id: string
+        }
+        Returns: Json
+      }
       set_user_role: {
         Args: { role: string; user_id: string }
         Returns: {
@@ -2141,6 +2156,10 @@ export type Database = {
           fulfillment_id: string
           idempotency_key: string
         }
+        Returns: Json
+      }
+      update_location: {
+        Args: { changes: Json; expected_revision: number; location_id: string }
         Returns: Json
       }
       update_order_address: {

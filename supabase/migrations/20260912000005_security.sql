@@ -182,6 +182,7 @@ CREATE TRIGGER addresses_normalize_country BEFORE INSERT OR UPDATE OF country ON
 CREATE TRIGGER addresses_single_default BEFORE INSERT ON public.addresses FOR EACH ROW WHEN (new.is_default) EXECUTE FUNCTION public.enforce_single_default_address();
 CREATE TRIGGER addresses_updated_at BEFORE UPDATE ON public.addresses FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
 CREATE TRIGGER categories_updated_at BEFORE UPDATE ON public.categories FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+CREATE TRIGGER locations_revision BEFORE INSERT OR UPDATE ON public.locations FOR EACH ROW EXECUTE FUNCTION private.bump_location_revision();
 CREATE TRIGGER fulfillments_commercial_fields_immutable BEFORE DELETE OR UPDATE ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION private.protect_fulfillment_record();
 CREATE TRIGGER fulfillments_no_truncate BEFORE TRUNCATE ON public.fulfillments FOR EACH STATEMENT EXECUTE FUNCTION private.protect_fulfillment_record();
 CREATE TRIGGER fulfillments_order_paid BEFORE INSERT ON public.fulfillments FOR EACH ROW EXECUTE FUNCTION private.prevent_unpaid_fulfillment();
@@ -671,6 +672,12 @@ REVOKE ALL ON FUNCTION public.get_admin_location(uuid), public.list_admin_locati
   public.list_admin_inventory_movements(integer,text,uuid,uuid,uuid,text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_admin_location(uuid), public.list_admin_locations(integer,uuid,boolean,text),
   public.list_admin_inventory_movements(integer,text,uuid,uuid,uuid,text) TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION private.bump_location_revision() FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.create_location(uuid,jsonb), public.update_location(uuid,integer,jsonb),
+  public.set_default_location(uuid,integer,uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.create_location(uuid,jsonb), public.update_location(uuid,integer,jsonb),
+  public.set_default_location(uuid,integer,uuid) TO authenticated,service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

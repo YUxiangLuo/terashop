@@ -425,13 +425,31 @@ POST /rest/v1/rpc/receive_return
 
 以下只读 RPC 仅 admin/service 可用，同时作为同名 MCP 工具。普通客户即使能读取部分仓库底表，也不能调用这组管理员入口。
 
-- `get_admin_location(location_id)`：不存在返回 null，包含停用仓库。DTO 为 `id/code/name/address/is_default/is_active/created_at`，不返回库存。address 为既有 JSON 值，不保证特定地址格式；仓库没有编辑版本字段，created_at 不能用作编辑令牌。
+- `get_admin_location(location_id)`：不存在返回 null，包含停用仓库。DTO 为 `id/code/name/address/is_default/is_active/revision/created_at`，不返回库存。address 为既有 JSON 值，不保证特定地址格式；编辑令牌为 revision，不是 created_at。
 - `list_admin_locations(page_size=20, after_id=null, active=null, search=null)`：UUID 升序分页，返回 `{items,next_cursor}`；active 省略包含启用与停用，search 按名称/code 不区分大小写的字面子串搜索，去除首尾普通空格，最多 200 字符，`%/_` 不作通配符。is_default 与 is_active 分开表达；默认仓必须同时启用才用于新结账。
 - `list_admin_inventory_movements(page_size=20, after_id=null, variant_id=null, location_id=null, order_id=null, reason_filter=null)`：按流水 bigint ID 倒序返回 `{items,next_cursor}`，筛选按 AND 组合；reason_filter 为 `order/cancel/restock/adjust/return`。每行显式返回 `id/variant_id/location_id/delta/on_hand_after/reason/order_id/actor_id/note/created_at`。actor_id 是可为 null 的 Auth ID，不是客户 ID；note 是不可信商家文本。
 
 两种列表 page_size 为 1–100，末页 next_cursor 为 null，修改筛选应清除游标。流水 id、next_cursor 和 after_id **均为十进制字符串**，不能转 Number；after_id 范围 1–9223372036854775807，不接受符号、空白或前导零。非法分页/筛选为 `22023`。列表不保证跨请求快照；流水 ID 是分配顺序，不是提交顺序，迟提交行可能被翻页跳过，不能用作可靠消费队列。
 
-`on_hand_after` 是该流水记录的历史实物库存，不代表当前可用量；预占及释放未必产生实物流水。当前精确库存与预占仍查 `get_inventory_availability`，不能只加总一页流水。本阶段不提供仓库写入、默认仓切换、库存调拨或流水修改工具。
+`on_hand_after` 是该流水记录的历史实物库存，不代表当前可用量；预占及释放未必产生实物流水。当前精确库存与预占仍查 `get_inventory_availability`，不能只加总一页流水。不提供库存调拨或流水修改工具。
+
+### 管理员仓库命令
+
+以下 RPC 仅 admin/service 可用，同名 MCP 工具需启用写开关；均返回目标仓库 DTO。
+
+| RPC | 参数与合同 |
+| --- | --- |
+| `create_location` | `location_id, changes`；保留调用方 UUID，必填字符串 code/name，默认启用、非默认仓，不创建库存 |
+| `update_location` | `location_id, expected_revision, changes`；修改 code/name/address/is_active |
+| `set_default_location` | `location_id, expected_revision, expected_default_id`；目标必须已启用；expected_default_id 是读取时启用中的默认仓 ID，省略/null 表示断言当前没有启用中的默认仓 |
+
+PATCH 仅允许上述四个字段，省略保留；address 接受既有任意 JSON，null 清空；code/name 不可 null 或全普通空格，不自动 trim；is_active 必须 boolean。JSONB 文本最多 256 KiB。不能设置 ID、created_at、revision 或 is_default。revision 由触发器维护，旧的直接表写入同样推进版本，不能伪造；无变化 PATCH 不推进版本。创建可能因附加字段初始化推进版本，客户端以返回值为准。
+
+切换默认仓在单事务清除其他仓库（包括停用仓）的默认标记并设置目标。启用中的默认仓不能经 update_location 停用，需先切换；重新启用带有历史默认标记的仓库会清除该标记，不隐式恢复默认。唯一索引仍只限制最多一个**启用中的**默认仓；旧的表接口权限不在本次收紧，上述命令保护不等于禁止管理员经旧表接口清空默认仓。
+
+仓库配置命令先取得 `SHARE ROW EXCLUSIVE NOWAIT` 表锁，再取行锁，和旧的直接表写入串行，普通查询不被表锁阻塞。这适用于低频配置，不是并行批量仓库编辑接口。锁冲突为 `55P03`，旧版本或旧默认选择为 `PT409`，不存在为 `PT404`，非法 PATCH 为 `22023`，重复 UUID/code 为 `23505`；旧事务快照可能为 `40001`。失败整体回滚，不自动重试或替换预期值。
+
+创建不是 upsert，命令不缓存历史响应，结果未知先读取原 UUID 和当前默认选择。切换/停用不搬库存、不重写历史订单或既有预占，也不清理库存流水；切换影响后续默认仓解析，原预占/订单继续使用其记录的仓库。不提供仓库删除工具，引用中的仓库应停用而不是强删。
 
 ## 促销范围与扩展字段管理
 

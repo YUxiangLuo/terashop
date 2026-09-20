@@ -14,6 +14,12 @@ export const search = z.string().max(200).optional();
 export const reason = z.string().max(2000).optional();
 export const order = z.strictObject({ order_id: id });
 export const createdCursor = z.strictObject({ created_at: z.string().min(1), id }).optional();
+export const locationChanges = z.strictObject({
+  code: z.string().optional(),
+  name: z.string().optional(),
+  address: z.json().optional(),
+  is_active: z.boolean().optional(),
+});
 export const customerChanges = z.strictObject({
   email: z.string().nullable().optional(),
   full_name: z.string().optional(),

@@ -16,6 +16,7 @@ import {
   categoryChanges,
   customerChanges,
   addressChanges,
+  locationChanges,
   uploadProductMedia,
   refund,
 } from './schemas';
@@ -233,6 +234,27 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       order_id: id.optional(),
       reason_filter: z.enum(['order', 'cancel', 'restock', 'adjust', 'return']).optional(),
     }),
+  );
+  rpc(
+    'create_location',
+    'Create a warehouse with a retained UUID, code and name. Defaults active and non-default; no inventory is created. Not an upsert: read original UUID on uncertain outcome.',
+    z.strictObject({
+      location_id: id,
+      changes: locationChanges.extend({ code: z.string(), name: z.string() }),
+    }),
+    true,
+  );
+  rpc(
+    'update_location',
+    'Edit warehouse metadata or active status at expected revision. Omitted fields stay; address:null clears. Switch away before deactivating the active default. Reactivation clears legacy default flags. Does not move stock, reservations or orders; no deletion.',
+    z.strictObject({ location_id: id, expected_revision: version, changes: locationChanges }),
+    true,
+  );
+  rpc(
+    'set_default_location',
+    'Atomically select an already active warehouse for future checkout, clearing other default flags. Supply target expected_revision and observed active default UUID as expected_default_id; omit ONLY if no active default exists. Does not move inventory or existing reservations. Conflicts require reread and approval, never automatic replacement.',
+    z.strictObject({ location_id: id, expected_revision: version, expected_default_id: id.optional() }),
+    true,
   );
   rpc(
     'adjust_inventory',

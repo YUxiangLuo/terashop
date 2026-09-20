@@ -1581,7 +1581,7 @@ CREATE FUNCTION private.admin_location_json(p_location public.locations) RETURNS
     LANGUAGE sql STABLE STRICT SET search_path TO '' AS $$
   select jsonb_build_object('id',p_location.id,'code',p_location.code,'name',p_location.name,
     'address',p_location.address,'is_default',p_location.is_default,'is_active',p_location.is_active,
-    'created_at',p_location.created_at);
+    'revision',p_location.revision,'created_at',p_location.created_at);
 $$;
 
 CREATE FUNCTION public.get_admin_location(location_id uuid) RETURNS jsonb
@@ -1651,6 +1651,104 @@ begin
     case when (select count(*) from candidates)>page_size then (select id::text from page order by id limit 1) end
   into v_items,v_next from page p;
   return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
+CREATE FUNCTION private.bump_location_revision() RETURNS trigger
+    LANGUAGE plpgsql SET search_path TO '' AS $$
+begin
+  if tg_op='INSERT' then new.revision := 1;
+  elsif (to_jsonb(new)-'revision') is distinct from (to_jsonb(old)-'revision') then
+    new.revision := old.revision+1;
+  else new.revision := old.revision;
+  end if;
+  return new;
+end;
+$$;
+
+CREATE FUNCTION public.update_location(location_id uuid, expected_revision integer, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_location public.locations; v_new public.locations; v_key text; v_value jsonb;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if location_id is null or expected_revision is null or expected_revision<1
+    or jsonb_typeof(changes) is distinct from 'object' or octet_length(changes::text)>262144 then
+    raise exception using errcode='22023', message='invalid location patch';
+  end if;
+  for v_key,v_value in select * from jsonb_each(changes) loop
+    if v_key not in ('code','name','address','is_active')
+      or (v_key in ('code','name') and (jsonb_typeof(v_value)<>'string' or btrim(v_value#>>'{}')=''))
+      or (v_key='is_active' and jsonb_typeof(v_value)<>'boolean') then
+      raise exception using errcode='22023', message='unknown or invalid location field';
+    end if;
+  end loop;
+  -- Low-volume configuration commands serialize with ALL table writers,
+  -- including legacy direct updates, before taking row locks. Readers continue.
+  lock table public.locations in share row exclusive mode nowait;
+  select * into v_location from public.locations l where l.id=location_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='location not found'; end if;
+  if v_location.revision<>expected_revision then
+    raise exception using errcode='PT409', message='location was modified';
+  end if;
+  v_new := jsonb_populate_record(v_location,changes);
+  if v_location.is_default and v_location.is_active and not v_new.is_active then
+    raise exception using errcode='PT409', message='switch default location before deactivation';
+  end if;
+  -- Reactivation must not implicitly restore a legacy inactive default flag.
+  if not v_location.is_active and v_new.is_active then v_new.is_default := false; end if;
+  if v_new is distinct from v_location then
+    update public.locations l set code=v_new.code,name=v_new.name,address=v_new.address,
+      is_active=v_new.is_active,is_default=v_new.is_default
+      where l.id=location_id returning * into v_location;
+  end if;
+  return private.admin_location_json(v_location);
+end;
+$$;
+
+CREATE FUNCTION public.create_location(location_id uuid, changes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if location_id is null or jsonb_typeof(changes) is distinct from 'object'
+    or jsonb_typeof(changes->'code') is distinct from 'string'
+    or jsonb_typeof(changes->'name') is distinct from 'string' then
+    raise exception using errcode='22023', message='location id, code and name required';
+  end if;
+  lock table public.locations in share row exclusive mode nowait;
+  insert into public.locations(id,code,name) values(location_id,changes->>'code',changes->>'name');
+  return public.update_location(location_id,1,changes);
+end;
+$$;
+
+CREATE FUNCTION public.set_default_location(location_id uuid, expected_revision integer, expected_default_id uuid DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_location public.locations; v_default uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if location_id is null or expected_revision is null or expected_revision<1 then
+    raise exception using errcode='22023', message='invalid default location command';
+  end if;
+  lock table public.locations in share row exclusive mode nowait;
+  select * into v_location from public.locations l where l.id=location_id for update nowait;
+  if not found then raise exception using errcode='PT404', message='location not found'; end if;
+  select l.id into v_default from public.locations l where l.is_default and l.is_active;
+  if v_location.revision<>expected_revision or v_default is distinct from expected_default_id then
+    raise exception using errcode='PT409', message='location or default selection was modified';
+  end if;
+  if not v_location.is_active then
+    raise exception using errcode='PT409', message='default location must be active';
+  end if;
+  update public.locations l set is_default=false where l.is_default and l.id<>location_id;
+  if not v_location.is_default then
+    update public.locations l set is_default=true where l.id=location_id returning * into v_location;
+  end if;
+  return private.admin_location_json(v_location);
 end;
 $$;
 
