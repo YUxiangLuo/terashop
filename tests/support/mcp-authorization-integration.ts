@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { SQL } from 'bun';
 import { AdminBackend } from '../../mcp/src/backend';
 import { KeycloakGrantAuthorizer, type AuthorizationConfig } from '../../mcp/src/authorization';
+import { createCredentialCipher } from '../../mcp/src/credentials';
 import { validateLocalSupabase, type LocalSupabase } from '../../scripts/lib/local-supabase';
 import { createApi, type ApiOptions } from './http';
 import { mcpSession, toolData } from './mcp';
@@ -21,7 +22,7 @@ export async function verifyLocalAuthorization(
   const db = new SQL(local.DB_URL);
   const api = createApi({ url: local.API_URL, anonKey: local.ANON_KEY, serviceKey: local.SERVICE_ROLE_KEY });
   const project = `joint-${crypto.randomUUID()}`;
-  const users: { id: string; token: string }[] = [];
+  const users: { id: string; token: string; refreshToken: string; expiresAt: number }[] = [];
   const sessions: Awaited<ReturnType<typeof mcpSession>>[] = [];
   async function request<T>(path: string, options: ApiOptions): Promise<T> {
     const result = await api(path, options);
@@ -39,6 +40,11 @@ export async function verifyLocalAuthorization(
   const authorizer = new KeycloakGrantAuthorizer(config);
   const calls: string[][] = [];
   try {
+    // Ephemeral test key and in-memory envelopes only: no credential persistence.
+    const cipher = await createCredentialCipher(
+      new Map([['fixture', crypto.getRandomValues(new Uint8Array(32))]]),
+      'fixture',
+    );
     for (let i = 0; i < 2; i++) {
       const email = `joint-${crypto.randomUUID()}@example.test`;
       const password = crypto.randomUUID();
@@ -47,17 +53,22 @@ export async function verifyLocalAuthorization(
         method: 'POST',
         body: { email, password, email_confirm: true },
       });
-      users.push({ id: user.id, token: '' });
+      users.push({ id: user.id, token: '', refreshToken: '', expiresAt: 0 });
       await request(`/rest/v1/profiles?id=eq.${user.id}`, {
         service: true,
         method: 'PATCH',
         body: { role: 'admin' },
       });
-      const login = await request<{ access_token: string }>('/auth/v1/token?grant_type=password', {
-        method: 'POST',
-        body: { email, password },
-      });
+      const login = await request<{ access_token: string; refresh_token: string; expires_at: number }>(
+        '/auth/v1/token?grant_type=password',
+        {
+          method: 'POST',
+          body: { email, password },
+        },
+      );
       users[i].token = login.access_token;
+      users[i].refreshToken = login.refresh_token;
+      users[i].expiresAt = login.expires_at;
     }
     const bindings: Record<string, string>[] = [];
     const grants: { id: string }[] = [];
@@ -108,11 +119,32 @@ export async function verifyLocalAuthorization(
       );
       const paths: string[] = [];
       calls.push(paths);
+      const owner = users[Math.floor(i / 2)];
+      const credentialContext = {
+        project,
+        grantId: context.grantId,
+        userId: context.expectedUserId,
+        revision: 1,
+      };
+      const sealed = JSON.parse(
+        JSON.stringify(
+          await cipher.seal(credentialContext, {
+            accessToken: owner.token,
+            refreshToken: owner.refreshToken,
+            expiresAt: owner.expiresAt,
+          }),
+        ),
+      );
+      await assert.rejects(
+        cipher.open({ ...credentialContext, userId: users[1 - Math.floor(i / 2)].id }, sealed),
+        /CREDENTIAL_DECRYPTION_FAILED/,
+      );
+      const restored = await cipher.open(credentialContext, sealed);
       const backend = new AdminBackend(
         {
           url: local.API_URL,
           anonKey: local.ANON_KEY,
-          accessToken: users[Math.floor(i / 2)].token,
+          accessToken: restored.accessToken,
           expectedUserId: context.expectedUserId,
         },
         async (url, init) => {
@@ -201,6 +233,9 @@ export async function verifyLocalAuthorization(
     assert.deepEqual(wrongCalls, ['/auth/v1/user']);
     console.log(
       'PASS: real grant/MCP/backend identities, four isolated grants, crossed admin session rejection',
+    );
+    console.log(
+      'PASS: bound credential envelopes restore real downstream sessions and reject another user context',
     );
 
     await request('/rest/v1/rpc/mcp_grant_command', {

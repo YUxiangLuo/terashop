@@ -448,6 +448,16 @@ Keycloak `26.7.0` 已完成 [独立 Docker 实验](../scripts/mcp-keycloak-compa
 
 这证明的是顺序场景下各层身份和撤销检查可以协作，不证明可信账号关联、远程 HTTP、并发竞态或生产配置。测试手工批准两个账号的对应关系，不以邮箱/sub 推导 Supabase UUID；下一步仍需可信双身份关联和加密凭据保存/轮换，之后才能接远程 transport。
 
+### 下游凭据密文格式与边界
+
+[credentials.ts](../mcp/src/credentials.ts) 先落实宿主侧加密原语，不注册 MCP 工具或添加凭据数据库。明文严格限定 `{accessToken,refreshToken,expiresAt}`，token 为 1–16384 个可见 ASCII 字符，expiresAt 为正安全整数 Unix 秒；允许访问令牌已经过期，因为未来刷新代理仍需读取 refresh token。加密不验证这些值由 Supabase 签发，也不验证它们属于该用户，仍须在线身份核验与可信双身份关联。
+
+格式为 `{version:1,keyId,iv,ciphertext}`，IV 和附带认证 tag 的密文为无填充 canonical base64url。使用 Web Crypto AES-256-GCM、随机 12 字节 IV 和 16 字节 tag，算法不可由输入选择。AAD 是 UTF-8 JSON 固定顺序数组 `["tera-mcp-downstream-credentials",1,keyId,project,grantId,userId,revision]`，避免密文被跨项目/授权/用户/修订号移用，key ID 也参与认证。project 和 UUID 按原样匹配，revision 为正安全整数，必须来自受信存储状态，不从 envelope 采信。未来存储层须事务递增 revision/CAS（仅当前版本匹配时写入）并检查 grant 活跃性；本层不能独自防止密文与外部版本号一同回滚，也不以解密成功替代撤销检查。
+
+宿主提供 key ID → 32 字节随机密钥及 active key ID；无默认密钥、不从入站参数/密文获取密钥、不在数据库保存密钥。导入后不可导出，复制输入以隔离配置变更；新写只使用 active key，保留旧 key 才能读旧密文。换 key ID 即使密钥字节相同也不能绕过认证。重加密、旧 key 退役和调用量/轮换策略由未来宿主与存储协调，本层没有批量迁移或生产密钥管理。临时 byte buffer 尽力清零，但 JS 字符串/运行时副本不保证可擦除，不宣称进程内秘密隔离。
+
+配置、加密、解密失败分别只输出固定机器错误，不输出凭据、key 或底层解析异常。单测通过独立 node:crypto API 和固定 AAD 核对双向互操作，覆盖每项 AAD 替换、tag/header/payload 篡改、非法明文、长度边界和保留/退役 key；联合实验使用临时 key 和内存 envelope，真实下游会话解密后用于 MCP 读取，其他用户上下文解密失败。下一批接与 grant 联动的密文存储与修订号原子更新，再推进关联/刷新；此阶段不持久化真实用户凭据、不开放远程服务。
+
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
 3. **受保护 HTTP transport。** 接 metadata/challenge、SDK transport 和逐请求 context；验证错误 issuer/audience、过期 token、缺失 scope、匿名/普通客户、scope 降级及直接调用隐藏工具全部拒绝。
