@@ -2,7 +2,12 @@ import { expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { createDownstreamLogin } from '../../mcp/src/login';
 
-const config = { supabaseUrl: 'https://auth.example', anonKey: 'public-key', browserSession: 'a'.repeat(43) };
+const config = {
+  supabaseUrl: 'https://auth.example',
+  anonKey: 'public-key',
+  browserSession: 'a'.repeat(43),
+  callbackUrl: 'https://host.example/login/callback',
+};
 async function fixture() {
   const userId = crypto.randomUUID(),
     sessionId = crypto.randomUUID();
@@ -38,8 +43,13 @@ async function fixture() {
   };
   const rawAttempt = await createDownstreamLogin(config, request);
   const proof = { browserSession: config.browserSession, state: rawAttempt.state };
-  const attempt = { ...rawAttempt, exchange: (code: string) => rawAttempt.exchange(code, proof) };
-  return { attempt, rawAttempt, proof, calls, state, result, userId, sessionId };
+  const callback = (code: string, state = proof.state) =>
+    `${config.callbackUrl}?${new URLSearchParams({ code, state })}`;
+  const attempt = {
+    ...rawAttempt,
+    exchange: (code: string) => rawAttempt.exchange(callback(code), proof.browserSession),
+  };
+  return { attempt, rawAttempt, callback, proof, calls, state, result, userId, sessionId };
 }
 
 test('PKCE verifier stays private and the host accepts only the fixed endpoint pair', async () => {
@@ -49,6 +59,7 @@ test('PKCE verifier stays private and the host accepts only the fixed endpoint p
     'codeChallengeMethod',
     'exchange',
     'expiresAt',
+    'redirectTo',
     'state',
   ]);
   expect(f.attempt.codeChallengeMethod).toBe('s256');
@@ -95,21 +106,53 @@ test('browser and state are independently required before consuming or contactin
   expect(a.proof.state).not.toBe(b.proof.state);
   expect(a.proof.state).not.toBe(a.attempt.codeChallenge);
   for (const proof of [
-    undefined,
-    {},
     { ...a.proof, browserSession: 'b'.repeat(43) },
     { ...a.proof, state: b.proof.state },
-    { ...a.proof, state: [a.proof.state, a.proof.state] },
     { ...a.proof, browserSession: '' },
   ]) {
-    await expect(a.rawAttempt.exchange('code', proof as typeof a.proof)).rejects.toThrow(
-      /^LOGIN_CALLBACK_REJECTED$/,
-    );
+    await expect(
+      a.rawAttempt.exchange(a.callback('code', proof.state), proof.browserSession),
+    ).rejects.toThrow(/^LOGIN_CALLBACK_REJECTED$/);
     expect(a.calls).toHaveLength(0);
   }
-  expect((await a.rawAttempt.exchange('code', a.proof)).userId).toBe(a.userId);
-  await expect(a.rawAttempt.exchange('code', a.proof)).rejects.toThrow(/^LOGIN_EXCHANGE_UNCONFIRMED$/);
+  expect((await a.attempt.exchange('code')).userId).toBe(a.userId);
+  await expect(a.attempt.exchange('code')).rejects.toThrow(/^LOGIN_EXCHANGE_UNCONFIRMED$/);
   expect(b.calls).toHaveLength(0);
+});
+
+test('callback parsing rejects destination substitution, duplicate parameters and injected errors', async () => {
+  const f = await fixture();
+  const valid = f.callback('code');
+  expect(f.attempt.redirectTo).toBe(`${config.callbackUrl}?state=${f.proof.state}`);
+  expect(f.attempt.redirectTo).not.toContain(config.browserSession);
+  for (const invalid of [
+    '',
+    '/login/callback',
+    valid.replace('host.example', 'other.example'),
+    valid.replace('/login/callback', '/other'),
+    valid.replace('https:', 'http:'),
+    valid.replace('host.example', 'host.example:8443'),
+    valid.replace('host.example', 'user@host.example'),
+    `${valid}#`,
+    `${valid}#access_token=secret`,
+    `${valid}&code=second`,
+    `${valid}&%63ode=second`,
+    `${valid}&state=${f.proof.state}`,
+    `${valid}&error=access_denied`,
+    `${valid}&browserSession=${config.browserSession}`,
+    `${valid}&unknown=1`,
+    `${config.callbackUrl}?state=${f.proof.state}`,
+    `${config.callbackUrl}?code=code`,
+    valid.replace('code=code', 'code='),
+    valid.replace('code=code', 'code=a%0Ab'),
+    ` ${valid}`,
+  ]) {
+    await expect(f.rawAttempt.exchange(invalid, config.browserSession)).rejects.toThrow(
+      /^LOGIN_CALLBACK_REJECTED$/,
+    );
+    expect(f.calls).toHaveLength(0);
+  }
+  expect((await f.attempt.exchange('code')).userId).toBe(f.userId);
 });
 
 test('malformed pairs, expired credentials, anonymous users and wrong admins disclose no result', async () => {
@@ -155,6 +198,16 @@ test('untrusted endpoint configuration is rejected before requests', async () =>
     'https://auth.example?x=1',
   ])
     await expect(createDownstreamLogin({ ...config, supabaseUrl: url })).rejects.toThrow(
+      /^INVALID_LOGIN_CONFIGURATION$/,
+    );
+  for (const callbackUrl of [
+    'http://remote.example/callback',
+    '/relative',
+    'https://user@host.example/callback',
+    `${config.callbackUrl}?state=x`,
+    `${config.callbackUrl}#`,
+  ])
+    await expect(createDownstreamLogin({ ...config, callbackUrl })).rejects.toThrow(
       /^INVALID_LOGIN_CONFIGURATION$/,
     );
 });

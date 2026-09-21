@@ -20,19 +20,16 @@ const browserSessionSchema = z
   .min(32)
   .max(256)
   .regex(/^[A-Za-z0-9_-]+$/);
-const callbackSchema = z.strictObject({
-  browserSession: browserSessionSchema,
-  state: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
-});
 
 // Trusted-host primitive, not a browser callback or MCP tool. The host must bind
 // this attempt to its authenticated browser transaction and require consent
 // before creating a grant. Never accept caller-supplied credential pairs.
 export async function createDownstreamLogin(
-  config: { supabaseUrl: string; anonKey: string; browserSession: string },
+  config: { supabaseUrl: string; anonKey: string; browserSession: string; callbackUrl: string },
   request: (url: string, init: RequestInit) => Promise<Response> = fetch,
 ) {
   let origin: string;
+  let callbackBase: string;
   let browserDigest: Buffer;
   const anonKey = config.anonKey;
   try {
@@ -49,6 +46,16 @@ export async function createDownstreamLogin(
     )
       throw new Error('Invalid login endpoint');
     origin = url.origin;
+    const callback = new URL(config.callbackUrl);
+    if (
+      (callback.protocol !== 'https:' &&
+        !(
+          callback.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(callback.hostname)
+        )) ||
+      callback.href !== `${callback.origin}${callback.pathname}`
+    )
+      throw new Error('Invalid callback endpoint');
+    callbackBase = callback.href;
     browserDigest = createHash('sha256').update(browserSessionSchema.parse(config.browserSession)).digest();
   } catch {
     throw new Error('INVALID_LOGIN_CONFIGURATION');
@@ -60,29 +67,58 @@ export async function createDownstreamLogin(
   const expiresAt = Date.now() + 5 * 60_000;
   const state = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
   const stateDigest = createHash('sha256').update(state).digest();
+  const redirect = new URL(callbackBase);
+  redirect.searchParams.set('state', state);
   let used = false;
   return {
     state,
+    redirectTo: redirect.href,
     codeChallenge: challenge,
     codeChallengeMethod: 's256' as const,
     expiresAt,
     async exchange(
-      code: string,
-      callback: { browserSession: string; state: string },
+      callbackUrl: string,
+      browserSession: string,
     ): Promise<{ userId: string; sessionId: string; credentials: DownstreamCredentials }> {
       // The host obtains browserSession from its protected session, never from
       // callback query/body. Invalid proofs cannot consume another browser's flow.
+      let code: string;
       try {
-        const proof = callbackSchema.parse(callback);
         if (
-          !timingSafeEqual(browserDigest, createHash('sha256').update(proof.browserSession).digest()) ||
-          !timingSafeEqual(stateDigest, createHash('sha256').update(proof.state).digest())
+          typeof callbackUrl !== 'string' ||
+          callbackUrl.length > 20000 ||
+          /[\x00-\x20\x7f]/.test(callbackUrl)
+        )
+          throw new Error('Invalid callback URL');
+        const callback = new URL(callbackUrl);
+        const params = callback.searchParams;
+        if (
+          callback.username ||
+          callback.password ||
+          callbackUrl.includes('#') ||
+          `${callback.origin}${callback.pathname}` !== callbackBase ||
+          params.getAll('code').length !== 1 ||
+          params.getAll('state').length !== 1 ||
+          [...params.keys()].some((key) => key !== 'code' && key !== 'state')
+        )
+          throw new Error('Invalid callback parameters');
+        code = token.parse(params.get('code'));
+        const returnedState = z
+          .string()
+          .regex(/^[A-Za-z0-9_-]{43}$/)
+          .parse(params.get('state'));
+        if (
+          !timingSafeEqual(
+            browserDigest,
+            createHash('sha256').update(browserSessionSchema.parse(browserSession)).digest(),
+          ) ||
+          !timingSafeEqual(stateDigest, createHash('sha256').update(returnedState).digest())
         )
           throw new Error('Mismatched login transaction');
       } catch {
         throw new Error('LOGIN_CALLBACK_REJECTED');
       }
-      // Claim before the first await; even a timeout or invalid code consumes the
+      // Claim before the first await; a timeout or provider rejection consumes the
       // local attempt. No retry after the provider may have issued a session.
       if (used) throw new Error('LOGIN_EXCHANGE_UNCONFIRMED');
       used = true;
@@ -90,7 +126,6 @@ export async function createDownstreamLogin(
       verifier = '';
       try {
         if (Date.now() >= expiresAt) throw new Error('Expired login attempt');
-        token.parse(code);
         const response = await request(`${origin}/auth/v1/token?grant_type=pkce`, {
           method: 'POST',
           headers: { apikey: anonKey, 'Content-Type': 'application/json' },

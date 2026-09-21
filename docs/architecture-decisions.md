@@ -478,11 +478,13 @@ grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保
 
 ### 受信宿主取得同次登录的凭据对
 
-[createDownstreamLogin](../mcp/src/login.ts) 是内部 PKCE 兑换原语，不是 HTTP 回调或 MCP 工具。宿主生成 32 字节随机 verifier，仅公开 S256 challenge；verifier 保留在单个内存对象中，五分钟过期。exchange 只接受授权码，向固定 Supabase HTTPS origin（本地回环可 HTTP）的 `/auth/v1/token?grant_type=pkce` 发送 `{auth_code,code_verifier}`，禁止重定向和自动重试。取同一受信响应中的 access/refresh token 及 expires_at，再用 access token 在线检查非匿名管理员、精确用户 UUID 和真实 session。成功仅向内部宿主返回 `{userId,sessionId,credentials}`，不得把这些凭据交给浏览器或 MCP 客户端。
+[createDownstreamLogin](../mcp/src/login.ts) 是内部 PKCE 兑换原语，不是 HTTP 回调处理器或 MCP 工具。宿主生成 32 字节随机 verifier，仅公开 S256 challenge；verifier 保留在单个内存对象中，五分钟过期。exchange 从验证后的回调提取授权码，向固定 Supabase HTTPS origin（本地回环可 HTTP）的 `/auth/v1/token?grant_type=pkce` 发送 `{auth_code,code_verifier}`，禁止重定向和自动重试。取同一受信响应中的 access/refresh token 及 expires_at，再用 access token 在线检查非匿名管理员、精确用户 UUID 和真实 session。成功仅向内部宿主返回 `{userId,sessionId,credentials}`，不得把这些凭据交给浏览器或 MCP 客户端。
 
-创建尝试现必须提供受信 browserSession（32–256 个 base64url 字符，宿主应使用至少 32 字节随机熵的受保护会话标识，不是用户 UUID），模块只保存其 SHA-256 摘要；另生成独立的 32 字节随机 state。exchange(code,{browserSession,state}) 在访问 Auth 前恒时比较两个摘要，缺失、格式错误、跨浏览器或跨尝试返回 LOGIN_CALLBACK_REJECTED，不消耗原尝试。只有匹配后才在首次 await 前消耗尝试；并发调用、非法 code、结果未知或后续身份检查失败都不允许重试，统一 LOGIN_EXCHANGE_UNCONFIRMED，不泄漏部分 token。state 与 verifier 独立，不能用 state 代替浏览器会话。
+创建尝试必须提供受信 browserSession（32–256 个 base64url 字符，宿主应使用至少 32 字节随机熵的受保护会话标识，不是用户 UUID），模块只保存其 SHA-256 摘要；另生成独立的 32 字节随机 state。配置还必须提供固定 callbackUrl（HTTPS，回环可 HTTP，无 userinfo/query/fragment），模块生成含 state 的 redirectTo，供 Auth 登录请求使用，不从 Host/Forwarded 或回调参数推导目标。
 
-宿主必须从自己验证的受保护会话取得 browserSession，不能采信回调 query/body 中的同名值，也不能把浏览器标识放进 URL。state 随固定回调地址往返，未来 HTTP 层须拒绝重复参数、校验精确回调地址并落实 Cookie（Secure/HttpOnly/SameSite）、会话生命周期和 CSRF 防护。当前真实邮件测试验证 state 经 GET verify 重定向保留，错浏览器/错 state 在兑换前拒绝，原尝试仍可成功；这不是浏览器 Cookie 或 HTTP 安全验收。尚无 HTTP 回调、邮件发送入口、上游身份关联、用户同意或 grant 创建。
+兑换入口现为 exchange(callbackUrl,browserSession)，不再接收调用方自行拆分的 code/state。完整回调 URL 限长 20000，拒绝原始控制字符/空白、userinfo、fragment；经 URL 解析后的 origin/path 必须等于固定目标。仅接受各出现一次的 code/state，拒绝未知参数、error 与成功参数混合、编码后的重复键、空 code。随后恒时比较浏览器/state 摘要；所有格式或绑定错误返回 LOGIN_CALLBACK_REJECTED，不消耗原尝试。匹配后才在首次 await 前消耗尝试；并发兑换、提供方拒绝、结果未知或后续身份检查失败不重试，统一 LOGIN_EXCHANGE_UNCONFIRMED。state 与 verifier 独立，不能用 state 代替浏览器会话。
+
+宿主必须从自己验证的受保护会话取得 browserSession，不能采信回调 query/body 中的同名值，也不能把浏览器标识放进 URL。HTTP 层仍须传入未丢失重复参数的完整 URL、验证受信代理和请求方法，并落实 Cookie（Secure/HttpOnly/SameSite）、会话生命周期和 CSRF 防护。真实邮件测试使用模块生成的 redirectTo，并将原始回调交给兑换入口；单测覆盖目标替换、重复/编码键、错误参数混入及拒绝后原尝试仍可成功。这不是浏览器 Cookie 或 HTTP 安全验收。尚无 HTTP 回调处理器、邮件发送入口、上游身份关联、用户同意或 grant 创建。
 
 失败可能已在 Auth 创建会话，不宣称已回滚或自动登出。尝试和凭据不持久化，进程重启只能重新登录；这不解决多进程回调路由。摘要绑定不验证宿主传入会话的真实性或实时撤销，宿主仍必须管理浏览器会话，不能把任意客户端的 code 交给任意尝试。
 

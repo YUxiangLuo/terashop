@@ -9,9 +9,14 @@ test('real email S256 flow returns a new administrator session only to its origi
   const original = await checked<{ session_id: string }>(rpc('get_mcp_downstream_session', {}, user.token));
   const previous = (await authMessages(user.email)).map((m) => m.ID);
   const browserSession = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
-  const config = { supabaseUrl: API, anonKey: ANON_KEY, browserSession };
+  const config = {
+    supabaseUrl: API,
+    anonKey: ANON_KEY,
+    browserSession,
+    callbackUrl: 'http://127.0.0.1:3000/',
+  };
   const attempt = await createDownstreamLogin(config);
-  const redirectTo = `http://127.0.0.1:3000?state=${attempt.state}`;
+  const redirectTo = attempt.redirectTo;
   await checked(
     api(`/auth/v1/otp?redirect_to=${encodeURIComponent(redirectTo)}`, {
       method: 'POST',
@@ -30,18 +35,19 @@ test('real email S256 flow returns a new administrator session only to its origi
   expect(callback.origin).toBe('http://127.0.0.1:3000');
   expect(callback.hash).toBe('');
   expect(callback.searchParams.get('state')).toBe(attempt.state);
-  const proof = { browserSession, state: callback.searchParams.get('state')! };
   const code = callback.searchParams.get('code');
   expect(code).toBeTruthy();
   const wrongAttempt = await createDownstreamLogin(config);
-  await expect(attempt.exchange(code!, { ...proof, browserSession: 'x'.repeat(43) })).rejects.toThrow(
+  await expect(attempt.exchange(callback.href, 'x'.repeat(43))).rejects.toThrow(/^LOGIN_CALLBACK_REJECTED$/);
+  await expect(wrongAttempt.exchange(callback.href, browserSession)).rejects.toThrow(
     /^LOGIN_CALLBACK_REJECTED$/,
   );
-  await expect(wrongAttempt.exchange(code!, proof)).rejects.toThrow(/^LOGIN_CALLBACK_REJECTED$/);
-  await expect(wrongAttempt.exchange(code!, { browserSession, state: wrongAttempt.state })).rejects.toThrow(
+  const wrongCallback = new URL(callback);
+  wrongCallback.searchParams.set('state', wrongAttempt.state);
+  await expect(wrongAttempt.exchange(wrongCallback.href, browserSession)).rejects.toThrow(
     /^LOGIN_EXCHANGE_UNCONFIRMED$/,
   );
-  const result = await attempt.exchange(code!, proof);
+  const result = await attempt.exchange(callback.href, browserSession);
   expect(result.userId).toBe(user.userId);
   expect(result.sessionId).not.toBe(original.session_id);
   expect((await rpc('get_mcp_downstream_session', {}, result.credentials.accessToken)).data).toEqual({
@@ -49,7 +55,9 @@ test('real email S256 flow returns a new administrator session only to its origi
     session_id: result.sessionId,
   });
   expect(result.credentials.refreshToken.length).toBeGreaterThan(0);
-  await expect(attempt.exchange(code!, proof)).rejects.toThrow(/^LOGIN_EXCHANGE_UNCONFIRMED$/);
+  await expect(attempt.exchange(callback.href, browserSession)).rejects.toThrow(
+    /^LOGIN_EXCHANGE_UNCONFIRMED$/,
+  );
   await checked(
     api('/auth/v1/logout?scope=local', { method: 'POST', token: result.credentials.accessToken }),
   );
