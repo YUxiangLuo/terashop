@@ -210,3 +210,147 @@ test('role removal denies reads and writes but still permits erasure via revoke'
     await makeAdmin(admin.userId);
   }
 });
+
+test('refresh admission is single-use, durable and only its receipt can complete the next revision', async () => {
+  const f = await fixture();
+  const call = (action: string, extra: Record<string, unknown> = {}) =>
+    rpc(
+      'mcp_credential_command',
+      {
+        ...f.args,
+        p_action: action,
+        p_expected_revision: 1,
+        ...extra,
+      },
+      undefined,
+      true,
+    );
+  expect((await call('claim_refresh')).data).toMatchObject({ code: 'PT409' });
+  const first = await f.seal(1);
+  await checked(f.write(0, first));
+  const receipt = await checked<{ revision: number; envelope: CredentialEnvelope; refresh_id: string }>(
+    call('claim_refresh'),
+  );
+  expect(receipt).toEqual({ revision: 1, envelope: first, refresh_id: expect.any(String) });
+  const reconnected = testDatabase();
+  try {
+    const [row] =
+      await reconnected`select refresh_id from private.mcp_credentials where grant_id=${f.grant.id}::uuid`;
+    expect(row.refresh_id).toBe(receipt.refresh_id);
+  } finally {
+    await reconnected.close();
+  }
+  expect((await call('claim_refresh')).data).toMatchObject({ code: 'PT409' });
+  expect((await f.read()).data).toMatchObject({ code: 'PT409' });
+  const second = await f.seal(2);
+  expect((await f.write(1, second)).data).toMatchObject({ code: 'PT409' });
+  expect((await call('complete_refresh', { p_envelope: second })).data).toMatchObject({ code: '22023' });
+  expect(
+    (await call('complete_refresh', { p_envelope: second, p_refresh_id: crypto.randomUUID() })).data,
+  ).toMatchObject({ code: 'PT409' });
+  const completion = { p_envelope: second, p_refresh_id: receipt.refresh_id };
+  expect((await call('complete_refresh', { ...completion, p_expected_revision: 0 })).data).toMatchObject({
+    code: 'PT409',
+  });
+  expect((await call('complete_refresh', completion)).data).toEqual({ revision: 2, envelope: second });
+  expect((await call('complete_refresh', completion)).data).toMatchObject({ code: 'PT409' });
+  expect((await f.read()).data).toEqual({ revision: 2, envelope: second });
+  const next = await checked<{ refresh_id: string }>(call('claim_refresh', { p_expected_revision: 2 }));
+  expect(next.refresh_id).not.toBe(receipt.refresh_id);
+  await checked(f.revoke());
+  expect(
+    (
+      await call('complete_refresh', {
+        p_expected_revision: 2,
+        p_envelope: await f.seal(3),
+        p_refresh_id: next.refresh_id,
+      })
+    ).data,
+  ).toMatchObject({ code: '42501' });
+});
+
+test('refresh contenders and stale readers cannot reuse an admitted credential', async () => {
+  const f = await fixture();
+  await checked(f.write(0, await f.seal(1)));
+  const claim = () =>
+    rpc(
+      'mcp_credential_command',
+      { ...f.args, p_action: 'claim_refresh', p_expected_revision: 1 },
+      undefined,
+      true,
+    );
+  const contender = await heldTransactionRace(
+    db,
+    async (sql) => {
+      await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+      await sql`select public.mcp_credential_command('claim_refresh',${JSON.stringify(f.binding)}::text::jsonb,${f.grant.id}::uuid,${admin.userId}::uuid,1)`;
+    },
+    claim,
+  );
+  expect(contender.data).toMatchObject({ code: 'PT409' });
+  for (const isolation of ['read committed', 'repeatable read'] as const) {
+    const other = await fixture();
+    await checked(other.write(0, await other.seal(1)));
+    const stale = await staleAfterCommit(
+      db,
+      async (sql) => {
+        await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+        return sql`select public.mcp_credential_command('read',${JSON.stringify(other.binding)}::text::jsonb,${other.grant.id}::uuid,${admin.userId}::uuid)`;
+      },
+      () =>
+        checked(
+          rpc(
+            'mcp_credential_command',
+            { ...other.args, p_action: 'claim_refresh', p_expected_revision: 1 },
+            undefined,
+            true,
+          ),
+        ),
+      isolation,
+    );
+    expect(stale.error).toMatchObject({ errno: isolation === 'repeatable read' ? '40001' : 'PT409' });
+  }
+});
+
+test('refresh receipts cannot be supplied on ordinary operations or moved to another grant', async () => {
+  const a = await fixture(),
+    b = await fixture();
+  const call = (args: typeof a.args, action: string, extra: Record<string, unknown> = {}) =>
+    rpc(
+      'mcp_credential_command',
+      {
+        ...args,
+        p_action: action,
+        p_expected_revision: 1,
+        ...extra,
+      },
+      undefined,
+      true,
+    );
+  for (const f of [a, b]) await checked(f.write(0, await f.seal(1)));
+  const receipt = await checked<{ refresh_id: string }>(call(a.args, 'claim_refresh'));
+  await checked(call(b.args, 'claim_refresh'));
+  expect(
+    (
+      await call(b.args, 'complete_refresh', {
+        p_refresh_id: receipt.refresh_id,
+        p_envelope: await b.seal(2),
+      })
+    ).data,
+  ).toMatchObject({ code: 'PT409' });
+  expect((await call(a.args, 'claim_refresh', { p_refresh_id: receipt.refresh_id })).data).toMatchObject({
+    code: '22023',
+  });
+  expect(
+    (await call(a.args, 'write', { p_refresh_id: receipt.refresh_id, p_envelope: await a.seal(2) })).data,
+  ).toMatchObject({ code: '22023' });
+  expect(
+    (
+      await rpc(
+        'mcp_credential_command',
+        { ...a.args, p_action: 'claim_refresh', p_expected_revision: 1 },
+        admin.token,
+      )
+    ).data,
+  ).toMatchObject({ code: '42501' });
+});

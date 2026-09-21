@@ -466,6 +466,10 @@ grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保
 
 联合实验改为使用真实凭据表：两名临时管理员、四组 grant，错误管理员 access token 写入拒绝且 revision 仍为 0；首次写入、旧版本拒绝及下一版本更新后，新宿主实例从数据库读取解密并执行 MCP，撤销本地 grant 删除密文，上游撤销阻止读取。临时密钥只在内存，测试结束清理凭据行；这是新对象读取，不是生产进程重启/密钥恢复验收。单测另覆盖已提交但响应丢失、错误响应、旧 revision 密文和读取期间过期。host 方法只供受信内部流程，返回的下游凭据不可交给 MCP/HTTP 客户端；业务仍需 ToolAuthorization 和 expectedUserId 校验。access token 检查不验证 refresh token 配对或同意，可信账号关联、刷新协调及生产密钥管理仍待实现，远程服务仍未开放。
 
+刷新协调先落实数据库单次准入，不引入可过期 lease：mcp_credential_command 的 claim_refresh 在同一 grant/credential 锁下核对 revision，生成并持久化 refresh_id，只在领取成功响应中返回回执及密文。待完成时 read/write/再次领取拒绝；complete_refresh 须匹配同一 grant、回执和原 revision，提交下一版密文并清除回执。领取响应丢失、进程退出或上游结果未知不会释放或接管，无法完成则撤销并重新登录；完成响应丢失只允许读取确认，不重新调用上游刷新。撤销仍删除包括待完成状态在内的凭据行。该批仅存储原语，不提供实际刷新调用，也不保证数据库可撤回进程已取得的 token。
+
+此锁只协调同一 grant，不协调多个 grant 共用下游 Auth 会话。当前联合 fixture 的同一用户两个 grant 共用会话，只验证身份隔离与持久化，没有下游刷新；启用刷新前必须落实独占下游会话或共同所有权，不能把这些 fixture 当成刷新架构。数据库测试覆盖领取竞争、RC/RR 旧快照、重连后的待完成状态、回执重放/跨 grant、阻止普通读写及撤销后完成拒绝。可信关联、宿主刷新代理与生产恢复仍未实现。
+
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
 3. **受保护 HTTP transport。** 接 metadata/challenge、SDK transport 和逐请求 context；验证错误 issuer/audience、过期 token、缺失 scope、匿名/普通客户、scope 降级及直接调用隐藏工具全部拒绝。

@@ -869,7 +869,7 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 
 ## MCP 下游凭据密文（受信服务内部接口）
 
-`mcp_credential_command(p_action,p_binding,p_grant_id,p_user_id,p_expected_revision?,p_envelope?)` 仅 service_role 执行，不注册 MCP 工具；底表 `private.mcp_credentials` 启用 RLS，所有 API 角色均无直接读写权限。复用 grant resolve 验证完整 binding、active 状态和当前非匿名管理员，再核对 grant/user UUID；不代替上游 token 验证或可信账号关联。
+`mcp_credential_command(p_action,p_binding,p_grant_id,p_user_id,p_expected_revision?,p_envelope?,p_refresh_id?)` 仅 service_role 执行，不注册 MCP 工具；底表 `private.mcp_credentials` 启用 RLS，所有 API 角色均无直接读写权限。复用 grant resolve 验证完整 binding、active 状态和当前非匿名管理员，再核对 grant/user UUID；不代替上游 token 验证或可信账号关联。
 
 - `read`：不传 expected revision/envelope。返回 `{revision,envelope}`，尚未初始化时为 `{revision:0,envelope:null}`。
 - `write`：必须传 expected revision（0–9007199254740990）和 envelope，仅当前 revision 相同时成功。首次 0→1，之后每次加一，返回新版本和密文。宿主须用 **expected revision + 1** 作为加密 AAD 中的 revision；读取时用数据库返回的 revision 解密。相同写入重放也返回 `PT409`，结果不确定时先重读，不自动重试或重新刷新上游凭据。
@@ -877,6 +877,12 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 
 权限失败、撤销或用户降权为 `42501`；绑定不存在或 UUID 不符为 `PT404`；版本冲突为 `PT409`；输入非法为 `22023`；旧 RR 快照或并发插入可返回 `40001`。锁顺序为 grant→credential，写入和撤销串行；grant revoke 同事务删除密文（包括重复撤销），保留授权 tombstone。降权本身拒绝读写但不删除密文；仍可撤销清除。已经读入进程的凭据不会被数据库撤销自动擦除，也不取消已获准业务。
 
-CAS 防止通过此接口用旧版本覆盖新版本，不防御数据库管理员回滚整个数据库；旧 RR 快照在首次插入前可能读到未初始化状态，但不能覆盖后续插入。当前实现密文持久化与版本控制，不包含生产密钥管理、浏览器关联、凭据刷新或刷新并发协调。
+刷新准入（仅数据库原语，尚无宿主刷新调用）：
+
+- `claim_refresh`：传当前 expected revision（1–9007199254740990），不传 envelope/refresh ID。仅已初始化且无待完成刷新的记录可领取，返回 `{revision,envelope,refresh_id}`；服务端生成随机 UUID，并持久化待完成状态。只有确认领取成功的受信调用者才能尝试一次真实刷新，不能用普通 read 获得的凭据直接刷新。
+- `complete_refresh`：传原 expected revision、领取的 refresh ID，以及按下一 revision 加密的新 envelope。验证同一授权、回执、版本及当前权限后递增 revision，清除待完成状态，返回 `{revision,envelope}`。回执不能跨授权使用或重放；其他动作禁止传 refresh ID。
+- 待完成期间 read/write/再次 claim 均返回 `PT409`，无超时接管、解锁或取消接口。领取响应丢失、进程退出、刷新结果未知时保持阻塞，不重新使用旧 refresh token；无法完成时撤销旧 grant 并走新的可信登录/授权流程。完成响应丢失时可重读确认，不能重新发起真实刷新。撤销在同一事务清除待完成凭据。
+
+CAS 防止通过此接口用旧版本覆盖新版本，不防御数据库管理员回滚整个数据库；旧 RR 快照在首次插入前可能读到未初始化状态，但不能覆盖后续插入。准入只在同一 grant 内串行，不能协调多个 grant 共用同一下游 Auth 会话。启用真实刷新前必须落实每个 grant 独占下游会话或共同会话所有权；当前联合实验共享会话，不执行真实下游刷新。尚不包含生产密钥管理、浏览器关联或刷新代理。
 
 宿主侧 [KeycloakGrantAuthorizer](../mcp/src/authorization.ts) 提供 `readCredentials(token,cipher)` 和 `writeCredentials(token,cipher,{expectedRevision,credentials,anonKey})`，每次在线校验上游 token/grant，并从已验证结果构造完整绑定，不接收调用方指定 grant/user。read 返回 `{grantId,expectedUserId,revision,credentials}`，未初始化时 credentials=null；失败只抛 CREDENTIAL_READ_FAILED，不返回部分明文。write 先加密并在线验证下游 access token 对应绑定管理员，再 CAS 保存；核对返回的版本和密文，成功只返回 `{revision}`，任何失败均为 CREDENTIAL_WRITE_UNCONFIRMED，必须先重读确认，不自动重试。refresh token 配对和用户同意仍由未来可信关联流程证明；不可将这些方法作为客户端获取或替换下游 token 的 HTTP/MCP 接口。读取凭据不是业务授权，后续业务仍须使用 ToolAuthorization 和绑定 expectedUserId 的 AdminBackend。

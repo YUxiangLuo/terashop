@@ -824,8 +824,8 @@ GRANT EXECUTE ON FUNCTION public.list_admin_managed_media(integer,uuid,text,text
 REVOKE ALL ON FUNCTION public.mcp_grant_command(text,jsonb,uuid,text[],uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.mcp_grant_command(text,jsonb,uuid,text[],uuid) TO service_role;
 
-REVOKE ALL ON FUNCTION public.mcp_credential_command(text,jsonb,uuid,uuid,bigint,jsonb) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.mcp_credential_command(text,jsonb,uuid,uuid,bigint,jsonb) TO service_role;
+REVOKE ALL ON FUNCTION public.mcp_credential_command(text,jsonb,uuid,uuid,bigint,jsonb,uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.mcp_credential_command(text,jsonb,uuid,uuid,bigint,jsonb,uuid) TO service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

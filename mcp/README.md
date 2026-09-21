@@ -186,6 +186,8 @@ grant 元数据已通过私有 PostgreSQL 表和 service-only `mcp_grant_command
 
 宿主凭据适配：KeycloakGrantAuthorizer.readCredentials/writeCredentials 已将在线授权与密文 RPC 串联。每次重新验证完整绑定，写前检查下游 access token 的真实管理员 UUID；只发送密文给存储，读取按数据库 revision 解密。写失败统一为 CREDENTIAL_WRITE_UNCONFIRMED，不自动重试，先重读确认是否已提交。`bun test tests/unit/mcp-credential-adapter.test.ts` 覆盖未初始化、错误身份、响应丢失、非法响应、旧密文和查询期间过期；`--with-supabase` 联合实验已改用真实凭据表，验证 CAS、新宿主实例读取后执行 MCP、本地撤销删除与上游撤销后禁止读取，结束清理临时凭据行。这些方法仅供受信宿主，不能暴露为客户端凭据接口；仍无生产密钥配置、可信账号关联或刷新代理，access token 校验也不证明 refresh token 配对。下一步推进可信账号关联和刷新协调，不开放远程入口。
 
+刷新准入原语：密文 RPC 已增加 claim_refresh/complete_refresh。同一 grant 领取后持久阻塞普通读写及再次领取，只有原回执和版本可提交下一版密文；无到期接管或自动重试，无法恢复须撤销并重新授权。数据库测试覆盖并发领取、RC/RR 旧快照、回执跨 grant/重放及撤销后完成拒绝。尚未接入宿主或调用真实刷新端点；多个 grant 共用下游 Auth 会话不受该锁保护，真实刷新前须落实独占会话或共同所有权。完整合同见 [API](../docs/api.md#mcp-下游凭据密文受信服务内部接口)。
+
 独立授权候选实验：`bun test tests/unit/oauth-provider.test.ts`。固定开发依赖 `oidc-provider 9.12.2`，只在回环随机端口验证 Code/S256、resource/aud、业务 scopes、刷新轮换和 grant 撤销，不连接真实账号或 Supabase。已验证错误 resource 的刷新可能消耗旧 token、重试导致 grant 撤销；JWT 签名仍有效不代表 grant 仍有效。库明确警告 Bun 不受官方支持，内存 adapter 和自动同意仅用于实验；尚未选定生产授权服务。下一批优先核对独立部署的受支持方案，再推进持久化和逐用户凭据代理，不将该 fixture 改成远程登录入口。详见 ADR-027 的实验记录。
 
 ```bash

@@ -3311,7 +3311,8 @@ end;
 $$;
 
 CREATE FUNCTION public.mcp_credential_command(p_action text, p_binding jsonb, p_grant_id uuid,
-    p_user_id uuid, p_expected_revision bigint DEFAULT NULL, p_envelope jsonb DEFAULT NULL)
+    p_user_id uuid, p_expected_revision bigint DEFAULT NULL, p_envelope jsonb DEFAULT NULL,
+    p_refresh_id uuid DEFAULT NULL)
     RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 declare
   v_grant jsonb;
@@ -3321,12 +3322,22 @@ begin
   if auth.role() is distinct from 'service_role' then
     raise exception using errcode='42501', message='trusted authorization host required';
   end if;
-  if p_action is null or p_action not in ('read','write') or p_grant_id is null or p_user_id is null then
+  if p_action is null or p_action not in ('read','write','claim_refresh','complete_refresh')
+      or p_grant_id is null or p_user_id is null then
     raise exception using errcode='22023', message='invalid credential command';
+  end if;
+  if (p_action='complete_refresh' and p_refresh_id is null)
+      or (p_action<>'complete_refresh' and p_refresh_id is not null) then
+    raise exception using errcode='22023', message='invalid refresh receipt';
   end if;
   if p_action='read' then
     if p_expected_revision is not null or p_envelope is not null then
       raise exception using errcode='22023', message='invalid credential lookup';
+    end if;
+  elsif p_action='claim_refresh' then
+    if p_expected_revision is null or p_expected_revision<1 or p_expected_revision>=9007199254740991
+        or p_envelope is not null then
+      raise exception using errcode='22023', message='invalid refresh admission';
     end if;
   else
     if p_expected_revision is null or p_expected_revision<0 or p_expected_revision>=9007199254740991
@@ -3354,16 +3365,31 @@ begin
   end if;
   select * into v_credential from private.mcp_credentials where grant_id=p_grant_id for update;
   v_revision := coalesce(v_credential.revision,0);
-  if p_action='write' then
+  if p_action='complete_refresh' then
+    if v_credential.refresh_id is null or v_credential.refresh_id<>p_refresh_id then
+      raise exception using errcode='PT409', message='refresh receipt conflict';
+    end if;
+  elsif v_credential.refresh_id is not null then
+    raise exception using errcode='PT409', message='credential refresh pending';
+  end if;
+  if p_action<>'read' then
     if v_revision<>p_expected_revision then
       raise exception using errcode='PT409', message='credential revision conflict';
+    end if;
+    if p_action='claim_refresh' then
+      update private.mcp_credentials set refresh_id=gen_random_uuid()
+        where grant_id=p_grant_id returning * into v_credential;
+      -- Only this successful response grants permission to attempt a refresh.
+      -- Lost admission responses cannot be replayed, even by the same caller.
+      return jsonb_build_object('revision',v_credential.revision,'envelope',v_credential.envelope,
+        'refresh_id',v_credential.refresh_id);
     end if;
     if v_revision=0 then
       insert into private.mcp_credentials(grant_id,revision,envelope)
         values(p_grant_id,1,p_envelope) on conflict (grant_id) do nothing returning * into v_credential;
       if not found then raise exception using errcode='40001', message='retry credential lookup'; end if;
     else
-      update private.mcp_credentials set revision=v_revision+1,envelope=p_envelope
+      update private.mcp_credentials set revision=v_revision+1,envelope=p_envelope,refresh_id=null
         where grant_id=p_grant_id returning * into v_credential;
     end if;
   end if;

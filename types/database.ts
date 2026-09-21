@@ -2239,6 +2239,7 @@ export type Database = {
           p_envelope?: Json
           p_expected_revision?: number
           p_grant_id: string
+          p_refresh_id?: string
           p_user_id: string
         }
         Returns: Json
