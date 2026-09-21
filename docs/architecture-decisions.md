@@ -411,7 +411,22 @@ HTTP bearer 只出现在 Authorization header，不在 query/cookie；浏览器�
 
 **暂不批准生产选型。** 此版本启动时明确警告 Bun 为 unsupported runtime，官方目标是 Node.js LTS；本地 Bun 1.4.2 实验通过不等于支持承诺。默认内存 adapter 也不可用于生产。下一批优先评估独立部署、官方支持运行时的授权服务，避免把不受支持的嵌入式运行时作为前提；同时复用上述协议验收标准。最终方案仍须补真实登录/同意、持久化及原子 consume/revoke、两管理员隔离、并发刷新、重启恢复、密钥轮换、Supabase 凭据代理和真实 MCP 客户端验收。当前不开放远程 MCP。
 
-1. **授权兼容性与工具权限清单。** 清单已完成；独立候选协议实验已完成上述部分，运行时及生产存储选型仍未解决。外部服务账号、生产配置与部署需另行授权。
+独立服务核对：Hydra `v2.3.0` 的 [go.mod](https://github.com/ory/hydra/blob/v2.3.0/go.mod) 固定 Fosite `v0.49.0`，该依赖的 [audience 解析器](https://github.com/ory/fosite/blob/v0.49.0/audience_strategy.go#L77-L94) 读取非标准 audience 而非 resource，不能以这条路径证明本项目所需的 RFC 8707 合同。本批不推进该版本；这不是对所有 Hydra 版本的结论，也未做 Hydra 运行验收。
+
+Keycloak `26.7.0` 已完成 [独立 Docker 实验](../scripts/mcp-keycloak-compat.ts)：镜像固定 tag 和 digest，Bun 只驱动 HTTP 测试，授权服务使用镜像内的 Java 运行时。脚本创建单独的临时 realm/账号/密钥、随机回环端口及容器，finally 删除容器和临时配置，不接现有 Supabase，不使用生产数据。它不加入默认测试，以免常规单测隐式拉取镜像或启动大型服务；运行 `bun scripts/mcp-keycloak-compat.ts` 复验。
+
+| 固定版本的实测结果 | 对接要求 |
+| --- | --- |
+| 缺少 S256 challenge、plain、未知业务 scope 被拒绝；code 和 refresh 的 resource 不匹配均返回 invalid_target | 显式要求 S256，注册业务 scopes，不能用静态 audience mapper 代替请求绑定 |
+| 正常 token 的 RS256 签名/JWKS、issuer、aud、sub、azp、sid 正确；刷新不授予原先没有的 store:write | 刷新扩大 scope 的请求返回成功但取交集，不是 invalid_scope；必须检查实际 token scopes |
+| 刷新轮换保留 sid；旧 refresh token 重放后后继 token 也被拒绝 | 配置 revokeRefreshToken=true、refreshTokenMaxReuse=0；尚未验证多节点并发 |
+| RFC 7009 撤销后 refresh 被拒绝、introspection active=false，JWT 签名仍有效 | 资源服务器须在线校验，不把 JWT 的密码学有效性当作授权仍有效 |
+
+两处必须保留的版本约束：① 26.7.0 的 [resource processor](https://github.com/keycloak/keycloak/blob/26.7.0/services/src/main/java/org/keycloak/protocol/oidc/resourceindicators/ResourceIndicatorsPostProcessor.java#L55-L95) 不支持直接按自定义 audience 字符串匹配 URI。实测直接 URI mapper 失败；正确配置先把资源客户端 ID 放入 audience，再由该客户端的 resource_url 映射。② [introspection](https://github.com/keycloak/keycloak/blob/26.7.0/services/src/main/java/org/keycloak/protocol/oidc/AccessTokenIntrospectionProvider.java#L318-L350) 要求调用方 client_id 在 token audience 中。测试使用 client_id 与 resource URI 相同的机密资源客户端，关闭其登录/密码/service-account flows；另一个机密客户端即使凭据有效也只得到 active=false。未启用绕过 audience 检查的兼容选项。
+
+**Keycloak 仅作为下一阶段本地对接候选，未批准生产使用。** 容器明确警告 resource-indicators:v1 是 experimental；start-dev、临时库、HTTP 和无需同意的测试客户端都不是部署配置。测试只覆盖同一虚构用户的独立会话，不证明跨用户或跨客户端隔离。Keycloak 的 sid 是 SSO 会话身份，不能直接替代本项目逐客户端/资源的 grant_id；azp 也须由固定 issuer 的适配层解释，不能接收任意客户端传入的映射。下一批先验证两用户/两客户端的撤销与隔离，并确定服务端 grant 记录和 Supabase UUID 绑定方案，再接凭据保存和 HTTP。不继续为协议已有库自行实现 OAuth，也不因本次实验通过就更改 stdio 或开放网络入口。
+
+1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
 3. **受保护 HTTP transport。** 接 metadata/challenge、SDK transport 和逐请求 context；验证错误 issuer/audience、过期 token、缺失 scope、匿名/普通客户、scope 降级及直接调用隐藏工具全部拒绝。
 4. **并发与部署验收。** 交叉复用 session/event ID、重连、进程重启、并发 refresh、授权服务不可用、执行前撤销、执行中撤销及不确定写结果均须测试；两个真实客户端完成授权、升级 scope、断开授权和恢复流程后，才声明远程可用。

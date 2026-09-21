@@ -170,6 +170,8 @@ P0 验证基于媒体发现提交 `e4a409d` 的代码：`bun run test` 重建可
 
 ## 验证
 
+独立服务实验：`bun scripts/mcp-keycloak-compat.ts`（需要 Docker，首次下载固定版本及 digest 的 Keycloak 26.7.0 镜像）。只创建临时容器/realm，监听随机回环端口，结束删除容器和临时配置；不操作现有 Supabase。已验证 S256、Code/Refresh resource 绑定、scope 不升级、轮换重放、撤销与在线 introspection。Keycloak 的 resource-indicators 仍是实验性 feature，sid 不等于本项目 grant_id，尚未完成跨用户/客户端隔离、真实同意、持久化及 Supabase 身份绑定。下一批以此为本地对接候选核对这些边界，不直接用于生产。脚本不包含在默认单测中。
+
 独立授权候选实验：`bun test tests/unit/oauth-provider.test.ts`。固定开发依赖 `oidc-provider 9.12.2`，只在回环随机端口验证 Code/S256、resource/aud、业务 scopes、刷新轮换和 grant 撤销，不连接真实账号或 Supabase。已验证错误 resource 的刷新可能消耗旧 token、重试导致 grant 撤销；JWT 签名仍有效不代表 grant 仍有效。库明确警告 Bun 不受官方支持，内存 adapter 和自动同意仅用于实验；尚未选定生产授权服务。下一批优先核对独立部署的受支持方案，再推进持久化和逐用户凭据代理，不将该 fixture 改成远程登录入口。详见 ADR-027 的实验记录。
 
 ```bash
