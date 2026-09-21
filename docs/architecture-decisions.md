@@ -342,3 +342,60 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 仅 settled 对象可准备丢弃。delete 先校验冻结状态，再删除固定私有 key、查询确认缺失，最后标记 discarded；recover_delete 只查询并确认，不发 DELETE。保留原媒体记录作为 tombstone，无新删除身份，也不重用原上传身份。删除响应或确认提交响应丢失后先重读、恢复；确需再次执行时由用户明确批准，同 ID 操作不自动重试。鉴权、bucket、网络及任意 404 错误均不是缺失证明。并发 DELETE 可以重复，但冻结对象不再有合法写入者，因此不造成重新出现的对象。
 
 该证明仅适用于从首次上传就使用一次性许可的对象。不得把上一版对象补标 settled，也不得在旧上传执行器仍运行时开放删除。仓库修改的是可重建 SQL 基线，不包含已有部署的数据升级方案；已有对象继续保留，正式升级须另行设计并授权。验收覆盖真实 Storage、在途上传屏障、发布/冻结的 RC/RR 竞争、删除前后及确认前后的响应丢失，而不是仅验证数据库状态。
+
+## ADR-027：远程 MCP 使用独立授权与逐用户下游身份
+
+**状态：设计合同，尚未实现。** 当前仍只有 stdio。`stdio.ts` 从安全环境读取一个管理员会话，`AdminBackend` 固定其请求头；`createAdminServer` 的 allowWrites 只决定本进程是否注册写工具。不能把这三个对象作为多用户 HTTP 单例，也不能将工具 annotations 当成授权控制。本决策不启用 `auth.oauth_server`、不新增公开监听端口、不改变现有 RLS/RPC 权限。
+
+### 令牌分开，业务仍由原用户执行
+
+远程 MCP 是 OAuth resource server，固定一个配置的 HTTPS resource URI，例如 `https://admin.example.com/mcp`。初版一个部署只服务一个 Supabase 项目；客户端不能指定项目 URL、issuer、数据库身份或下游 token。
+
+选择受信授权代理模式：客户端只持 MCP 专用令牌；代理通过已验证的授权记录找到该用户的独立 Supabase 会话，再以原用户 JWT 调用现有 AdminBackend/RPC/Edge。两类令牌分别签发、分别存储，不能互换。不得用入站 MCP token 直接访问 Supabase，不使用 service-role 或共享管理员账号代行业务，也不自行伪造带任意 sub 的 Supabase JWT。
+
+授权记录绑定 `(issuer, subject, client_id, resource, project, grant_id)` 与一个 Supabase Auth user UUID；不是 customer UUID，不能按 email、显示名、同名 sub 或客户端参数自动关联。建立关联须同时证明授权服务身份和 Supabase 登录身份，并展示客户端、店铺、账号及批准权限。登录/同意发生在浏览器可信页面，不使用收集密码、access token 或 refresh token 的 MCP 工具。账号切换创建新关联，不静默改绑现有授权。
+
+授权服务产品/库尚未选定；下一批先验证候选的 resource、PKCE、撤销和下游用户映射，不能自行拼接 OAuth 协议上线。优先评估项目已有 Supabase Auth 的 OAuth Server，但不能只把配置改为 enabled：官方文档中默认 OAuth aud 为 authenticated，OIDC scopes 不约束数据库；Custom Access Token Hook 可以定制 aud，但不自动完成本代理需要的独立下游会话、MCP 业务 scope 或完整 RFC 8707 支持。候选不满足时再选择成熟独立授权服务，不假设仓库已经存在 token-exchange API。
+
+### 最小权限必须在调用时执行
+
+首版 scope 合同如下；这些是本项目业务权限，不是 openid/email/profile 的替代名称：
+
+| scope | 语义 |
+| --- | --- |
+| `store:read` | 当前全部管理只读工具，包含客户联系方式、订单、成本等敏感数据；不是公开 Storefront 权限 |
+| `store:write` | 管理写操作的基础权限，涵盖商品发布、库存和业务配置修改；不隐含 read 或以下附加权限 |
+| `store:payments` | 收退款及直接资金记账，除 write 外还须单独批准；包括手工记账和 PayPal 退款 |
+| `store:access` | 角色/账户访问控制变更，除 write 外单独批准 |
+| `store:privacy` | 客户或账户匿名化等不可逆隐私操作，除 write 外单独批准 |
+
+默认只申请 read，写权限逐步升级。resource metadata 的最小 scopes_supported 和首次 challenge 不诱导客户端申请所有权限；scope 扩大须重新同意，旧授权记录不得因配置变更自动升级。写 scope 不替代用户对退款、删除、公开发布的具体操作批准。
+
+工具按现有注册源明确声明所需 scopes；所有现有工具必须有分类，新工具漏配默认拒绝，测试须校验注册集合完整覆盖。不要从工具名称、description、readOnlyHint、请求参数或前端隐藏状态推导权限。有效权限是 token scopes、当前 grant scopes、部署策略和当前管理员角色的交集。tools/list 只展示可用工具；直接 tools/call 仍再次校验，不能仅依赖初始化时隐藏写工具。stdio 原有 allowWrites 合同保持不变。
+
+### 撤销与下游凭据不靠 JWT 到期兜底
+
+授权代理保存私有 grant 记录（身份元组、批准 scopes、版本、撤销状态）以及独立加密的下游凭据引用。MCP access token、refresh token 与 Supabase access/refresh token 不进入公开业务表、对话、工具参数、URL 或日志。刷新令牌轮换按授权记录串行并以版本比较写回；进程重启后不复用过期缓存，刷新结果未知不并发重试，无法恢复则要求重新登录。加密密钥与数据库分离，备份、轮换和最小访问权限另行验收。
+
+每个 HTTP 请求验证 token 签名/算法、固定 issuer、resource audience、exp/nbf 和必要身份 claims，并在线检查 grant；每次工具执行前重查 grant/scopes，取得绑定的下游会话，核对 Auth 返回的 user UUID 与绑定 UUID 完全一致，再执行当前管理员检查。不得只验证“某个管理员”，否则会把 A 的授权映射到 B。grant 存储、授权服务或刷新服务不可用时拒绝执行，不回退共享会话或 service-role。
+
+撤销 grant、取消下游关联或管理员降级后，不再接纳新的工具执行。检查与已在途业务不是一个分布式事务：撤销不保证取消已经接纳、提交或发送给 PayPal/Storage 的操作；这些操作结果仍按原 ID 查询，不宣称已回滚。Supabase 登出与 MCP grant 撤销是两个动作；不能将登出等同所有已签发 JWT 立即失效。安全界面应提供明确的断开 MCP 授权操作，不能仅删除本地 cookie。
+
+### HTTP 与会话边界
+
+使用现有官方 TypeScript SDK v2 的 Streamable HTTP，不自制 JSON-RPC transport。先验收无跨请求业务状态的处理模式；若 SDK/客户端需要 transport session，session 仅用于协议，不是身份凭据，必须绑定完整授权身份元组及 grant 版本。每次 POST/GET/DELETE、重连和事件恢复均重新鉴权，不能凭 MCP-Session-Id 或 Last-Event-ID 读取其他用户结果。禁止全局 Backend、跨用户结果缓存和复用含用户 token 的工具闭包。跨主体、客户端、店铺或权限版本的 session 不可复用；scope 变更后重新初始化。
+
+未认证/无效 token 返回 401 与 Bearer resource_metadata challenge；有效 token 权限不足返回 403/insufficient_scope，列出当前操作全部所需权限。工具执行业务冲突仍用现有工具错误合同，不把授权失败伪装成成功 JSON。入口校验、scope 判定与 SDK 分发使用同一工具分类源；写请求一旦可能送达后端，就沿用 outcome_unknown，不因 OAuth 续期自动重放。
+
+配置固定 public origin/resource/issuer，不信任客户端 Host 或未受信 Forwarded 来生成元数据或回调。提供 RFC 9728 受保护资源元数据；授权服务提供受验证的 RFC 8414/OIDC discovery。要求 Authorization Code + PKCE S256、精确 redirect URI、state/issuer 校验、短期 access token 与 refresh token 轮换。首版使用预注册客户端，不开放任意动态注册；兼容性验收应明确其限制。若以后支持 Client ID Metadata Documents，单独落实元数据抓取的 SSRF 与缓存控制。
+
+HTTP bearer 只出现在 Authorization header，不在 query/cookie；浏览器授权站点的 cookie 独立使用 HTTPS、HttpOnly、SameSite 与 CSRF 防护。MCP 入口需要 Origin 检查、受限 CORS、受信代理配置、请求体/并发/超时预算，以及按 grant/主体与未认证来源分别限流。日志仅保留脱敏身份关联、工具名、结果码与时延，不能记录 token、完整请求/响应或客户资料；refresh/callback/token endpoint 同样脱敏。
+
+### 按可验收批次实现
+
+1. **授权兼容性与工具权限清单。** 在本地验证候选授权服务的实际 resource/aud、PKCE、issuer、刷新/撤销合同；建立覆盖所有工具的 scope 清单与拒绝未知工具测试。外部服务账号、生产配置与部署需另行授权。
+2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
+3. **受保护 HTTP transport。** 接 metadata/challenge、SDK transport 和逐请求 context；验证错误 issuer/audience、过期 token、缺失 scope、匿名/普通客户、scope 降级及直接调用隐藏工具全部拒绝。
+4. **并发与部署验收。** 交叉复用 session/event ID、重连、进程重启、并发 refresh、授权服务不可用、执行前撤销、执行中撤销及不确定写结果均须测试；两个真实客户端完成授权、升级 scope、断开授权和恢复流程后，才声明远程可用。
+
+依据（2026-09-21 核对）：[MCP 2026-07-28 Authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)、[Authorization Security Considerations](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/security-considerations)、[Authorization Server Discovery](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery)、[Supabase OAuth token security](https://supabase.com/docs/guides/auth/oauth-server/token-security)。这些规范与文档支持边界选择，不代表本仓库或当前部署已经具备上述能力。
