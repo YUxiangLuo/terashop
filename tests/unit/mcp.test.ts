@@ -24,6 +24,204 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('扩展字段和对象的全部工具校验输出，保留动态值与未定义字段，异常写响应不重试', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const base = { id, revision: 2, created_at: at, updated_at: at };
+  const definition = {
+    ...base,
+    owner_type: 'shop',
+    namespace: 'custom',
+    key: 'score',
+    name: 'Score',
+    type: 'number',
+    access: 'admin',
+    description: '',
+    validations: { min: -3, max: 7, choices: [-3, 7] },
+    position: -1,
+  };
+  const field = {
+    ...base,
+    owner_type: 'shop',
+    owner_id: id,
+    namespace: 'custom',
+    key: 'data',
+    type: 'json',
+    value: { nested: [null, false, { instruction: 'untrusted' }] },
+    definition_id: null,
+    definition_access: 'admin',
+  };
+  const objectDefinition = {
+    ...base,
+    type: 'content',
+    name: 'Content',
+    description: '',
+    fields: [
+      { key: 'payload', type: 'json' },
+      { key: 'score', type: 'number', required: false, validations: { min: -3 } },
+    ],
+    access: 'public',
+    is_active: false,
+  };
+  const object = {
+    ...base,
+    definition_id: id,
+    handle: 'entry',
+    values: { payload: field.value },
+    status: 'active',
+    definition_type: 'content',
+    definition_access: 'public',
+    definition_is_active: false,
+    is_public: false,
+  };
+  const deleted = { id, deleted: true };
+  const cases = [
+    ['get_admin_metafield_definition', { definition_id: id }, definition, false],
+    ['list_admin_metafield_definitions', {}, { items: [definition], next_cursor: id }, false],
+    [
+      'create_metafield_definition',
+      { definition_id: id, changes: { owner_type: 'shop', key: 'score', name: 'Score', type: 'number' } },
+      definition,
+      true,
+    ],
+    [
+      'update_metafield_definition',
+      { definition_id: id, expected_revision: 1, changes: {} },
+      definition,
+      true,
+    ],
+    [
+      'list_admin_metafields',
+      { owner_type_filter: 'shop', owner_id_filter: id },
+      { items: [field], next_cursor: null },
+      false,
+    ],
+    [
+      'create_metafield',
+      {
+        metafield_id: id,
+        changes: { owner_type: 'shop', owner_id: id, key: 'data', type: 'json', value: null },
+      },
+      field,
+      true,
+    ],
+    ['update_metafield', { metafield_id: id, expected_revision: 1, changes: { value: null } }, field, true],
+    ['delete_metafield', { metafield_id: id, expected_revision: 2 }, deleted, true],
+    ['get_admin_metaobject_definition', { definition_id: id }, objectDefinition, false],
+    ['list_admin_metaobject_definitions', {}, { items: [objectDefinition], next_cursor: null }, false],
+    [
+      'create_metaobject_definition',
+      { definition_id: id, changes: { type: 'content', name: 'Content', fields: [] } },
+      objectDefinition,
+      true,
+    ],
+    [
+      'update_metaobject_definition',
+      { definition_id: id, expected_revision: 1, changes: {} },
+      objectDefinition,
+      true,
+    ],
+    ['delete_metaobject_definition', { definition_id: id, expected_revision: 2 }, deleted, true],
+    ['get_admin_metaobject', { metaobject_id: id }, object, false],
+    ['list_admin_metaobjects', { definition_id_filter: id }, { items: [object], next_cursor: id }, false],
+    [
+      'create_metaobject',
+      { metaobject_id: id, changes: { definition_id: id, handle: 'entry', values: {} } },
+      object,
+      true,
+    ],
+    ['update_metaobject', { metaobject_id: id, expected_revision: 1, changes: {} }, object, true],
+    ['delete_metaobject', { metaobject_id: id, expected_revision: 2 }, deleted, true],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      for (const invalid of [
+        {},
+        { ...expected, token: 'SECRET' },
+        ...(name.startsWith('delete_')
+          ? [
+              { id, deleted: false },
+              { id, deleted: 'true' },
+            ]
+          : []),
+      ]) {
+        response = invalid;
+        const before = calls.length;
+        const failed = await session.client.callTool({ name, arguments: args });
+        expect(failed.isError).toBe(true);
+        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: 'INVALID_BACKEND_RESPONSE',
+          outcome_unknown: mutation,
+        });
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+        expect(calls.length - before).toBe(3);
+      }
+      if (name.startsWith('get_')) {
+        response = null;
+        expect(await toolData(session.client, name, args)).toBeNull();
+      }
+    }
+    for (const value of [null, false, [], 'untrusted', { reference: id }]) {
+      response = { ...field, value };
+      expect(
+        await toolData<typeof response>(session.client, 'update_metafield', {
+          metafield_id: id,
+          expected_revision: 1,
+          changes: { value },
+        }),
+      ).toEqual(response);
+    }
+    for (const [name, args, invalid] of [
+      [
+        'list_admin_metafields',
+        { owner_type_filter: 'shop', owner_id_filter: id },
+        { items: [{ ...field, definition_access: 'unknown' }], next_cursor: null },
+      ],
+      [
+        'list_admin_metafield_definitions',
+        {},
+        { items: [{ ...definition, token: 'SECRET' }], next_cursor: null },
+      ],
+      [
+        'get_admin_metafield_definition',
+        { definition_id: id },
+        { ...definition, validations: { sql: 'SECRET' } },
+      ],
+      [
+        'get_admin_metaobject_definition',
+        { definition_id: id },
+        { ...objectDefinition, fields: [{ key: 'x', type: 'json', token: 'SECRET' }] },
+      ],
+      [
+        'get_admin_metaobject_definition',
+        { definition_id: id },
+        { ...objectDefinition, fields: [{ key: 'x', type: 'number', validations: { token: 'SECRET' } }] },
+      ],
+      [
+        'list_admin_metaobjects',
+        { definition_id_filter: id },
+        { items: [{ ...object, values: [] }], next_cursor: null },
+      ],
+      ['get_admin_metaobject', { metaobject_id: id }, { ...object, status: 'deleted' }],
+      ['get_admin_metaobject', { metaobject_id: id }, { ...object, is_public: 'true' }],
+      ['get_admin_metaobject', { metaobject_id: id }, { ...object, revision: 0 }],
+    ] as const) {
+      response = invalid;
+      const failed = await session.client.callTool({ name, arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('媒体回执只含路径与 URL，异常输出标记结果未知且不重复上传', async () => {
   const { backend } = fakeBackend(() => Response.json({}));
   const args = {

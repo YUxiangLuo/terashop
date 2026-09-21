@@ -941,6 +941,78 @@ export const metaobjectDefinitionChanges = z.strictObject({
   access: z.enum(['admin', 'public']).optional(),
   is_active: z.boolean().optional(),
 });
+export const metafieldDefinitionResult = z.strictObject({
+  id,
+  revision: version,
+  owner_type: metafieldOwner,
+  namespace: z.string(),
+  key: z.string(),
+  name: z.string(),
+  type: metafieldType,
+  access: z.enum(['admin', 'public', 'customer']),
+  description: z.string(),
+  validations: metafieldDefinitionChanges.shape.validations.unwrap(),
+  position,
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+export const metafieldResult = z.strictObject({
+  id,
+  revision: version,
+  owner_type: metafieldOwner,
+  owner_id: id,
+  namespace: z.string(),
+  key: z.string(),
+  type: metafieldType,
+  value: z.json(),
+  created_at: timestamp,
+  updated_at: timestamp,
+  definition_id: id.nullable(),
+  definition_access: z.enum(['admin', 'public', 'customer']),
+});
+export const metaobjectDefinitionResult = z.strictObject({
+  id,
+  revision: version,
+  type: z.string(),
+  name: z.string(),
+  description: z.string(),
+  fields: metaobjectFields,
+  access: z.enum(['admin', 'public']),
+  is_active: z.boolean(),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+export const metaobjectResult = z.strictObject({
+  id,
+  revision: version,
+  definition_id: id,
+  handle: z.string(),
+  values: z.record(z.string(), z.json()),
+  status: z.enum(['draft', 'active']),
+  created_at: timestamp,
+  updated_at: timestamp,
+  definition_type: z.string(),
+  definition_access: z.enum(['admin', 'public']),
+  definition_is_active: z.boolean(),
+  is_public: z.boolean(),
+});
+export const metafieldDefinitionPage = z.strictObject({
+  items: z.array(metafieldDefinitionResult).max(100),
+  next_cursor: id.nullable(),
+});
+export const metafieldPage = z.strictObject({
+  items: z.array(metafieldResult).max(100),
+  next_cursor: id.nullable(),
+});
+export const metaobjectDefinitionPage = z.strictObject({
+  items: z.array(metaobjectDefinitionResult).max(100),
+  next_cursor: id.nullable(),
+});
+export const metaobjectPage = z.strictObject({
+  items: z.array(metaobjectResult).max(100),
+  next_cursor: id.nullable(),
+});
+export const metadataDeletion = z.strictObject({ id, deleted: z.literal(true) });
 export const taxFraction = z.number().min(0).max(1);
 export const taxRateChanges = z.strictObject({
   name: z.string().optional(),
