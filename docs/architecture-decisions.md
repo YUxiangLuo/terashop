@@ -490,6 +490,12 @@ grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保
 
 版本依据：Supabase Auth `v2.196.0` 的 [PKCE handler](https://github.com/supabase/auth/blob/v2.196.0/internal/api/token.go#L214-L288) 验证 verifier，成功兑换后在事务中删除 flow state；不能据此假设并发兑换天然串行，宿主仍禁止重复请求。[OTP](https://github.com/supabase/auth/blob/v2.196.0/internal/api/otp.go#L17-L47) 接受 code_challenge/code_challenge_method；邮件 GET verify 在 PKCE 模式重定向为 code，而 POST verify 直接签发 token，不能混用。新增本地测试经真实 SMTP 邮件及 GET 验证链接取得 code，验证错误 verifier 拒绝、原尝试成功、新 session 身份与本地重复兑换拒绝；未启用真实远程登录。
 
+浏览器会话边界现由 [createLoginBrowserSessions](../mcp/src/browser-sessions.ts) 提供，尚无路由或监听器。仅接受固定 HTTPS origin，不为本地开发降低 Secure Cookie 要求。issue 生成独立的 32 字节会话标识与 CSRF token，Cookie 为 `__Host-tera-mcp-login; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300`，无 Domain。内存表只保存会话摘要、CSRF 摘要及五分钟绝对期限，无滑动续期；最多 1024 个会话，创建时清理过期项，满容量拒绝新会话，不驱逐活跃会话。它仅标识登录浏览器事务，不代表用户已认证或取得任何 store scope。
+
+read(request,false) 仅接受固定 origin 的 GET 和唯一、合法、已签发且未过期的 Cookie；回调仍须另外经过 login.ts 的 state/PKCE 校验。read(request,true) 仅接受 POST，并要求 Origin 精确匹配及同会话 `X-CSRF-Token`；revoke 复用该检查，删除服务端会话并返回过期 Cookie。均不采信 Host/Forwarded 来重建 origin；代理必须在后续入口正确提供 Request URL。返回的浏览器标识只能供内部 login 调用，不写入页面或 URL。未知/重复 Cookie、错误来源/方法/CSRF、过期或撤销均统一 BROWSER_SESSION_REJECTED。
+
+当前只有 Request/Header 单测及与 PKCE 的内存串联，不是实际浏览器 Cookie 验收，也没有完整 HTTP CSRF 部署。宿主仍需实现安全的会话签发入口、限流、no-store 页面、会话到登录尝试的路由、上游身份与批准流程；容量上限不能替代防滥用。进程重启丢失所有会话，多节点不共享；检查不取消已在途的兑换，长流程后仍须重查会话，不能缓存 read 返回值绕过撤销。
+
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
 3. **受保护 HTTP transport。** 接 metadata/challenge、SDK transport 和逐请求 context；验证错误 issuer/audience、过期 token、缺失 scope、匿名/普通客户、scope 降级及直接调用隐藏工具全部拒绝。
