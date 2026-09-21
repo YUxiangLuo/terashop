@@ -22,6 +22,10 @@ import {
   adminLocationPage,
   inventoryMovementPage,
   inventoryTransfer,
+  customerResult,
+  customerAddress,
+  adminCustomerDetail,
+  adminCustomerPage,
   orderReturns,
   returnAuthorization,
   returnReceipt,
@@ -228,11 +232,17 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       anonymized: z.boolean().optional(),
       after_cursor: createdCursor,
     }),
+    false,
+    false,
+    adminCustomerPage,
   );
   rpc(
     'get_admin_customer',
     'Read customer, addresses and metafields, without Auth credentials. Missing customers return null.',
     z.strictObject({ customer_id: id }),
+    false,
+    false,
+    adminCustomerDetail.nullable(),
   );
   rpc(
     'create_customer',
@@ -245,18 +255,23 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    customerResult,
   );
   rpc(
     'anonymize_customer',
     'Irreversibly anonymize customer contact data, addresses, carts and metafields. Historical order snapshots remain. Does not delete or revoke the Auth account.',
     z.strictObject({ customer_id: id }),
     true,
+    false,
+    customerResult,
   );
   rpc(
     'update_customer',
     'Edit contact email, name and phone only. Not Auth login, account linking or merging; cannot restore anonymized customers. Supply exact customer updated_at from get_admin_customer, never convert through Date. Returns refreshed customer details; does not change order snapshots.',
     z.strictObject({ customer_id: id, expected_updated_at: z.string().min(1), changes: customerChanges }),
     true,
+    false,
+    adminCustomerDetail,
   );
   rpc(
     'create_customer_address',
@@ -267,6 +282,8 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       changes: addressChanges.extend({ recipient_name: z.string(), country: z.string(), line1: z.string() }),
     }),
     true,
+    false,
+    adminCustomerDetail,
   );
   rpc(
     'update_customer_address',
@@ -278,12 +295,16 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       changes: addressChanges,
     }),
     true,
+    false,
+    adminCustomerDetail,
   );
   rpc(
     'delete_customer_address',
     'Delete an address at its exact ADDRESS updated_at. Returns refreshed customer details. Deleting the default does not select a replacement; historical order snapshots remain. Missing address is an error; read customer details before retrying an uncertain deletion.',
     z.strictObject({ customer_id: id, address_id: id, expected_updated_at: z.string().min(1) }),
     true,
+    false,
+    adminCustomerDetail,
   );
   rpc(
     'set_default_address',
@@ -291,6 +312,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     z.strictObject({ address_id: id, make_default: z.boolean().optional() }),
     true,
     true,
+    customerAddress,
   );
 
   rpc(

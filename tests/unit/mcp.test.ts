@@ -24,6 +24,130 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('客户与地址合同保留微秒令牌及合法 Metafield，拒绝身份字段泄漏和畸形写响应', async () => {
+  const id = crypto.randomUUID(),
+    other = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const summary = {
+    id,
+    email: null,
+    full_name: '',
+    phone: null,
+    has_account: true,
+    anonymized_at: at,
+    created_at: at,
+    updated_at: at,
+  };
+  const { has_account, ...contact } = summary;
+  const row = { ...contact, auth_user_id: other };
+  const address = {
+    id: other,
+    label: '',
+    recipient_name: 'Recipient',
+    phone: null,
+    country: 'JP',
+    region: null,
+    city: 'Tokyo',
+    line1: '1 Main',
+    line2: null,
+    postal_code: null,
+    is_default: false,
+    updated_at: at,
+  };
+  const detail = {
+    ...summary,
+    anonymized_at: null,
+    addresses: [address],
+    metafields: [
+      { namespace: 'custom', key: 'data', type: 'json', value: { nested: ['untrusted text', null, 1] } },
+    ],
+  };
+  const cases = [
+    ['list_admin_customers', {}, { items: [summary], next_cursor: { created_at: at, id } }, false],
+    ['get_admin_customer', { customer_id: id }, detail, false],
+    ['create_customer', { idempotency_key: 'retained' }, row, true],
+    ['anonymize_customer', { customer_id: id }, row, true],
+    ['update_customer', { customer_id: id, expected_updated_at: at, changes: {} }, detail, true],
+    [
+      'create_customer_address',
+      {
+        customer_id: id,
+        address_id: other,
+        changes: { recipient_name: 'Recipient', country: 'JP', line1: '1 Main' },
+      },
+      detail,
+      true,
+    ],
+    [
+      'update_customer_address',
+      { customer_id: id, address_id: other, expected_updated_at: at, changes: {} },
+      detail,
+      true,
+    ],
+    [
+      'delete_customer_address',
+      { customer_id: id, address_id: other, expected_updated_at: at },
+      { ...detail, addresses: [] },
+      true,
+    ],
+    [
+      'set_default_address',
+      { address_id: other, make_default: false },
+      { ...address, customer_id: id, created_at: at },
+      true,
+    ],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      for (const invalid of [{ ...expected, encrypted_password: 'SECRET' }, {}]) {
+        response = invalid;
+        const before = calls.length;
+        const failed = await session.client.callTool({ name, arguments: args });
+        expect(failed.isError).toBe(true);
+        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: 'INVALID_BACKEND_RESPONSE',
+          outcome_unknown: mutation,
+        });
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+        expect(calls.length - before).toBe(3);
+      }
+    }
+    response = null;
+    expect(await toolData(session.client, 'get_admin_customer', { customer_id: id })).toBeNull();
+    response = { ...summary, addresses: [], metafields: [] };
+    expect(
+      await toolData<typeof response>(session.client, 'get_admin_customer', { customer_id: id }),
+    ).toEqual(response);
+    for (const invalid of [
+      { ...detail, auth_user_id: other },
+      { ...detail, has_account: 'true' },
+      { ...detail, updated_at: 123456 },
+      { ...detail, addresses: [{ ...address, customer_id: id }] },
+      { ...detail, metafields: [{ ...detail.metafields[0], secret: 'SECRET' }] },
+    ]) {
+      response = invalid;
+      const failed = await session.client.callTool({
+        name: 'get_admin_customer',
+        arguments: { customer_id: id },
+      });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+    response = { items: [row], next_cursor: null };
+    expect((await session.client.callTool({ name: 'list_admin_customers', arguments: {} })).isError).toBe(
+      true,
+    );
+  } finally {
+    await session.close();
+  }
+});
+
 test('履约、库存和仓库输出逐字段校验，保留负可用量与精确流水 ID，写失败不重试', async () => {
   const id = crypto.randomUUID(),
     other = crypto.randomUUID(),

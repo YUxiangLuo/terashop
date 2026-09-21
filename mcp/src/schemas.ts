@@ -35,6 +35,48 @@ export const adminOrderPage = z.strictObject({
 });
 
 const timestamp = z.iso.datetime({ offset: true });
+export const customerResult = z.strictObject({
+  id,
+  auth_user_id: id.nullable(),
+  email: z.string().nullable(),
+  full_name: z.string(),
+  phone: z.string().nullable(),
+  anonymized_at: timestamp.nullable(),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+const customerSummary = customerResult.omit({ auth_user_id: true }).extend({ has_account: z.boolean() });
+export const customerAddress = z.strictObject({
+  id,
+  customer_id: id,
+  label: z.string(),
+  recipient_name: z.string(),
+  phone: z.string().nullable(),
+  country: z.string(),
+  region: z.string().nullable(),
+  city: z.string().nullable(),
+  line1: z.string(),
+  line2: z.string().nullable(),
+  postal_code: z.string().nullable(),
+  is_default: z.boolean(),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+export const adminCustomerDetail = customerSummary.extend({
+  addresses: z.array(customerAddress.omit({ customer_id: true, created_at: true })),
+  metafields: z.array(
+    z.strictObject({
+      namespace: z.string(),
+      key: z.string(),
+      type: z.string(),
+      value: z.json(),
+    }),
+  ),
+});
+export const adminCustomerPage = z.strictObject({
+  items: z.array(customerSummary).max(100),
+  next_cursor: z.strictObject({ created_at: timestamp, id }).nullable(),
+});
 const money = z
   .number()
   .nonnegative()
