@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { api, checked, rpc, signup, makeAdmin, type TestUser } from './helpers';
+import { api, checked, rpc, signup, makeAdmin, API, ANON_KEY, SERVICE_KEY, type TestUser } from './helpers';
 import { testDatabase, heldTransactionRace, staleAfterCommit } from './database-concurrency';
 import { createCredentialCipher, type CredentialEnvelope } from '../mcp/src/credentials';
+import { KeycloakGrantAuthorizer } from '../mcp/src/authorization';
 
 const db = testDatabase();
 const project = `credential-test-${crypto.randomUUID()}`;
@@ -45,7 +46,7 @@ async function fixture(bindSession = true) {
     ),
   );
   const args = { p_binding: binding, p_grant_id: grant.id, p_user_id: admin.userId };
-  const login = await checked<{ access_token: string }>(
+  const login = await checked<{ access_token: string; refresh_token: string; expires_at: number }>(
     api('/auth/v1/token?grant_type=password', {
       method: 'POST',
       body: { email: admin.email, password: 'password123' },
@@ -88,7 +89,7 @@ async function fixture(bindSession = true) {
       undefined,
       true,
     );
-  return { binding, grant, args, seal, read, write, revoke, session, token: login.access_token };
+  return { binding, grant, args, seal, read, write, revoke, session, token: login.access_token, login };
 }
 
 test('unbound credentials and deleted sessions fail closed without releasing ownership', async () => {
@@ -457,4 +458,91 @@ test('refresh receipts cannot be supplied on ordinary operations or moved to ano
       )
     ).data,
   ).toMatchObject({ code: '42501' });
+});
+
+test('host refresh uses real Auth rotation and durable receipt across competing host instances', async () => {
+  for (const loseResponse of [false, true]) {
+    const f = await fixture();
+    const envelope = await cipher.seal(
+      { project, grantId: f.grant.id, userId: admin.userId, revision: 1 },
+      {
+        accessToken: f.login.access_token,
+        refreshToken: f.login.refresh_token,
+        expiresAt: f.login.expires_at,
+      },
+    );
+    await checked(f.write(0, envelope));
+    let refreshRequests = 0;
+    const config = {
+      issuer: f.binding.issuer,
+      introspectionEndpoint: `${f.binding.issuer}/introspect`,
+      introspectionClientId: 'fixture-host',
+      introspectionClientSecret: 'fixture-secret',
+      resource: f.binding.resource,
+      project,
+      supabaseUrl: API,
+      serviceRoleKey: SERVICE_KEY,
+      scopes: ['store:read'] as const,
+    };
+    // Only upstream introspection is simulated. Grants, session ownership,
+    // refresh admission/completion and Supabase Auth all use real local services.
+    const request = async (url: string, init: RequestInit) => {
+      if (url === config.introspectionEndpoint)
+        return Response.json({
+          active: true,
+          typ: 'Bearer',
+          iss: config.issuer,
+          aud: config.resource,
+          sub: f.binding.subject,
+          client_id: f.binding.client_id,
+          sid: f.binding.session_id,
+          exp: Math.floor(Date.now() / 1000) + 300,
+          scope: 'store:read',
+        });
+      if (new URL(url).origin !== API) throw new Error('Non-local test request');
+      if (url.endsWith('?grant_type=refresh_token')) refreshRequests++;
+      const response = await fetch(url, init);
+      if (url.endsWith('?grant_type=refresh_token')) {
+        expect(response.status).toBe(200);
+        if (loseResponse) {
+          await response.body?.cancel();
+          throw new Error('Simulated loss after successful Auth refresh');
+        }
+      }
+      return response;
+    };
+    const hosts = [
+      new KeycloakGrantAuthorizer(config, request),
+      new KeycloakGrantAuthorizer(config, request),
+    ];
+    const results = await Promise.allSettled(
+      hosts.map((host) =>
+        host.refreshCredentials('fixture-inbound', cipher, { expectedRevision: 1, anonKey: ANON_KEY }),
+      ),
+    );
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(loseResponse ? 0 : 1);
+    expect(refreshRequests).toBe(1);
+    const restarted = new KeycloakGrantAuthorizer(config, request);
+    if (loseResponse) {
+      await expect(restarted.readCredentials('fixture-inbound', cipher)).rejects.toThrow(
+        /^CREDENTIAL_READ_FAILED$/,
+      );
+      await expect(
+        restarted.refreshCredentials('fixture-inbound', cipher, { expectedRevision: 1, anonKey: ANON_KEY }),
+      ).rejects.toThrow(/^CREDENTIAL_REFRESH_UNCONFIRMED$/);
+      expect(refreshRequests).toBe(1);
+      const [row] =
+        await db`select refresh_id from private.mcp_credentials where grant_id=${f.grant.id}::uuid`;
+      expect(row.refresh_id).not.toBeNull();
+    } else {
+      const stored = await restarted.readCredentials('fixture-inbound', cipher);
+      expect(stored.revision).toBe(2);
+      expect(stored.credentials!.refreshToken).not.toBe(f.login.refresh_token);
+      expect((await rpc('get_mcp_downstream_session', {}, stored.credentials!.accessToken)).data).toEqual(
+        f.session,
+      );
+    }
+    await checked(f.revoke());
+    await checked(api('/auth/v1/logout?scope=local', { method: 'POST', token: f.token }));
+  }
 });

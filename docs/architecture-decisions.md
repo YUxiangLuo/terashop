@@ -476,6 +476,12 @@ grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保
 
 凭据 RPC 的写入、刷新领取/完成和已初始化读取均强制检查绑定会话仍存在且属于用户；未初始化读取仍返回 revision=0。会话删除后拒绝返回密文和完成刷新，但仍允许撤销清除。测试覆盖真实 JWT 篡改、service/普通客户拒绝、未绑定写入和会话删除后全部凭据动作拒绝；联合实验改用四个独立会话，并验证同用户会话替换拒绝。它仍不证明 refresh token 配对、完整 Auth 超时策略或用户同意，不能据此启用真实刷新。
 
+后续宿主刷新现已接通：`KeycloakGrantAuthorizer.refreshCredentials(token,cipher,{expectedRevision,anonKey})` 在在线验证完整 grant 后领取数据库单次回执；只有确认领取且解密成功才允许调用固定 `/auth/v1/token?grant_type=refresh_token`。Auth 请求只携带公开 apikey 与原 refresh token，不发送 service-role 或入站 MCP token；十秒请求预算，禁止重定向、缓存和自动重试。刷新前、返回后及完成前重查上游 token/grant，固定原 grant/user UUID。新凭据必须来自同一响应，非匿名、未过期且用户匹配，再用新 access token 调用真实管理员/session RPC，并通过不可变绑定确认仍是原下游会话，不能用同用户另一会话替换。下一 revision 密文由原回执完成 CAS，成功只返回 revision，后续读取仍重查授权。
+
+失败统一 CREDENTIAL_REFRESH_UNCONFIRMED，不解锁 pending 或猜测 Auth 是否执行。领取响应丢失时不发刷新请求；刷新成功但结果丢失时保持持久阻塞；完成响应丢失时先 readCredentials 核实，已提交即可恢复，仍 pending 且原执行者无法完成则撤销并重新授权。不能把业务 401 自动变成重复写入，也不刷新入站 MCP token。重查不能撤回已执行的 Auth 请求或消除检查后的撤销窗口；本方法返回的 revision 不是后续业务执行许可。
+
+单测覆盖原子准入、并发、错误用户/同用户另一会话、过期/畸形响应、领取后撤销、刷新中撤销、两类回执丢失与脱敏。真实本地 Supabase 测试用两个独立宿主对象并发刷新同一 revision，确认只向 Auth 发出一次请求、refresh token 轮换、原 session 保留及新宿主读取；另在 Auth 返回 200 后模拟丢失响应，确认新宿主既不能读旧凭据也不能再次刷新。该集成测试只模拟上游 introspection，其余 grant/密文/锁/Auth 均为真实本地服务；未证明真实上游 OAuth 并发或多节点生产恢复。前述“仅数据库原语”的限制因此已收窄为尚无自动续期调度、可信授权关联及远程 transport，而非没有实际下游刷新实现。
+
 ### 受信宿主取得同次登录的凭据对
 
 [createDownstreamLogin](../mcp/src/login.ts) 是内部 PKCE 兑换原语，不是 HTTP 回调处理器或 MCP 工具。宿主生成 32 字节随机 verifier，仅公开 S256 challenge；verifier 保留在单个内存对象中，五分钟过期。exchange 从验证后的回调提取授权码，向固定 Supabase HTTPS origin（本地回环可 HTTP）的 `/auth/v1/token?grant_type=pkce` 发送 `{auth_code,code_verifier}`，禁止重定向和自动重试。取同一受信响应中的 access/refresh token 及 expires_at，再用 access token 在线检查非匿名管理员、精确用户 UUID 和真实 session。成功仅向内部宿主返回 `{userId,sessionId,credentials}`，不得把这些凭据交给浏览器或 MCP 客户端。

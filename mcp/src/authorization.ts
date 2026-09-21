@@ -272,6 +272,132 @@ export class KeycloakGrantAuthorizer {
     }
   }
 
+  // Explicit host operation, never an automatic retry of a business request.
+  // A lost claim/refresh/completion acknowledgement may require reauthorization.
+  async refreshCredentials(
+    token: string,
+    cipher: CredentialCipher,
+    input: { expectedRevision: number; anonKey: string },
+  ): Promise<{ revision: number }> {
+    try {
+      const expected = z
+        .number()
+        .int()
+        .min(1)
+        .max(Number.MAX_SAFE_INTEGER - 1)
+        .parse(input.expectedRevision);
+      const anonKey = input.anonKey;
+      if (!anonKey.trim()) throw new Error('Missing public key');
+      const current = await this.resolve(token);
+      const args = {
+        p_binding: current.binding,
+        p_grant_id: current.grantId,
+        p_user_id: current.expectedUserId,
+        p_expected_revision: expected,
+      };
+      const claimed = z
+        .strictObject({
+          revision: z.number().int().positive(),
+          envelope: z.record(z.string(), z.unknown()),
+          refresh_id: z.uuid(),
+        })
+        .parse(await this.rpc('mcp_credential_command', { ...args, p_action: 'claim_refresh' }));
+      if (claimed.revision !== expected) throw new Error('Invalid refresh receipt');
+      const context = {
+        project: this.config.project,
+        grantId: current.grantId,
+        userId: current.expectedUserId,
+        revision: expected,
+      };
+      const previous = await cipher.open(context, claimed.envelope);
+      const recheck = async () => {
+        const live = await this.resolve(token);
+        if (live.grantId !== current.grantId || live.expectedUserId !== current.expectedUserId)
+          throw new Error('Changed refresh identity');
+      };
+      await recheck();
+      const credentialToken = z
+        .string()
+        .min(1)
+        .max(16384)
+        .regex(/^[\x21-\x7e]+$/);
+      const result = z
+        .object({
+          access_token: credentialToken,
+          refresh_token: credentialToken,
+          token_type: z.literal('bearer'),
+          expires_at: z.number().int().positive(),
+          user: z.object({ id: z.uuid(), is_anonymous: z.literal(false) }),
+        })
+        .parse(
+          await this.json(`${this.config.supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
+            method: 'POST',
+            headers: { apikey: anonKey, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: previous.refreshToken }),
+          }),
+        );
+      if (result.user.id !== current.expectedUserId || result.expires_at <= Math.floor(Date.now() / 1000))
+        throw new Error('Invalid refreshed identity');
+      await recheck();
+      const backend = new AdminBackend(
+        {
+          url: this.config.supabaseUrl,
+          anonKey,
+          accessToken: result.access_token,
+          expectedUserId: current.expectedUserId,
+        },
+        this.request,
+      );
+      const session = z
+        .strictObject({ user_id: z.uuid(), session_id: z.uuid() })
+        .parse(await backend.rpc('get_mcp_downstream_session', {}, false));
+      if (session.user_id !== current.expectedUserId) throw new Error('Invalid refreshed session');
+      // Rebinding is idempotent ONLY for the original immutable session. A token
+      // for the same administrator but another session must not replace it.
+      const bound = z.strictObject({ grant_id: z.uuid(), session_id: z.uuid() }).parse(
+        await this.rpc('mcp_bind_downstream_session', {
+          p_binding: current.binding,
+          p_grant_id: current.grantId,
+          p_user_id: current.expectedUserId,
+          p_session_id: session.session_id,
+        }),
+      );
+      if (bound.grant_id !== current.grantId || bound.session_id !== session.session_id)
+        throw new Error('Invalid refreshed binding');
+      const envelope = await cipher.seal(
+        { ...context, revision: expected + 1 },
+        {
+          accessToken: result.access_token,
+          refreshToken: result.refresh_token,
+          expiresAt: result.expires_at,
+        },
+      );
+      await recheck();
+      if (result.expires_at <= Math.floor(Date.now() / 1000)) throw new Error('Expired refreshed token');
+      const stored = storedCredentials.parse(
+        await this.rpc('mcp_credential_command', {
+          ...args,
+          p_action: 'complete_refresh',
+          p_refresh_id: claimed.refresh_id,
+          p_envelope: envelope,
+        }),
+      );
+      if (
+        stored.revision !== expected + 1 ||
+        stored.envelope === null ||
+        Object.keys(stored.envelope).length !== 4 ||
+        Object.entries(envelope).some(([key, value]) => stored.envelope?.[key] !== value)
+      )
+        throw new Error('Invalid refresh completion');
+      // Return only a receipt. Subsequent use must reread through online authorization.
+      return { revision: stored.revision };
+    } catch {
+      // Never clear a pending claim or replay the provider request. Reread first;
+      // if still pending/unrecoverable, revoke and establish a new authorization.
+      throw new Error('CREDENTIAL_REFRESH_UNCONFIRMED');
+    }
+  }
+
   async authorize(token: string): Promise<{
     grantId: string;
     expectedUserId: string;
