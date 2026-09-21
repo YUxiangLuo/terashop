@@ -406,6 +406,41 @@ test('MCP 客户幂等创建、查询、匿名化后重试不会复原 PII；运
   expect(inbox.items).toHaveLength(0);
 });
 
+test('MCP 下游绑定拒绝另一个真实管理员，正确 UUID 仍执行当前角色检查', async () => {
+  const other = await signup();
+  await makeAdmin(other.userId);
+  await backend(other.token).assertAdmin();
+  const bound = (token: string, expectedUserId: string) =>
+    new AdminBackend({
+      url: API,
+      anonKey: ANON_KEY,
+      accessToken: token,
+      expectedUserId,
+    });
+  await bound(admin.token, admin.userId).assertAdmin();
+  await bound(other.token, other.userId).assertAdmin();
+  for (const [token, expectedUserId] of [
+    [admin.token, other.userId],
+    [other.token, admin.userId],
+  ]) {
+    const denied = await mcpSession(bound(token, expectedUserId), true);
+    try {
+      const result = await denied.client.callTool({
+        name: 'create_customer',
+        arguments: { idempotency_key: crypto.randomUUID() },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
+        code: 'IDENTITY_MISMATCH',
+        outcome_unknown: false,
+      });
+    } finally {
+      await denied.close();
+    }
+  }
+  await expect(bound(buyer.token, buyer.userId).assertAdmin()).rejects.toThrow('ADMIN_REQUIRED');
+});
+
 test('MCP 拒绝普通用户与 service token，撤销管理员权限立即阻止已有会话', async () => {
   for (const token of [buyer.token, SERVICE_KEY, 'invalid-token']) {
     const denied = await mcpSession(backend(token), true);

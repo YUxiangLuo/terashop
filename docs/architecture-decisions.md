@@ -424,7 +424,15 @@ Keycloak `26.7.0` 已完成 [独立 Docker 实验](../scripts/mcp-keycloak-compa
 
 两处必须保留的版本约束：① 26.7.0 的 [resource processor](https://github.com/keycloak/keycloak/blob/26.7.0/services/src/main/java/org/keycloak/protocol/oidc/resourceindicators/ResourceIndicatorsPostProcessor.java#L55-L95) 不支持直接按自定义 audience 字符串匹配 URI。实测直接 URI mapper 失败；正确配置先把资源客户端 ID 放入 audience，再由该客户端的 resource_url 映射。② [introspection](https://github.com/keycloak/keycloak/blob/26.7.0/services/src/main/java/org/keycloak/protocol/oidc/AccessTokenIntrospectionProvider.java#L318-L350) 要求调用方 client_id 在 token audience 中。测试使用 client_id 与 resource URI 相同的机密资源客户端，关闭其登录/密码/service-account flows；另一个机密客户端即使凭据有效也只得到 active=false。未启用绕过 audience 检查的兼容选项。
 
-**Keycloak 仅作为下一阶段本地对接候选，未批准生产使用。** 容器明确警告 resource-indicators:v1 是 experimental；start-dev、临时库、HTTP 和无需同意的测试客户端都不是部署配置。测试只覆盖同一虚构用户的独立会话，不证明跨用户或跨客户端隔离。Keycloak 的 sid 是 SSO 会话身份，不能直接替代本项目逐客户端/资源的 grant_id；azp 也须由固定 issuer 的适配层解释，不能接收任意客户端传入的映射。下一批先验证两用户/两客户端的撤销与隔离，并确定服务端 grant 记录和 Supabase UUID 绑定方案，再接凭据保存和 HTTP。不继续为协议已有库自行实现 OAuth，也不因本次实验通过就更改 stdio 或开放网络入口。
+两用户/两客户端扩展实验已通过：每位虚构用户共用自己的 cookie jar 登录两个公共客户端，两个客户端共享该用户的 sid/sub，不同用户的 sid/sub 不同。仅用户 A 的客户端 B 请求 store:write，其他三组都保持只读；轮换后各自身份与 scopes 不变。客户端 B 拿 A 的客户端 A refresh token 尝试刷新或撤销均失败，四组 token 仍 active，合法持有方仍可刷新。随后正确撤销 A/A，原 access token 与轮换后 access token 均 inactive；A/B、B/A、B/B 仍可在线校验和刷新。这验证了此版本/配置下的顺序场景，不代表真实浏览器同意、并发、其他资源或多节点隔离已验收。
+
+**Keycloak 仍仅作为本地对接候选，未批准生产使用。** 容器明确警告 resource-indicators:v1 是 experimental；start-dev、临时库、HTTP 和无需同意的测试客户端都不是部署配置。sid 是共享 SSO 会话身份，不能直接替代本项目逐客户端/资源的 grant_id；azp 须由固定 issuer 的适配层解释，不能接收任意客户端传入的映射。不因本次实验通过就更改 stdio 或开放网络入口。
+
+### grant 与 Supabase UUID 的落实边界
+
+服务端 grant 记录须生成独立随机 ID，并不可变地绑定已验证的 `(issuer, sub, client_id, resource, project)`、上游 sid/授权纪元及 Supabase Auth user UUID。Keycloak 的 sub 与 Supabase UUID 没有天然对应关系，不能用同名值、邮箱或“均为管理员”推导。账号绑定仍须在可信交互中证明两端身份；查找不得只按 sid 或 sub，撤销按完整 grant 生效。重新授权/切换账号不能仅把旧记录改为 active 或换 UUID，否则旧 bearer 可能继承新授权。相同上游身份元组的恢复暂不自动支持，必须先完成可区分的新上游会话或签名授权纪元设计；该存储、交互和令牌到 grant 的映射尚未实现。
+
+已实现的下游检查是 [AdminBackend](../mcp/src/backend.ts) 的受信配置 expectedUserId：构造时校验并固定 UUID，每次操作从 Supabase Auth 重查实际用户，在 is_admin、RPC、Edge、Storage 前比较，不匹配返回 IDENTITY_MISMATCH / outcome_unknown=false，不回传任一 UUID。匹配 UUID 后仍执行当前管理员检查；不会因绑定存在就放宽角色。两名真实本地 Supabase 管理员的交叉会话测试和逐调用 mock 测试均覆盖这一点。此字段只能由未来可信 grant 解析器设置，不是工具输入；目前可选仅为兼容单用户 stdio，远程 host 必须强制提供。它不代表 grant 持久化、token 验证、双身份关联或凭据代理已完成。
 
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。

@@ -13,6 +13,8 @@ const directory = await mkdtemp(join(tmpdir(), 'tera-auth-compat-'));
 const resource = 'https://tera.example/mcp';
 const callback = 'http://127.0.0.1:49199/callback';
 const client = 'tera-compat';
+const secondClient = 'tera-compat-b';
+type FixtureBrowser = { username: string; cookies: Map<string, string> };
 const password = randomBytes(24).toString('base64url');
 const secret = randomBytes(24).toString('base64url');
 
@@ -38,8 +40,8 @@ try {
         attributes: { 'include.in.token.scope': 'true' },
       })),
       clients: [
-        {
-          clientId: client,
+        ...[client, secondClient].map((clientId) => ({
+          clientId,
           enabled: true,
           protocol: 'openid-connect',
           publicClient: true,
@@ -70,7 +72,7 @@ try {
               config: { 'access.token.claim': 'true', 'introspection.token.claim': 'true' },
             },
           ],
-        },
+        })),
         {
           clientId: resource,
           enabled: true,
@@ -95,17 +97,15 @@ try {
           serviceAccountsEnabled: false,
         },
       ],
-      users: [
-        {
-          username: 'fixture-admin',
-          enabled: true,
-          firstName: 'Fixture',
-          lastName: 'Admin',
-          email: 'fixture@example.test',
-          emailVerified: true,
-          credentials: [{ type: 'password', value: password, temporary: false }],
-        },
-      ],
+      users: ['fixture-admin', 'fixture-admin-b'].map((username) => ({
+        username,
+        enabled: true,
+        firstName: 'Fixture',
+        lastName: 'Admin',
+        email: `${username}@example.test`,
+        emailVerified: true,
+        credentials: [{ type: 'password', value: password, temporary: false }],
+      })),
     }),
   );
   docker(
@@ -148,7 +148,10 @@ try {
   const jwks = await (await fetch(metadata.jwks_uri)).json();
   const verifier = randomBytes(32).toString('base64url');
   const challenge = createHash('sha256').update(verifier).digest('base64url');
-  async function authorize(overrides: Record<string, string> = {}) {
+  async function authorize(
+    overrides: Record<string, string> = {},
+    browser: FixtureBrowser = { username: 'fixture-admin', cookies: new Map() },
+  ) {
     const params = new URLSearchParams({
       client_id: client,
       response_type: 'code',
@@ -163,7 +166,7 @@ try {
     for (const [key, value] of Object.entries(overrides)) if (!value) params.delete(key);
     let url = `${metadata!.authorization_endpoint}?${params}`;
     let body: URLSearchParams | undefined;
-    const cookies = new Map<string, string>();
+    const cookies = browser.cookies;
     for (let i = 0; i < 12; i++) {
       if (url.startsWith(`${callback}?`)) return new URL(url).searchParams;
       assert.equal(new URL(url).origin, origin, 'Never follow a foreign fixture redirect');
@@ -188,7 +191,7 @@ try {
       const action = html.match(/<form\b[^>]*\bid="kc-form-login"[^>]*\baction="([^"]+)"/);
       assert(action, `Expected fixture login form, got status ${response.status}`);
       url = action[1].replaceAll('&amp;', '&');
-      body = new URLSearchParams({ username: 'fixture-admin', password, credentialId: '' });
+      body = new URLSearchParams({ username: browser.username, password, credentialId: '' });
     }
     throw new Error('Too many fixture redirects');
   }
@@ -199,12 +202,13 @@ try {
     });
     return { status: response.status, data: await response.json() };
   }
-  async function issue() {
-    const authorization = await authorize();
+  async function issue(clientId = client, browser?: FixtureBrowser, scope = 'openid store:read') {
+    const authorization = await authorize({ client_id: clientId, scope }, browser);
     assert.equal(authorization.get('state'), 'fixture-state');
     assert(authorization.get('code'), 'Authorization must produce a code');
     const result = await token({
       grant_type: 'authorization_code',
+      client_id: clientId,
       code: authorization.get('code')!,
       redirect_uri: callback,
       code_verifier: verifier,
@@ -217,7 +221,7 @@ try {
     assert.equal(typeof result.data.refresh_token, 'string');
     return result.data;
   }
-  function claims(jwt: string) {
+  function claims(jwt: string, expectedClient = client, writes = false) {
     const [header, payload, signature] = jwt.split('.');
     const parsedHeader = JSON.parse(Buffer.from(header, 'base64url').toString());
     assert.equal(parsedHeader.alg, 'RS256');
@@ -234,11 +238,11 @@ try {
     const result = JSON.parse(Buffer.from(payload, 'base64url').toString());
     assert.equal(result.iss, issuer);
     assert.equal(result.aud, resource);
-    assert.equal(result.azp, client);
+    assert.equal(result.azp, expectedClient);
     assert.equal(typeof result.sub, 'string');
     assert.equal(typeof result.sid, 'string');
     assert(result.scope.split(' ').includes('store:read'));
-    assert(!result.scope.split(' ').includes('store:write'));
+    assert.equal(result.scope.split(' ').includes('store:write'), writes);
     return result;
   }
   async function introspect(accessToken: string, caller = resource) {
@@ -328,6 +332,81 @@ try {
   assert.equal(expanded.status, 200);
   claims(expanded.data.access_token); // Extra scope is intersected away, not granted.
   console.log('PASS: refresh cannot expand business scope');
+
+  const browserA: FixtureBrowser = { username: 'fixture-admin', cookies: new Map() };
+  const browserB: FixtureBrowser = { username: 'fixture-admin-b', cookies: new Map() };
+  const aa = await issue(client, browserA);
+  const ab = await issue(secondClient, browserA, 'openid store:read store:write');
+  const ba = await issue(client, browserB);
+  const bb = await issue(secondClient, browserB);
+  const aaClaims = claims(aa.access_token);
+  const abClaims = claims(ab.access_token, secondClient, true);
+  const baClaims = claims(ba.access_token);
+  const bbClaims = claims(bb.access_token, secondClient);
+  assert.equal(aaClaims.sub, abClaims.sub);
+  assert.equal(aaClaims.sid, abClaims.sid, 'Two clients share the same user SSO session');
+  assert.equal(baClaims.sub, bbClaims.sub);
+  assert.equal(baClaims.sid, bbClaims.sid);
+  assert.notEqual(aaClaims.sub, baClaims.sub);
+  assert.notEqual(aaClaims.sid, baClaims.sid);
+  for (const issued of [aa, ab, ba, bb]) assert.equal((await introspect(issued.access_token)).active, true);
+
+  const foreignRefresh = await token({
+    client_id: secondClient,
+    grant_type: 'refresh_token',
+    refresh_token: aa.refresh_token,
+  });
+  assert.equal(foreignRefresh.status, 400);
+  assert.equal(foreignRefresh.data.error, 'invalid_grant');
+  const foreignRevoke = await fetch(metadata.revocation_endpoint, {
+    method: 'POST',
+    body: new URLSearchParams({
+      client_id: secondClient,
+      token: aa.refresh_token,
+      token_type_hint: 'refresh_token',
+    }),
+  });
+  assert.equal(foreignRevoke.status, 400);
+  await foreignRevoke.text();
+  for (const issued of [aa, ab, ba, bb]) assert.equal((await introspect(issued.access_token)).active, true);
+  const ownerRefresh = await token({
+    client_id: client,
+    grant_type: 'refresh_token',
+    refresh_token: aa.refresh_token,
+  });
+  assert.equal(ownerRefresh.status, 200, 'Wrong-client attempts must not consume the owner refresh token');
+  assert.equal(claims(ownerRefresh.data.access_token).sid, aaClaims.sid);
+
+  const ownerRevoke = await fetch(metadata.revocation_endpoint, {
+    method: 'POST',
+    body: new URLSearchParams({
+      client_id: client,
+      token: ownerRefresh.data.refresh_token,
+      token_type_hint: 'refresh_token',
+    }),
+  });
+  assert.equal(ownerRevoke.status, 200);
+  await ownerRevoke.text();
+  assert.equal((await introspect(aa.access_token)).active, false);
+  assert.equal((await introspect(ownerRefresh.data.access_token)).active, false);
+  for (const [issued, clientId, writes] of [
+    [ab, secondClient, true],
+    [ba, client, false],
+    [bb, secondClient, false],
+  ] as const) {
+    assert.equal((await introspect(issued.access_token)).active, true);
+    const refreshed = await token({
+      client_id: clientId,
+      grant_type: 'refresh_token',
+      refresh_token: issued.refresh_token,
+    });
+    assert.equal(refreshed.status, 200);
+    const original = claims(issued.access_token, clientId, writes);
+    const current = claims(refreshed.data.access_token, clientId, writes);
+    assert.equal(current.sub, original.sub);
+    assert.equal(current.sid, original.sid);
+  }
+  console.log('PASS: two-user/two-client scope isolation, shared SSO sid and targeted revocation');
 } finally {
   try {
     docker('rm', '--force', name);

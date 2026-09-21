@@ -13,6 +13,49 @@ import { toolScopes, requiredToolScopes, permitsTool, type AdminScope } from '..
 const config = { url: 'http://127.0.0.1:54321', anonKey: 'public-key', accessToken: 'private-session' };
 const user = { id: crypto.randomUUID(), role: 'authenticated', is_anonymous: false };
 
+test('bound backend rejects a different administrator before any RPC, Edge or Storage call', async () => {
+  const otherId = crypto.randomUUID();
+  let currentId = user.id;
+  const calls: string[] = [];
+  const boundConfig = { ...config, expectedUserId: user.id };
+  const backend = new AdminBackend(boundConfig, async (url) => {
+    calls.push(new URL(url).pathname);
+    if (url.endsWith('/auth/v1/user')) return Response.json({ ...user, id: currentId });
+    if (url.endsWith('/is_admin')) return Response.json(true); // Both identities are admins.
+    return Response.json(null);
+  });
+  expect(await backend.rpc('get_admin_product', { product_id: otherId }, false)).toBeNull();
+  expect(calls).toEqual(['/auth/v1/user', '/rest/v1/rpc/is_admin', '/rest/v1/rpc/get_admin_product']);
+  currentId = otherId;
+  boundConfig.expectedUserId = otherId; // Changing the source object must not rebind an existing backend.
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args] of [
+      ['get_admin_product', { product_id: otherId }],
+      ['create_customer', { idempotency_key: crypto.randomUUID() }],
+      ['get_managed_media', { media_id: otherId }],
+      ['publish_managed_media', { media_id: otherId }],
+      ['inspect_product_media', { product_id: otherId, media_id: otherId, content_type: 'image/png' }],
+    ] as const) {
+      calls.length = 0;
+      const result = await session.client.callTool({ name, arguments: args });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
+        code: 'IDENTITY_MISMATCH',
+        outcome_unknown: false,
+      });
+      expect(calls).toEqual(['/auth/v1/user']);
+      expect(JSON.stringify(result)).not.toContain(otherId);
+      expect(JSON.stringify(result)).not.toContain(user.id);
+    }
+  } finally {
+    await session.close();
+  }
+  for (const expectedUserId of ['', 'not-a-uuid']) {
+    expect(() => new AdminBackend({ ...config, expectedUserId })).toThrow();
+  }
+});
+
 test('scope inventory exactly covers all tools and requires every sensitive permission', async () => {
   const { backend } = fakeBackend(() => Response.json(null));
   const session = await mcpSession(backend, true);

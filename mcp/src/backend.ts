@@ -22,6 +22,8 @@ export interface BackendConfig {
   url: string;
   anonKey: string;
   accessToken: string;
+  // Trusted grant binding, never taken from tool arguments or token claims alone.
+  expectedUserId?: string;
 }
 
 // Stdio uses a locally supplied user session, never an MCP HTTP bearer token.
@@ -29,6 +31,7 @@ export interface BackendConfig {
 export class AdminBackend {
   private readonly url: string;
   private readonly headers: Record<string, string>;
+  private readonly expectedUserId?: string;
 
   constructor(
     config: BackendConfig,
@@ -47,6 +50,8 @@ export class AdminBackend {
       throw new Error('Supabase URL must be an HTTPS origin (HTTP is allowed only on loopback)');
     }
     if (!config.anonKey || !config.accessToken) throw new Error('Missing Supabase credentials');
+    this.expectedUserId =
+      config.expectedUserId === undefined ? undefined : z.uuid().parse(config.expectedUserId).toLowerCase();
     this.url = url.origin;
     this.headers = {
       apikey: config.anonKey,
@@ -103,6 +108,9 @@ export class AdminBackend {
       user.role !== 'authenticated'
     ) {
       throw new BackendError('ADMIN_REQUIRED');
+    }
+    if (this.expectedUserId !== undefined && user.id !== this.expectedUserId) {
+      throw new BackendError('IDENTITY_MISMATCH');
     }
     if ((await this.json('/rest/v1/rpc/is_admin', {})) !== true) {
       throw new BackendError('ADMIN_REQUIRED');
