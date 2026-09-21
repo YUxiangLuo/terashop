@@ -1012,6 +1012,7 @@ export const managedMedia = z
     (value) => !['discard_prepared', 'discarded'].includes(value.state) || value.upload_status === 'settled',
   );
 export const managedMediaResult = z.strictObject({ media: managedMedia, url: z.url().nullable() });
+export const managedMediaPage = z.strictObject({ items: z.array(managedMedia), next_cursor: id.nullable() });
 export const adminProductMediaPage = z.strictObject({
   items: z.array(
     z.strictObject({

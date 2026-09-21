@@ -12,6 +12,60 @@ import { mcpSession, toolData } from '../support/mcp';
 const config = { url: 'http://127.0.0.1:54321', anonKey: 'public-key', accessToken: 'private-session' };
 const user = { id: crypto.randomUUID(), role: 'authenticated', is_anonymous: false };
 
+test('managed media discovery is readonly and rejects unsafe output or invalid filters', async () => {
+  const row = {
+    id: crypto.randomUUID(),
+    request_id: crypto.randomUUID(),
+    state: 'uploading',
+    upload_status: 'pending',
+    content_type: 'image/png',
+    byte_size: 12,
+    sha256: 'b'.repeat(64),
+    published: false,
+  };
+  let response: unknown = { items: [row], next_cursor: null };
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend);
+  try {
+    expect(
+      await toolData<{ items: (typeof row)[]; next_cursor: string | null }>(
+        session.client,
+        'list_admin_managed_media',
+        { published_filter: false },
+      ),
+    ).toEqual({ items: [row], next_cursor: null });
+    expect(new URL(calls.at(-1)!.url).pathname).toBe('/rest/v1/rpc/list_admin_managed_media');
+    expect(await calls.at(-1)!.json()).toEqual({ published_filter: false });
+    for (const invalid of [
+      { page_size: 0 },
+      { page_size: 101 },
+      { after_id: 'bad' },
+      { state_filter: 'deleted' },
+      { upload_status_filter: 'expired' },
+      { published_filter: 'false' },
+      { actor_id: row.id },
+    ]) {
+      calls.length = 0;
+      expect(
+        (await session.client.callTool({ name: 'list_admin_managed_media', arguments: invalid })).isError,
+      ).toBe(true);
+      expect(calls).toEqual([]);
+    }
+    for (const invalid of [
+      { ...row, url: 'SECRET' },
+      { ...row, published: true },
+      { ...row, state: 'discarded' },
+    ]) {
+      response = { items: [invalid], next_cursor: null };
+      const result = await session.client.callTool({ name: 'list_admin_managed_media', arguments: {} });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('managed media validates identities and output, routes explicit actions and never retries', async () => {
   const media = {
     id: crypto.randomUUID(),
@@ -1853,8 +1907,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(52);
-    expect(writeTools.length).toBe(111);
+    expect(readTools.length).toBe(53);
+    expect(writeTools.length).toBe(112);
     expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,

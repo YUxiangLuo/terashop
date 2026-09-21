@@ -3204,4 +3204,38 @@ begin
 end;
 $$;
 
+-- Application provenance only: never enumerate Storage or infer deletion safety.
+CREATE FUNCTION public.list_admin_managed_media(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    state_filter text DEFAULT NULL, upload_status_filter text DEFAULT NULL,
+    published_filter boolean DEFAULT NULL, request_id_filter uuid DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() or not exists (
+    select 1 from auth.users u where u.id=auth.uid() and not coalesce(u.is_anonymous,true)
+  ) then raise exception using errcode='42501', message='admin required'; end if;
+  if page_size is null or page_size not between 1 and 100
+    or (state_filter is not null and state_filter not in ('uploading','staged','retained','discard_prepared','discarded'))
+    or (upload_status_filter is not null and upload_status_filter not in ('not_started','pending','settled')) then
+    raise exception using errcode='22023', message='invalid managed media filters';
+  end if;
+  with candidates as materialized (
+    select m.* from private.managed_media m
+    where (after_id is null or m.id>after_id)
+      and (state_filter is null or m.state=state_filter)
+      and (upload_status_filter is null or m.upload_status=upload_status_filter)
+      and (published_filter is null or m.published=published_filter)
+      and (request_id_filter is null or m.request_id=request_id_filter)
+    order by m.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object(
+    'id',p.id,'request_id',p.request_id,'state',p.state,'upload_status',p.upload_status,
+    'content_type',p.content_type,'byte_size',p.byte_size,'sha256',p.sha256,'published',p.published
+  ) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+    into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;

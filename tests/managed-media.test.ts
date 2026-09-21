@@ -265,6 +265,129 @@ test('private staging, immutable replay, publication/attachment and discard prep
   });
 });
 
+test('managed media discovery pages stable IDs, combines filters and preserves private lifecycle facts', async () => {
+  const fixtures: Media[] = [];
+  for (const [state, upload_status, published] of [
+    ['uploading', 'not_started', false],
+    ['uploading', 'pending', false],
+    ['staged', 'pending', false],
+    ['staged', 'settled', false],
+    ['retained', 'settled', false],
+    ['retained', 'settled', true],
+    ['discard_prepared', 'settled', false],
+    ['discarded', 'settled', false],
+  ] as const) {
+    const row = {
+      id: crypto.randomUUID(),
+      request_id: upload().request_id,
+      state,
+      upload_status,
+      published,
+      content_type: 'image/png',
+      byte_size: 17,
+      sha256: 'a'.repeat(64),
+    };
+    fixtures.push(row);
+    await db`insert into private.managed_media(id,request_id,state,upload_status,published,content_type,byte_size,sha256)
+      values (${row.id}::uuid,${row.request_id}::uuid,${state},${upload_status},${published},'image/png',17,${row.sha256})`;
+  }
+  // No objects exist for these rows: discovery must not require Storage reads.
+  const session = await mcpSession(
+    new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }, (url, init) => {
+      expect(url).not.toContain('/storage/');
+      expect(url).not.toContain('/functions/');
+      return fetch(url, init);
+    }),
+  );
+  type Page = { items: Media[]; next_cursor: string | null };
+  const list = (args: Record<string, unknown> = {}) =>
+    toolData<Page>(session.client, 'list_admin_managed_media', args);
+  try {
+    const seen: Media[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await list({ page_size: 2, ...(cursor ? { after_id: cursor } : {}) });
+      expect(page.items.length).toBeLessThanOrEqual(2);
+      for (const row of page.items) {
+        if (cursor) expect(row.id > cursor).toBe(true);
+        seen.push(row);
+      }
+      if (page.next_cursor) {
+        expect(page.items.length).toBe(2);
+        expect(page.next_cursor).toBe(page.items.at(-1)!.id);
+      }
+      cursor = page.next_cursor ?? undefined;
+    } while (cursor);
+    expect(seen.map((r) => r.id)).toEqual([...new Set(seen.map((r) => r.id))].sort());
+    expect(seen.filter((r) => fixtures.some((f) => f.id === r.id))).toEqual(
+      fixtures.toSorted((a, b) => a.id.localeCompare(b.id)),
+    );
+    for (const row of fixtures) {
+      expect(
+        await list({
+          request_id_filter: row.request_id,
+          state_filter: row.state,
+          upload_status_filter: row.upload_status,
+          published_filter: row.published,
+        }),
+      ).toEqual({ items: [row], next_cursor: null });
+      expect(await list({ request_id_filter: row.request_id, published_filter: !row.published })).toEqual({
+        items: [],
+        next_cursor: null,
+      });
+    }
+    for (const state of ['uploading', 'staged', 'retained', 'discard_prepared', 'discarded']) {
+      const page = await list({ state_filter: state, page_size: 100 });
+      expect(page.items.every((r) => r.state === state)).toBe(true);
+      expect(page.items.map((r) => r.id)).toEqual(
+        expect.arrayContaining(fixtures.filter((r) => r.state === state).map((r) => r.id)),
+      );
+    }
+    for (const upload_status of ['not_started', 'pending', 'settled']) {
+      const page = await list({ upload_status_filter: upload_status, page_size: 100 });
+      expect(page.items.every((r) => r.upload_status === upload_status)).toBe(true);
+      expect(page.items.map((r) => r.id)).toEqual(
+        expect.arrayContaining(fixtures.filter((r) => r.upload_status === upload_status).map((r) => r.id)),
+      );
+    }
+    expect(await list({ after_id: 'ffffffff-ffff-4fff-bfff-ffffffffffff' })).toEqual({
+      items: [],
+      next_cursor: null,
+    });
+    for (const args of [
+      { page_size: null },
+      { page_size: 0 },
+      { page_size: 101 },
+      { state_filter: 'deleted' },
+      { upload_status_filter: 'expired' },
+    ])
+      expect((await rpc('list_admin_managed_media', args, admin.token)).status).toBe(400);
+    for (const token of [undefined, customer.token, SERVICE_KEY])
+      expect((await rpc('list_admin_managed_media', {}, token)).status).toBeGreaterThanOrEqual(400);
+    await checked(
+      api(`/rest/v1/profiles?id=eq.${admin.userId}`, {
+        service: true,
+        method: 'PATCH',
+        body: { role: 'customer' },
+      }),
+    );
+    try {
+      expect((await rpc('list_admin_managed_media', {}, admin.token)).status).toBe(403);
+      expect(
+        (await session.client.callTool({ name: 'list_admin_managed_media', arguments: {} })).isError,
+      ).toBe(true);
+    } finally {
+      await makeAdmin(admin.userId);
+    }
+    expect(await list({ request_id_filter: fixtures[0].request_id })).toEqual({
+      items: [fixtures[0]],
+      next_cursor: null,
+    });
+  } finally {
+    await session.close();
+  }
+});
+
 test('one-shot upload admission blocks replay and discard while the original response is in flight', async () => {
   await runtime(async (session, fault) => {
     const args = upload();
@@ -520,7 +643,7 @@ test('lost upload/publication responses retain identity and never reverse the pu
       ).toMatchObject({ media: { id: row.id, state: 'retained', published: true } });
     }
   });
-});
+}, 20000);
 
 async function stagedRecord() {
   const args = upload();

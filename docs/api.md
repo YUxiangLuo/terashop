@@ -101,6 +101,14 @@ POST /rest/v1/rpc/update_product
 
 商品图片 URL 和非 null 的分类图片 URL 已由数据库同步到私有引用登记，RPC 与底表写入同样覆盖，编辑/解除/源删除及回滚与登记保持同事务。它只保留完整 URL 与源记录关系，不改变现有 DTO，也不扫描富文本或扩展 JSON。旧媒体与自由 URL 使用的媒体继续保留，零登记引用不是删除许可。独立私有暂存/发布/丢弃执行与恢复已实现；仅允许一次性上传已确认结束且冻结的私有对象物理删除，公开对象永久保留。见 [ADR-026](architecture-decisions.md#adr-026媒体采用保守保留与显式引用边界) 和 [Edge 合同](../supabase/functions/README.md#私有媒体通路)。
 
+### 受管理媒体发现
+
+`list_admin_managed_media(page_size=20, after_id?, state_filter?, upload_status_filter?, published_filter?, request_id_filter?)` 是只读 RPC/MCP 工具，仅当前非匿名管理员 JWT 可用，不接受 actor_id，不授予 service-role 调用权限。它查询应用自有媒体记录，不读取 Storage，不触发核验、恢复或删除。
+
+筛选按 AND 组合：state 为 `uploading/staged/retained/discard_prepared/discarded`；upload_status 为 `not_started/pending/settled`；published 是布尔值，false 与未筛选不同。request_id 精确匹配原上传请求，可在响应丢失时找回媒体 ID，无需重放上传。
+
+返回 `{items,next_cursor}`，每行严格包含 `id,request_id,state,upload_status,content_type,byte_size,sha256,published`；无 URL、私有路径、凭据或引用数量。page_size 为 1–100，默认 20，按媒体 UUID 升序，after_id 排他，末页游标 null。更换筛选条件须重置游标；没有创建时间排序、精确总数或跨页冻结快照。空列表不代表在途操作失败，列表状态不等于字节存在或删除许可；写入前应重读状态，并由命令再次校验资格。
+
 ### 现有底表查询
 
 ```http

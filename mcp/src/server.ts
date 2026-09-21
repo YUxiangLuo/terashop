@@ -63,6 +63,7 @@ import {
   productMediaInspection,
   adminProductMediaPage,
   managedMediaResult,
+  managedMediaPage,
   metafieldDefinitionResult,
   metafieldDefinitionPage,
   metafieldResult,
@@ -233,6 +234,21 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     );
   }
 
+  rpc(
+    'list_admin_managed_media',
+    'List application-managed media, including pending uploads and discarded tombstones. Filters combine with AND; page size 1-100, default 20, media UUID ascending, exclusive after_id. Reset cursor when filters change. No cross-page snapshot, time ordering, Storage reads, URLs, reference count or deletion eligibility guarantee. request_id_filter recovers identity without replaying upload. Read current state before an explicitly approved mutation; no automatic recovery or deletion.',
+    z.strictObject({
+      page_size: z.number().int().min(1).max(100).optional(),
+      after_id: id.optional(),
+      state_filter: z.enum(['uploading', 'staged', 'retained', 'discard_prepared', 'discarded']).optional(),
+      upload_status_filter: z.enum(['not_started', 'pending', 'settled']).optional(),
+      published_filter: z.boolean().optional(),
+      request_id_filter: id.optional(),
+    }),
+    false,
+    false,
+    managedMediaPage,
+  );
   rpc(
     'list_admin_product_media',
     'Discover catalog-media Storage records under the exact product UUID path, including unattached uploads and deleted products. UUID ascending pagination, 1-100 per page; cursor is Storage object id, NOT media_id. Only canonical UUID jpg/png/webp paths, not legacy seed paths. expected_content_type comes from the filename, not verified bytes. Does not prove product existence, attachment, complete references, byte availability or deletion safety. Use inspect_product_media with the returned product_id, media_id and expected_content_type to inspect bytes; never infer an in-flight upload failed from an empty list. No cross-page snapshot.',

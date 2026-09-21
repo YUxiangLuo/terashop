@@ -2007,6 +2007,17 @@ export type Database = {
         }
         Returns: Json
       }
+      list_admin_managed_media: {
+        Args: {
+          after_id?: string
+          page_size?: number
+          published_filter?: boolean
+          request_id_filter?: string
+          state_filter?: string
+          upload_status_filter?: string
+        }
+        Returns: Json
+      }
       list_admin_metafield_definitions: {
         Args: {
           access_filter?: string

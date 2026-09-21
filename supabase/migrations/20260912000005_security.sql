@@ -818,6 +818,9 @@ GRANT EXECUTE ON FUNCTION public.list_admin_product_media(uuid,integer,uuid) TO 
 REVOKE ALL ON FUNCTION public.managed_media_command(uuid,text,uuid,uuid,text,integer,text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.managed_media_command(uuid,text,uuid,uuid,text,integer,text) TO service_role;
 
+REVOKE ALL ON FUNCTION public.list_admin_managed_media(integer,uuid,text,text,boolean,uuid) FROM PUBLIC, anon, service_role;
+GRANT EXECUTE ON FUNCTION public.list_admin_managed_media(integer,uuid,text,text,boolean,uuid) TO authenticated;
+
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;
 alter default privileges for role postgres in schema public grant all on sequences to service_role;
