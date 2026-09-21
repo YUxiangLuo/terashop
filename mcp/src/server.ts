@@ -61,6 +61,7 @@ import {
   productMediaResult,
   productMediaIdentity,
   productMediaInspection,
+  adminProductMediaPage,
   metafieldDefinitionResult,
   metafieldDefinitionPage,
   metafieldResult,
@@ -179,6 +180,18 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     );
   }
 
+  rpc(
+    'list_admin_product_media',
+    'Discover catalog-media Storage records under the exact product UUID path, including unattached uploads and deleted products. UUID ascending pagination, 1-100 per page; cursor is Storage object id, NOT media_id. Only canonical UUID jpg/png/webp paths, not legacy seed paths. expected_content_type comes from the filename, not verified bytes. Does not prove product existence, attachment, complete references, byte availability or deletion safety. Use inspect_product_media with the returned product_id, media_id and expected_content_type to inspect bytes; never infer an in-flight upload failed from an empty list. No cross-page snapshot.',
+    z.strictObject({
+      product_id: id,
+      page_size: z.number().int().min(1).max(100).optional(),
+      after_id: id.optional(),
+    }),
+    false,
+    false,
+    adminProductMediaPage,
+  );
   tool(
     'inspect_product_media',
     'Read the original public media object using product_id, media_id and content_type. Returns observed byte_size and SHA-256 (max 5 MiB), not image bytes. Compare with the original upload bytes after an uncertain upload; errors or absence do not prove an in-flight upload failed. Does not require the product to still exist. No arbitrary URL/path/bucket, no product attachment or reference/deletion-safety claim, no image safety scan. Never automatically retry uploads or allocate replacement IDs.',

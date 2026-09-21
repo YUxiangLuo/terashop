@@ -3071,4 +3071,35 @@ begin
 end;
 $$;
 
+-- Storage owns object identity. This projection is discovery, not a reference
+-- registry or evidence that the underlying bytes exist or are safe to delete.
+CREATE FUNCTION public.list_admin_product_media(product_id uuid, page_size integer DEFAULT 20,
+    after_id uuid DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if product_id is null or page_size is null or page_size not between 1 and 100 then
+    raise exception using errcode='22023', message='invalid media list filters';
+  end if;
+  with candidates as materialized (
+    select o.id,o.name from storage.objects o
+    where o.bucket_id='catalog-media' and (after_id is null or o.id>after_id)
+      and o.name like 'products/' || product_id::text || '/%'
+      and o.name ~ ('^products/' || product_id::text || '/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(jpg|png|webp)$')
+    order by o.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'product_id',product_id,
+    'media_id',split_part(split_part(p.name,'/',3),'.',1)::uuid,'path',p.name,
+    'expected_content_type',case split_part(p.name,'.',2)
+      when 'jpg' then 'image/jpeg' when 'png' then 'image/png' else 'image/webp' end)
+    order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 commit;

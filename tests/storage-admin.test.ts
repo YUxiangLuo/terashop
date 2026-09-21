@@ -92,6 +92,61 @@ test('MCP uploads an immutable public object, rejects overwrite, and attaches th
   } })).isError).toBe(true);
 });
 
+test('MCP discovers only canonical product paths, pages by Storage identity, and denies customer access', async () => {
+  const productId = crypto.randomUUID(); // No product row: discovery includes orphan uploads.
+  const mediaId = crypto.randomUUID();
+  const expected: Array<{ id: string; product_id: string; media_id: string; path: string; expected_content_type: string }> = [];
+  for (const [extension, mime] of [['jpg', 'image/jpeg'], ['png', 'image/png'], ['webp', 'image/webp']]) {
+    const path = `products/${productId}/${mediaId}.${extension}`;
+    const uploaded = await objectRequest('catalog-media', path, admin.token, {
+      method: 'POST', body: png, headers: { 'Content-Type': 'image/png', 'x-upsert': 'false' },
+    });
+    expect(uploaded.ok).toBe(true);
+    cleanup.defer(() => removeObject(path));
+    const result = await uploaded.json();
+    expect(result.Id).toBeString();
+    expected.push({ id: result.Id, product_id: productId, media_id: mediaId, path, expected_content_type: mime });
+  }
+  // Service fixtures deliberately bypass the canonical-key insert policy.
+  for (const path of [
+    `products/${crypto.randomUUID()}/${mediaId}.png`,
+    `products/${productId}/legacy.png`,
+    `products/${productId}/${mediaId}.png/extra`,
+    `products/${productId}/${mediaId}.gif`,
+  ]) {
+    const uploaded = await objectRequest('catalog-media', path, SERVICE_KEY, {
+      method: 'POST', body: png, headers: { 'Content-Type': 'image/png' },
+    });
+    expect(uploaded.ok).toBe(true);
+    cleanup.defer(() => removeObject(path));
+  }
+  expected.sort((a, b) => a.id.localeCompare(b.id));
+  const session = await mcpSession(new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }));
+  cleanup.defer(() => session.close());
+  type Page = { items: typeof expected; next_cursor: string | null };
+  let after: string | undefined;
+  for (let i = 0; i < expected.length; i++) {
+    const page = await toolData<Page>(session.client, 'list_admin_product_media', {
+      product_id: productId.toUpperCase(), page_size: 1, ...(after ? { after_id: after } : {}),
+    });
+    expect(page).toEqual({ items: [expected[i]], next_cursor: i < expected.length - 1 ? expected[i].id : null });
+    after = expected[i].id;
+  }
+  expect(await toolData<Page>(session.client, 'list_admin_product_media', {
+    product_id: productId, after_id: after,
+  })).toEqual({ items: [], next_cursor: null });
+  expect(await toolData<Page>(session.client, 'list_admin_product_media', {
+    product_id: crypto.randomUUID(),
+  })).toEqual({ items: [], next_cursor: null });
+  for (const token of [undefined, customer.token]) {
+    expect((await rpc('list_admin_product_media', { product_id: productId }, token)).status).toBeGreaterThanOrEqual(400);
+  }
+  for (const invalid of [{ page_size: 0 }, { page_size: 101 }, { page_size: null }, { product_id: null }]) {
+    expect((await rpc('list_admin_product_media', { product_id: productId, ...invalid }, admin.token)).data)
+      .toMatchObject({ code: '22023' });
+  }
+});
+
 test('bucket has the durable public 5 MiB JPEG/PNG/WebP configuration', async () => {
   const response = await fetch(`${API}/storage/v1/bucket/catalog-media`, {
     headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}` },

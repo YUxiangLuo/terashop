@@ -1800,8 +1800,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(50);
-    expect(writeTools.length).toBe(103);
+    expect(readTools.length).toBe(51);
+    expect(writeTools.length).toBe(104);
     expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
@@ -2471,6 +2471,60 @@ test('拒绝非 TLS 远程端点和带凭据/路径的 URL；拒绝匿名或 ser
     });
     await expect(backend.assertAdmin()).rejects.toThrow('ADMIN_REQUIRED');
     expect(calls).toBe(1);
+  }
+});
+
+test('媒体发现严格校验分页与输出，不暴露 Storage owner 或 metadata', async () => {
+  const id = crypto.randomUUID(),
+    mediaId = crypto.randomUUID();
+  const row = {
+    id,
+    product_id: id,
+    media_id: mediaId,
+    path: `products/${id}/${mediaId}.png`,
+    expected_content_type: 'image/png',
+  };
+  let response: unknown = { items: [row], next_cursor: id };
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend);
+  try {
+    expect(
+      await toolData<{ items: (typeof row)[]; next_cursor: string }>(
+        session.client,
+        'list_admin_product_media',
+        { product_id: id },
+      ),
+    ).toEqual({ items: [row], next_cursor: id });
+    for (const extra of [
+      { owner: 'SECRET' },
+      { metadata: { secret: 'SECRET' } },
+      { expected_content_type: 'text/html' },
+      { path: '../secret' },
+    ]) {
+      response = { items: [{ ...row, ...extra }], next_cursor: null };
+      const result = await session.client.callTool({
+        name: 'list_admin_product_media',
+        arguments: { product_id: id },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(result)).not.toContain('SECRET');
+    }
+    const before = calls.length;
+    for (const args of [
+      {},
+      { product_id: id, page_size: 101 },
+      { product_id: id, page_size: null },
+      { product_id: id, bucket: 'other' },
+      { product_id: id, after_id: '../' },
+    ]) {
+      expect(
+        (await session.client.callTool({ name: 'list_admin_product_media', arguments: args })).isError,
+      ).toBe(true);
+      expect(calls.length).toBe(before);
+    }
+  } finally {
+    await session.close();
   }
 });
 

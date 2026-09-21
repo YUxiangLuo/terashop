@@ -996,6 +996,18 @@ export const productMediaInspection = productMediaResult.extend({
   byte_size: z.number().int().min(1).max(5242880),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
 });
+export const adminProductMediaPage = z.strictObject({
+  items: z.array(
+    z.strictObject({
+      id,
+      product_id: id,
+      media_id: id,
+      path: z.string().regex(/^products\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.(jpg|png|webp)$/),
+      expected_content_type: productMediaIdentity.shape.content_type,
+    }),
+  ),
+  next_cursor: id.nullable(),
+});
 export const metafieldType = z.enum([
   'text',
   'rich_text',

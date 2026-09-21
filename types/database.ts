@@ -2095,6 +2095,10 @@ export type Database = {
         }
         Returns: Json
       }
+      list_admin_product_media: {
+        Args: { after_id?: string; page_size?: number; product_id: string }
+        Returns: Json
+      }
       list_admin_products: {
         Args: {
           after_cursor?: Json

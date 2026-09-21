@@ -91,6 +91,14 @@ POST /rest/v1/rpc/update_product
 
 分类和扩展可与上述字段合并保存，例如 `"changes":{"category_ids":["<分类UUID>"],"metafields":[{"namespace":"custom","key":"material","type":"text","value":"Cotton"}]}`。保存值不会建立或公开定义；没有公开定义的值继续仅管理端可读。分类树、Metafield 定义/可见性、Metaobject 内容仍独立管理。
 
+### 管理员商品媒体发现
+
+`list_admin_product_media(product_id, page_size=20, after_id?)` 仅 admin/service 可调用，同名 MCP 工具只读。读取 Storage 自身对象记录，不新增重复身份表、不修改 Storage 底表或开放通用 SELECT 策略。product_id 必填，仅作为路径范围；不要求商品存在，也不以商品图片关联过滤，因此可发现未关联或商品删除后保留的对象。
+
+固定 bucket 为 `catalog-media`，仅包含 `products/<小写商品UUID>/<小写媒体UUID>.<jpg|png|webp>`；忽略旧 seed 路径和非规范文件名。返回 `{items,next_cursor}`，每行仅含 `id/product_id/media_id/path/expected_content_type`，不含 owner、metadata 或用户上传的任意字段。`id` 是 Storage 对象 UUID，**不同于文件名里的 media_id**；同一 media_id 的不同扩展名是不同对象。分页按 Storage id 升序，page_size 为 1–100，末页游标 null；切换商品须重置游标，无精确总数或跨页冻结快照。
+
+`expected_content_type` 根据扩展名推导，不证明实际 MIME、图片有效性或字节存在。取得列表后可将 product_id/media_id/expected_content_type 作为 `inspect_product_media` 的 product_id/media_id/content_type 核验实际读取内容；上传与核验合同见 [MCP 媒体](../mcp/README.md#公开商品媒体上传)。空列表不证明商品不存在或在途上传失败。此列表不是引用登记，不声明对象未被引用或可删除；自由 URL、分类图片和扩展 JSON 的引用与并发删除保护仍未完成。
+
 ### 现有底表查询
 
 ```http
