@@ -186,6 +186,12 @@ test('MCP 订单手工记账→履约→版本化物流→账本读取', async (
   const product = await stockedProduct(admin, { onHand: 9, price: 17.25, cleanup });
   const order = await fixtureOrder(product, buyer, 3);
   const args = { order_id: order.id, idempotency_key: crypto.randomUUID() };
+  expect(
+    await toolData(session.client, 'get_order_fulfillment_balance', { order_id: order.id }),
+  ).toMatchObject({
+    is_fulfillable: false,
+    lines: [{ ordered_quantity: 3, available_quantity: 0 }],
+  });
   expect(await toolData(session.client, 'mark_order_paid', args)).toMatchObject({
     financial_status: 'paid',
     total: 51.75,
@@ -212,6 +218,13 @@ test('MCP 订单手工记账→履约→版本化物流→账本读取', async (
   });
   expect(await toolData(session.client, 'get_admin_order', { order_id: order.id })).toMatchObject({
     fulfillment_status: 'partially_fulfilled',
+  });
+  expect(
+    await toolData(session.client, 'get_order_fulfillment_balance', { order_id: order.id }),
+  ).toMatchObject({
+    payment_hold: false,
+    is_fulfillable: true,
+    lines: [{ ordered_quantity: 3, fulfilled_quantity: 2, available_quantity: 1 }],
   });
   const ledger = await toolData<{ transactions: Array<{ kind: string; amount: number }> }>(
     session.client,

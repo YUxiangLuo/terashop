@@ -149,6 +149,168 @@ export const adminOrderDetail = adminOrderResult
   })
   .nullable();
 
+const quantity = z.number().int().nonnegative();
+const transactionStatus = z.enum(['pending', 'succeeded', 'failed', 'cancelled']);
+export const orderLedger = z.strictObject({
+  order: adminOrderPage.shape.items.element
+    .omit({ customer_id: true, email: true })
+    .extend({ subtotal: money }),
+  balances: z.strictObject({
+    adjustment_total: z.number(),
+    captured: money,
+    refunded: money,
+    net_paid: z.number(),
+    is_balanced: z.boolean(),
+  }),
+  adjustments: z.array(
+    z.strictObject({
+      id: z.number().int(),
+      order_item_id: id.nullable(),
+      kind: z.enum(['discount', 'shipping', 'tax', 'manual', 'rounding']),
+      amount: z.number(),
+      currency: z.literal('USD'),
+      label: z.string(),
+      source_type: z.string(),
+      source_ref: z.string().nullable(),
+      created_at: timestamp,
+    }),
+  ),
+  payment_intents: z.array(
+    z.strictObject({
+      id,
+      provider: z.literal('paypal'),
+      status: z.enum(['requires_action', 'processing', 'succeeded', 'failed', 'cancelled']),
+      amount: money,
+      currency: z.literal('USD'),
+      provider_reference: z.string().nullable(),
+      created_at: timestamp,
+      updated_at: timestamp,
+    }),
+  ),
+  transactions: z.array(
+    z.strictObject({
+      id,
+      payment_intent_id: id.nullable(),
+      parent_transaction_id: id.nullable(),
+      provider: z.string(),
+      kind: z.enum(['authorization', 'capture', 'refund', 'void']),
+      status: transactionStatus,
+      amount: money,
+      currency: z.literal('USD'),
+      provider_reference: z.string().nullable(),
+      processed_at: timestamp.nullable(),
+      created_at: timestamp,
+    }),
+  ),
+  refunds: z.array(
+    z.strictObject({
+      id,
+      payment_transaction_id: id.nullable(),
+      status: transactionStatus,
+      source: z.enum(['items', 'shipping', 'custom_amount', 'remaining', 'legacy']),
+      amount: money,
+      currency: z.literal('USD'),
+      reason: z.string().nullable(),
+      restock_requested: z.boolean(),
+      components: z.array(
+        z.strictObject({
+          kind: z.enum(['tax', 'shipping', 'unallocated']),
+          tax_line_id: id.nullable(),
+          shipping_line_id: id.nullable(),
+          amount: money,
+        }),
+      ),
+      created_at: timestamp,
+      lines: z.array(
+        z.strictObject({
+          order_item_id: id,
+          quantity,
+          amount: money,
+          cancelled_quantity: quantity,
+          restocked_quantity: quantity,
+        }),
+      ),
+    }),
+  ),
+  fulfillments: z.array(
+    adminOrderDetail.unwrap().shape.fulfillments.element.omit({ order_id: true, version: true }),
+  ),
+});
+export const fulfillmentBalance = z.strictObject({
+  order_id: id,
+  payment_hold: z.boolean(),
+  is_fulfillable: z.boolean(),
+  lines: z.array(
+    z.strictObject({
+      order_item_id: id,
+      ordered_quantity: quantity,
+      fulfilled_quantity: quantity,
+      cancelled_quantity: quantity,
+      reserved_quantity: quantity,
+      available_quantity: quantity,
+    }),
+  ),
+});
+export const returnDisposition = z.strictObject({
+  id,
+  receipt_line_id: id,
+  quantity: quantity.positive(),
+  disposition: z.enum(['restock', 'discard']),
+  inventory_movement_id: z.number().int().nullable(),
+  note: z.string().nullable(),
+  created_at: timestamp,
+});
+export const returnReceipt = z.strictObject({
+  id,
+  return_id: id,
+  order_id: id,
+  location_id: id,
+  note: z.string().nullable(),
+  received_at: timestamp,
+  lines: z.array(
+    z.strictObject({
+      id,
+      return_line_id: id,
+      quantity: quantity.positive(),
+      undisposed_quantity: quantity,
+      dispositions: z.array(returnDisposition),
+    }),
+  ),
+});
+export const returnAuthorization = z.strictObject({
+  id,
+  order_id: id,
+  fulfillment_id: id,
+  status: z.enum(['open', 'closed', 'cancelled']),
+  reason: z.string().nullable(),
+  created_at: timestamp,
+  closed_at: timestamp.nullable(),
+  lines: z.array(
+    z.strictObject({
+      id,
+      order_item_id: id,
+      quantity: quantity.positive(),
+      received_quantity: quantity,
+      receivable_quantity: quantity,
+    }),
+  ),
+  receipts: z.array(returnReceipt),
+});
+export const orderReturns = z.strictObject({
+  order_id: id,
+  lines: z.array(
+    z.strictObject({
+      fulfillment_id: id,
+      order_item_id: id,
+      shipped_quantity: quantity,
+      authorized_unreceived_quantity: quantity,
+      received_quantity: quantity,
+      available_quantity: quantity,
+    }),
+  ),
+  returns: z.array(returnAuthorization),
+});
+
 const decimalAmount = z.string().regex(/^(0|[1-9][0-9]*)\.[0-9]{2}$/);
 export const paymentSummary = z.strictObject({
   start_at: timestamp,

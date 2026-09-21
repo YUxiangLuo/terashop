@@ -18,6 +18,221 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('退货嵌套合同保留收货与处置，拒绝审计字段泄漏；所有新合同写失败不重试', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const disposition = {
+    id,
+    receipt_line_id: id,
+    quantity: 1,
+    disposition: 'discard',
+    inventory_movement_id: null,
+    note: null,
+    created_at: at,
+  };
+  const receipt = {
+    id,
+    return_id: id,
+    order_id: id,
+    location_id: id,
+    note: null,
+    received_at: at,
+    lines: [{ id, return_line_id: id, quantity: 2, undisposed_quantity: 1, dispositions: [disposition] }],
+  };
+  const authorization = {
+    id,
+    order_id: id,
+    fulfillment_id: id,
+    status: 'closed',
+    reason: null,
+    created_at: at,
+    closed_at: at,
+    lines: [{ id, order_item_id: id, quantity: 3, received_quantity: 2, receivable_quantity: 0 }],
+    receipts: [receipt],
+  };
+  const returns = {
+    order_id: id,
+    returns: [authorization],
+    lines: [
+      {
+        fulfillment_id: id,
+        order_item_id: id,
+        shipped_quantity: 4,
+        authorized_unreceived_quantity: 0,
+        received_quantity: 2,
+        available_quantity: 2,
+      },
+    ],
+  };
+  const balance = {
+    order_id: id,
+    payment_hold: true,
+    is_fulfillable: false,
+    lines: [
+      {
+        order_item_id: id,
+        ordered_quantity: 4,
+        fulfilled_quantity: 1,
+        cancelled_quantity: 1,
+        reserved_quantity: 1,
+        available_quantity: 0,
+      },
+    ],
+  };
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    const cases = [
+      ['get_order_returns', { order_id: id }, returns, false],
+      ['get_order_fulfillment_balance', { order_id: id }, balance, false],
+      [
+        'create_return',
+        { fulfillment_id: id, items: [{ order_item_id: id, quantity: 3 }], idempotency_key: 'retained' },
+        authorization,
+        true,
+      ],
+      [
+        'receive_return',
+        {
+          return_id: id,
+          location_id: id,
+          items: [{ return_line_id: id, quantity: 2 }],
+          idempotency_key: 'retained',
+        },
+        receipt,
+        true,
+      ],
+      [
+        'dispose_return_receipt',
+        { receipt_line_id: id, quantity: 1, disposition: 'discard', idempotency_key: 'retained' },
+        disposition,
+        true,
+      ],
+      ['close_return', { return_id: id }, authorization, true],
+    ] as const;
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      response = { ...expected, request_hash: 'SECRET' };
+      const before = calls.length;
+      const failed = await session.client.callTool({ name, arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+        code: 'INVALID_BACKEND_RESPONSE',
+        outcome_unknown: mutation,
+      });
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+      expect(calls.length - before).toBe(3);
+    }
+    for (const invalid of [
+      { ...disposition, inventory_movement_id: 9007199254740992 },
+      { ...disposition, disposition: 'refund' },
+      { ...disposition, quantity: -1 },
+      { ...disposition, actor_id: 'SECRET' },
+    ]) {
+      response = {
+        ...returns,
+        returns: [
+          {
+            ...authorization,
+            receipts: [{ ...receipt, lines: [{ ...receipt.lines[0], dispositions: [invalid] }] }],
+          },
+        ],
+      };
+      const failed = await session.client.callTool({
+        name: 'get_order_returns',
+        arguments: { order_id: id },
+      });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+    response = { ...balance, payment_hold: 'false' };
+    expect(
+      (await session.client.callTool({ name: 'get_order_fulfillment_balance', arguments: { order_id: id } }))
+        .isError,
+    ).toBe(true);
+  } finally {
+    await session.close();
+  }
+});
+
+test('账本保留负调整和既有渠道引用，但拒绝额外支付秘密及不安全整数', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const ledger = {
+    order: {
+      id,
+      order_number: '9007199254740993',
+      status: 'open',
+      financial_status: 'paid',
+      fulfillment_status: 'unfulfilled',
+      currency: 'USD',
+      subtotal: 12,
+      total: 10,
+      created_at: at,
+    },
+    balances: { adjustment_total: -2, captured: 10, refunded: 0, net_paid: 10, is_balanced: true },
+    adjustments: [
+      {
+        id: 1,
+        order_item_id: null,
+        kind: 'discount',
+        amount: -2,
+        currency: 'USD',
+        label: 'Discount',
+        source_type: 'order_snapshot',
+        source_ref: null,
+        created_at: at,
+      },
+    ],
+    payment_intents: [],
+    refunds: [],
+    fulfillments: [],
+    transactions: [
+      {
+        id,
+        payment_intent_id: null,
+        parent_transaction_id: null,
+        provider: 'manual',
+        kind: 'capture',
+        status: 'succeeded',
+        amount: 10,
+        currency: 'USD',
+        provider_reference: 'existing-reference',
+        processed_at: null,
+        created_at: at,
+      },
+    ],
+  };
+  let response: unknown = ledger;
+  const { backend } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend);
+  try {
+    expect(await toolData<typeof ledger>(session.client, 'get_order_ledger', { order_id: id })).toEqual(
+      ledger,
+    );
+    for (const invalid of [
+      { ...ledger, adjustments: [{ ...ledger.adjustments[0], id: 9007199254740992 }] },
+      { ...ledger, transactions: [{ ...ledger.transactions[0], metadata: { secret: 'SECRET' } }] },
+      { ...ledger, transactions: [{ ...ledger.transactions[0], amount: '10.00' }] },
+      { ...ledger, balances: { ...ledger.balances, is_balanced: 'true' } },
+    ]) {
+      response = invalid;
+      const failed = await session.client.callTool({ name: 'get_order_ledger', arguments: { order_id: id } });
+      expect(failed.isError).toBe(true);
+      expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+        code: 'INVALID_BACKEND_RESPONSE',
+        outcome_unknown: false,
+      });
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('PayPal 明确范围、JWT 透传及返回白名单；Edge 失败/畸形成功均不可盲目重试', async () => {
   const args = { order_id: crypto.randomUUID(), idempotency_key: 'retained', amount: '1.20' };
   const success = {

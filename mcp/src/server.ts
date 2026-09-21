@@ -13,6 +13,12 @@ import {
   orderPricing,
   paymentSummary,
   paymentOperations,
+  orderLedger,
+  fulfillmentBalance,
+  orderReturns,
+  returnAuthorization,
+  returnReceipt,
+  returnDisposition,
   key,
   pageSize,
   search,
@@ -738,11 +744,17 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'get_order_ledger',
     'Read captures, refunds, refund components and fulfillment ledger. Never infer provider success from a pending request.',
     order,
+    false,
+    false,
+    orderLedger,
   );
   rpc(
     'get_order_fulfillment_balance',
     'Read per-line fulfillable quantities and payment_hold before shipping.',
     order,
+    false,
+    false,
+    fulfillmentBalance,
   );
   rpc('get_order_checkout_quote', 'Read the quote associated with an order.', order);
   rpc(
@@ -827,6 +839,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'get_order_returns',
     'Read returnable balances, authorizations, receipts and dispositions. Independent of financial refunds.',
     order,
+    false,
+    false,
+    orderReturns,
   );
   rpc(
     'create_return',
@@ -839,6 +854,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    returnAuthorization,
   );
   rpc(
     'receive_return',
@@ -855,6 +871,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    returnReceipt,
   );
   rpc(
     'dispose_return_receipt',
@@ -868,12 +885,15 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    returnDisposition,
   );
   rpc(
     'close_return',
     'Close outstanding return authorization; cancel=true requires no receipts. Existing receipts can still be disposed.',
     z.strictObject({ return_id: id, cancel: z.boolean().optional() }),
     true,
+    false,
+    returnAuthorization,
   );
 
   rpc(

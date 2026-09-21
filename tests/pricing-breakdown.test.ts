@@ -57,7 +57,15 @@ const input = (overrides: object = {}) => ({
 });
 const preview = (overrides: object = {}) => checked<Price>(rpc('price_checkout', input(overrides), buyer.token));
 const pricing = (id: string) => checked<Price>(rpc('get_order_pricing', { order_id: id }, buyer.token));
-const ledger = (id: string) => checked<Ledger>(rpc('get_order_ledger', { order_id: id }, buyer.token));
+const ledger = async (id: string) => {
+  const expected = await checked<Ledger>(rpc('get_order_ledger', { order_id: id }, buyer.token));
+  const session = await mcpSession(new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }));
+  try {
+    const actual = await toolData<Ledger>(session.client, 'get_order_ledger', { order_id: id });
+    expect(actual).toEqual(expected);
+    return actual;
+  } finally { await session.close(); }
+};
 async function create(quoted = true, overrides: object = {}): Promise<FixtureOrder> {
   const quote = quoted ? await checked<Price>(rpc('create_checkout_quote', { ...input(overrides), idempotency_key: crypto.randomUUID() }, buyer.token)) : null;
   const order = await checked<FixtureOrder>(quoted ? rpc('create_order_from_quote', { quote_id: quote!.id }, buyer.token) : rpc('create_order', { ...input(overrides), idempotency_key: crypto.randomUUID() }, buyer.token));
