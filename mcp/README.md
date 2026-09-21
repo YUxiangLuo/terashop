@@ -190,7 +190,7 @@ grant 元数据已通过私有 PostgreSQL 表和 service-only `mcp_grant_command
 
 下游会话归属：[mcp_bind_downstream_session](../docs/api.md#mcp-下游会话归属受信服务内部接口) 将真实 Auth session UUID 不可变地绑定到一个 grant，撤销/会话删除仍保留归属。writeCredentials 现通过下游用户 JWT 调用 get_mcp_downstream_session 取得已验证身份，再绑定并核对回执后保存；不自行解码 JWT，同一用户的不同会话也不能替换。凭据写入、已初始化读取和刷新准入均检查绑定会话存在；未初始化读取仍返回 revision=0。联合实验为四个 grant 分别登录，验证同用户会话替换拒绝；数据库测试验证删除会话后不再返回密文或完成刷新。不证明 refresh token 配对、完整超时策略或用户同意；下一步推进可信关联及刷新代理，仍不开放远程入口。
 
-下游登录原语：[createDownstreamLogin](src/login.ts) 由受信宿主生成私有 verifier 和 S256 challenge，在五分钟内单次兑换授权码，从固定 Auth 端点取得同一响应中的凭据对，并核验管理员及 session。并发调用或结果未知不重试，错误不返回部分 token。`bun run test:current tests/mcp-login.test.ts tests/unit/mcp-login.test.ts` 验证真实本地邮件 PKCE、新会话、错误 verifier、并发及过期。此模块尚未接浏览器回调、state/CSRF、用户同意或 grant 创建；只供内部使用，不是可部署登录入口，不向 MCP 客户端返回 token，进程重启须重新登录。
+下游登录原语：[createDownstreamLogin](src/login.ts) 由受信宿主提供 browserSession，生成私有 verifier、S256 challenge 和独立随机 state；exchange(code,{browserSession,state}) 必须匹配原浏览器与尝试，在五分钟内单次兑换。缺失或串用返回 LOGIN_CALLBACK_REJECTED，既不请求 Auth 也不消耗原尝试；匹配后兑换结果未知则不重试。凭据只取自固定 Auth 端点并核验管理员/session。`bun run test:current tests/mcp-login.test.ts tests/unit/mcp-login.test.ts` 验证真实本地邮件 state 往返、PKCE、串用、并发及过期。browserSession 必须来自宿主验证的受保护会话，不能取自回调参数；尚无实际 Cookie/HTTP 回调、完整 CSRF 防护、用户同意或 grant 创建，不是可部署登录入口。进程重启须重新登录，token 不交给 MCP 客户端。
 
 独立授权候选实验：`bun test tests/unit/oauth-provider.test.ts`。固定开发依赖 `oidc-provider 9.12.2`，只在回环随机端口验证 Code/S256、resource/aud、业务 scopes、刷新轮换和 grant 撤销，不连接真实账号或 Supabase。已验证错误 resource 的刷新可能消耗旧 token、重试导致 grant 撤销；JWT 签名仍有效不代表 grant 仍有效。库明确警告 Bun 不受官方支持，内存 adapter 和自动同意仅用于实验；尚未选定生产授权服务。下一批优先核对独立部署的受支持方案，再推进持久化和逐用户凭据代理，不将该 fixture 改成远程登录入口。详见 ADR-027 的实验记录。
 

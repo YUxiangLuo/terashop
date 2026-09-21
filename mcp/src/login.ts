@@ -1,4 +1,5 @@
 import * as z from 'zod/v4';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { AdminBackend } from './backend';
 import type { DownstreamCredentials } from './credentials';
 
@@ -14,15 +15,25 @@ const responseSchema = z.object({
   expires_at: z.number().int().positive(),
   user: z.object({ id: z.uuid(), is_anonymous: z.literal(false) }),
 });
+const browserSessionSchema = z
+  .string()
+  .min(32)
+  .max(256)
+  .regex(/^[A-Za-z0-9_-]+$/);
+const callbackSchema = z.strictObject({
+  browserSession: browserSessionSchema,
+  state: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+});
 
 // Trusted-host primitive, not a browser callback or MCP tool. The host must bind
 // this attempt to its authenticated browser transaction and require consent
 // before creating a grant. Never accept caller-supplied credential pairs.
 export async function createDownstreamLogin(
-  config: { supabaseUrl: string; anonKey: string },
+  config: { supabaseUrl: string; anonKey: string; browserSession: string },
   request: (url: string, init: RequestInit) => Promise<Response> = fetch,
 ) {
   let origin: string;
+  let browserDigest: Buffer;
   const anonKey = config.anonKey;
   try {
     const url = new URL(config.supabaseUrl);
@@ -38,6 +49,7 @@ export async function createDownstreamLogin(
     )
       throw new Error('Invalid login endpoint');
     origin = url.origin;
+    browserDigest = createHash('sha256').update(browserSessionSchema.parse(config.browserSession)).digest();
   } catch {
     throw new Error('INVALID_LOGIN_CONFIGURATION');
   }
@@ -46,14 +58,30 @@ export async function createDownstreamLogin(
     await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)),
   ).toString('base64url');
   const expiresAt = Date.now() + 5 * 60_000;
+  const state = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url');
+  const stateDigest = createHash('sha256').update(state).digest();
   let used = false;
   return {
+    state,
     codeChallenge: challenge,
     codeChallengeMethod: 's256' as const,
     expiresAt,
     async exchange(
       code: string,
+      callback: { browserSession: string; state: string },
     ): Promise<{ userId: string; sessionId: string; credentials: DownstreamCredentials }> {
+      // The host obtains browserSession from its protected session, never from
+      // callback query/body. Invalid proofs cannot consume another browser's flow.
+      try {
+        const proof = callbackSchema.parse(callback);
+        if (
+          !timingSafeEqual(browserDigest, createHash('sha256').update(proof.browserSession).digest()) ||
+          !timingSafeEqual(stateDigest, createHash('sha256').update(proof.state).digest())
+        )
+          throw new Error('Mismatched login transaction');
+      } catch {
+        throw new Error('LOGIN_CALLBACK_REJECTED');
+      }
       // Claim before the first await; even a timeout or invalid code consumes the
       // local attempt. No retry after the provider may have issued a session.
       if (used) throw new Error('LOGIN_EXCHANGE_UNCONFIRMED');

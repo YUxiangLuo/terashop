@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { createDownstreamLogin } from '../../mcp/src/login';
 
-const config = { supabaseUrl: 'https://auth.example', anonKey: 'public-key' };
+const config = { supabaseUrl: 'https://auth.example', anonKey: 'public-key', browserSession: 'a'.repeat(43) };
 async function fixture() {
   const userId = crypto.randomUUID(),
     sessionId = crypto.randomUUID();
@@ -36,7 +36,10 @@ async function fixture() {
     }
     throw new Error('Unexpected endpoint');
   };
-  return { attempt: await createDownstreamLogin(config, request), calls, state, result, userId, sessionId };
+  const rawAttempt = await createDownstreamLogin(config, request);
+  const proof = { browserSession: config.browserSession, state: rawAttempt.state };
+  const attempt = { ...rawAttempt, exchange: (code: string) => rawAttempt.exchange(code, proof) };
+  return { attempt, rawAttempt, proof, calls, state, result, userId, sessionId };
 }
 
 test('PKCE verifier stays private and the host accepts only the fixed endpoint pair', async () => {
@@ -46,6 +49,7 @@ test('PKCE verifier stays private and the host accepts only the fixed endpoint p
     'codeChallengeMethod',
     'exchange',
     'expiresAt',
+    'state',
   ]);
   expect(f.attempt.codeChallengeMethod).toBe('s256');
   expect(await f.attempt.exchange('auth-code')).toEqual({
@@ -83,6 +87,29 @@ test('concurrent and uncertain exchanges never replay a provider request', async
     expect(f.calls.filter((c) => c.url.endsWith('?grant_type=pkce'))).toHaveLength(1);
     await expect(f.attempt.exchange('retry')).rejects.toThrow(/^LOGIN_EXCHANGE_UNCONFIRMED$/);
   }
+});
+
+test('browser and state are independently required before consuming or contacting Auth', async () => {
+  const a = await fixture(),
+    b = await fixture();
+  expect(a.proof.state).not.toBe(b.proof.state);
+  expect(a.proof.state).not.toBe(a.attempt.codeChallenge);
+  for (const proof of [
+    undefined,
+    {},
+    { ...a.proof, browserSession: 'b'.repeat(43) },
+    { ...a.proof, state: b.proof.state },
+    { ...a.proof, state: [a.proof.state, a.proof.state] },
+    { ...a.proof, browserSession: '' },
+  ]) {
+    await expect(a.rawAttempt.exchange('code', proof as typeof a.proof)).rejects.toThrow(
+      /^LOGIN_CALLBACK_REJECTED$/,
+    );
+    expect(a.calls).toHaveLength(0);
+  }
+  expect((await a.rawAttempt.exchange('code', a.proof)).userId).toBe(a.userId);
+  await expect(a.rawAttempt.exchange('code', a.proof)).rejects.toThrow(/^LOGIN_EXCHANGE_UNCONFIRMED$/);
+  expect(b.calls).toHaveLength(0);
 });
 
 test('malformed pairs, expired credentials, anonymous users and wrong admins disclose no result', async () => {

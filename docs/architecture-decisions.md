@@ -480,7 +480,11 @@ grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保
 
 [createDownstreamLogin](../mcp/src/login.ts) 是内部 PKCE 兑换原语，不是 HTTP 回调或 MCP 工具。宿主生成 32 字节随机 verifier，仅公开 S256 challenge；verifier 保留在单个内存对象中，五分钟过期。exchange 只接受授权码，向固定 Supabase HTTPS origin（本地回环可 HTTP）的 `/auth/v1/token?grant_type=pkce` 发送 `{auth_code,code_verifier}`，禁止重定向和自动重试。取同一受信响应中的 access/refresh token 及 expires_at，再用 access token 在线检查非匿名管理员、精确用户 UUID 和真实 session。成功仅向内部宿主返回 `{userId,sessionId,credentials}`，不得把这些凭据交给浏览器或 MCP 客户端。
 
-exchange 在首次 await 前消耗本地尝试，并发调用、非法输入、结果未知或后续身份检查失败都不允许重试；失败统一 LOGIN_EXCHANGE_UNCONFIRMED，不泄漏部分 token。失败可能已在 Auth 创建会话，不宣称已回滚或自动登出。尝试和凭据不持久化，进程重启只能重新登录；这不解决多进程回调路由。尚无浏览器 transaction/state/CSRF 绑定、邮件发送入口、上游身份关联、用户同意或 grant 创建；以后必须将此对象绑定到固定的可信浏览器事务，不能把任意客户端的 code 交给任意尝试。
+创建尝试现必须提供受信 browserSession（32–256 个 base64url 字符，宿主应使用至少 32 字节随机熵的受保护会话标识，不是用户 UUID），模块只保存其 SHA-256 摘要；另生成独立的 32 字节随机 state。exchange(code,{browserSession,state}) 在访问 Auth 前恒时比较两个摘要，缺失、格式错误、跨浏览器或跨尝试返回 LOGIN_CALLBACK_REJECTED，不消耗原尝试。只有匹配后才在首次 await 前消耗尝试；并发调用、非法 code、结果未知或后续身份检查失败都不允许重试，统一 LOGIN_EXCHANGE_UNCONFIRMED，不泄漏部分 token。state 与 verifier 独立，不能用 state 代替浏览器会话。
+
+宿主必须从自己验证的受保护会话取得 browserSession，不能采信回调 query/body 中的同名值，也不能把浏览器标识放进 URL。state 随固定回调地址往返，未来 HTTP 层须拒绝重复参数、校验精确回调地址并落实 Cookie（Secure/HttpOnly/SameSite）、会话生命周期和 CSRF 防护。当前真实邮件测试验证 state 经 GET verify 重定向保留，错浏览器/错 state 在兑换前拒绝，原尝试仍可成功；这不是浏览器 Cookie 或 HTTP 安全验收。尚无 HTTP 回调、邮件发送入口、上游身份关联、用户同意或 grant 创建。
+
+失败可能已在 Auth 创建会话，不宣称已回滚或自动登出。尝试和凭据不持久化，进程重启只能重新登录；这不解决多进程回调路由。摘要绑定不验证宿主传入会话的真实性或实时撤销，宿主仍必须管理浏览器会话，不能把任意客户端的 code 交给任意尝试。
 
 版本依据：Supabase Auth `v2.196.0` 的 [PKCE handler](https://github.com/supabase/auth/blob/v2.196.0/internal/api/token.go#L214-L288) 验证 verifier，成功兑换后在事务中删除 flow state；不能据此假设并发兑换天然串行，宿主仍禁止重复请求。[OTP](https://github.com/supabase/auth/blob/v2.196.0/internal/api/otp.go#L17-L47) 接受 code_challenge/code_challenge_method；邮件 GET verify 在 PKCE 模式重定向为 code，而 POST verify 直接签发 token，不能混用。新增本地测试经真实 SMTP 邮件及 GET 验证链接取得 code，验证错误 verifier 拒绝、原尝试成功、新 session 身份与本地重复兑换拒绝；未启用真实远程登录。
 
