@@ -8,9 +8,148 @@ import {
   returnDisposition,
 } from '../../mcp/src/schemas';
 import { mcpSession, toolData } from '../support/mcp';
+import { toolScopes, requiredToolScopes, permitsTool, type AdminScope } from '../../mcp/src/permissions';
 
 const config = { url: 'http://127.0.0.1:54321', anonKey: 'public-key', accessToken: 'private-session' };
 const user = { id: crypto.randomUUID(), role: 'authenticated', is_anonymous: false };
+
+test('scope inventory exactly covers all tools and requires every sensitive permission', async () => {
+  const { backend } = fakeBackend(() => Response.json(null));
+  const session = await mcpSession(backend, true);
+  const all: AdminScope[] = ['store:read', 'store:write', 'store:payments', 'store:access', 'store:privacy'];
+  try {
+    const { tools } = await session.client.listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(Object.keys(toolScopes).sort());
+    for (const tool of tools) {
+      expect(requiredToolScopes(tool.name)[0]).toBe(
+        tool.annotations?.readOnlyHint ? 'store:read' : 'store:write',
+      );
+    }
+    for (const [name, required] of [
+      ['mark_order_paid', ['store:write', 'store:payments']],
+      ['refund_order', ['store:write', 'store:payments']],
+      ['refund_paypal', ['store:write', 'store:payments']],
+      ['set_user_role', ['store:write', 'store:access']],
+      ['anonymize_customer', ['store:write', 'store:privacy']],
+      ['anonymize_user', ['store:write', 'store:access', 'store:privacy']],
+    ] as const) {
+      expect(requiredToolScopes(name)).toEqual(required);
+      expect(permitsTool(name, required)).toBe(true);
+      for (const scope of required)
+        expect(
+          permitsTool(
+            name,
+            all.filter((s) => s !== scope),
+          ),
+        ).toBe(false);
+    }
+    for (const name of ['new_tool', '__proto__', 'constructor']) {
+      expect(permitsTool(name, all)).toBe(false);
+      expect(() => requiredToolScopes(name)).toThrow('Unclassified admin tool');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
+test('scope discovery intersects the write switch; hidden tools cannot be called', async () => {
+  const { backend, calls } = fakeBackend(() => Response.json(null));
+  for (const [allowWrites, scopes, expectedCount] of [
+    [true, ['store:read'], 53],
+    [true, ['store:write'], 53],
+    [true, ['store:payments', 'store:access', 'store:privacy'], 0],
+    [false, ['store:write', 'store:access'], 0],
+  ] as [boolean, AdminScope[], number][]) {
+    const session = await mcpSession(backend, allowWrites, { scopes, currentScopes: async () => scopes });
+    try {
+      expect((await session.client.listTools()).tools).toHaveLength(expectedCount);
+      await expect(
+        session.client.callTool({
+          name: 'set_user_role',
+          arguments: { user_id: user.id, role: 'admin' },
+        }),
+      ).rejects.toMatchObject({ code: expectedCount === 0 ? -32601 : -32602 });
+      expect(calls).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  }
+});
+
+test('each call rechecks scopes, fails closed before backend access, and isolates sessions', async () => {
+  const profile = {
+    id: user.id,
+    email: '',
+    role: 'admin',
+    created_at: '2026-09-21T00:00:00Z',
+    updated_at: '2026-09-21T00:00:00Z',
+  };
+  const { backend, calls } = fakeBackend((request) =>
+    Response.json(
+      new URL(request.url).pathname.endsWith('/set_user_role') ? profile : { items: [], next_cursor: null },
+    ),
+  );
+  let scopes: AdminScope[] = ['store:read', 'store:write', 'store:access'];
+  let unavailable = false;
+  const session = await mcpSession(backend, true, {
+    scopes,
+    currentScopes: async () => {
+      if (unavailable) throw new Error('SECRET grant store credentials');
+      return scopes;
+    },
+  });
+  const other = await mcpSession(backend, false, {
+    scopes: ['store:read'],
+    currentScopes: async () => ['store:read'],
+  });
+  try {
+    await toolData(session.client, 'list_admin_products');
+    expect(calls.length).toBeGreaterThan(0);
+    expect(
+      await toolData<unknown>(session.client, 'set_user_role', { user_id: user.id, role: 'admin' }),
+    ).toEqual(profile);
+    for (const current of [['store:read', 'store:write'], ['store:access'], []] as AdminScope[][]) {
+      scopes = current;
+      calls.length = 0;
+      const result = await session.client.callTool({
+        name: 'set_user_role',
+        arguments: { user_id: user.id, role: 'admin' },
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
+        code: 'INSUFFICIENT_SCOPE',
+        outcome_unknown: false,
+      });
+      expect(calls).toEqual([]);
+    }
+    const deniedRead = await session.client.callTool({ name: 'list_admin_products', arguments: {} });
+    expect(deniedRead.isError).toBe(true);
+    expect(JSON.parse((deniedRead.content as { text: string }[])[0].text)).toMatchObject({
+      code: 'INSUFFICIENT_SCOPE',
+      outcome_unknown: false,
+    });
+    expect(calls).toEqual([]);
+    unavailable = true;
+    const result = await session.client.callTool({
+      name: 'set_user_role',
+      arguments: { user_id: user.id, role: 'admin' },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
+      code: 'AUTHORIZATION_UNAVAILABLE',
+      outcome_unknown: false,
+    });
+    expect(JSON.stringify(result)).not.toContain('SECRET');
+    expect(calls).toEqual([]);
+    expect(await toolData<unknown>(other.client, 'list_admin_products')).toEqual({
+      items: [],
+      next_cursor: null,
+    });
+  } finally {
+    await session.close();
+    await other.close();
+  }
+});
 
 test('managed media discovery is readonly and rejects unsafe output or invalid filters', async () => {
   const row = {

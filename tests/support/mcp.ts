@@ -1,9 +1,14 @@
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { AdminBackend } from '../../mcp/src/backend';
 import { createAdminServer } from '../../mcp/src/server';
+import type { ToolAuthorization } from '../../mcp/src/permissions';
 
-export async function mcpSession(backend: AdminBackend, allowWrites = false) {
-  const server = createAdminServer(backend, { allowWrites });
+export async function mcpSession(
+  backend: AdminBackend,
+  allowWrites = false,
+  authorization?: ToolAuthorization,
+) {
+  const server = createAdminServer(backend, { allowWrites, authorization });
   const client = new Client({ name: 'tera-tests', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { AdminBackend, BackendError, type Functions, type RpcArgs } from './backend';
+import { requiredToolScopes, permitsTool, type ToolAuthorization } from './permissions';
 import type { Json } from '../../types/database';
 import {
   id,
@@ -112,8 +113,12 @@ Tool annotations are hints, not an approval mechanism. Do not repeat uncertain w
 Manual payment/refund tools only record bookkeeping; they do not move money at a payment provider.
 Returns, receipts, disposition, refunds and fulfillment cancellation are distinct operations.`;
 
-export function createAdminServer(backend: AdminBackend, options: { allowWrites?: boolean } = {}) {
+export function createAdminServer(
+  backend: AdminBackend,
+  options: { allowWrites?: boolean; authorization?: ToolAuthorization } = {},
+) {
   const server = new McpServer({ name: 'tera-admin', version: '0.1.0' }, { instructions });
+  const authorization = options.authorization;
 
   function tool<A>(
     name: string,
@@ -124,7 +129,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     idempotent = false,
     dataSchema: z.ZodType<Json>,
   ) {
+    requiredToolScopes(name);
     if (mutation && !options.allowWrites) return;
+    if (authorization && !permitsTool(name, authorization.scopes)) return;
     server.registerTool(
       name,
       {
@@ -140,6 +147,15 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       },
       async (args) => {
         try {
+          if (authorization) {
+            let permitted: boolean;
+            try {
+              permitted = permitsTool(name, await authorization.currentScopes());
+            } catch {
+              throw new BackendError('AUTHORIZATION_UNAVAILABLE', false);
+            }
+            if (!permitted) throw new BackendError('INSUFFICIENT_SCOPE', false);
+          }
           const parsed = dataSchema.safeParse(await execute(args));
           if (!parsed.success) throw new BackendError('INVALID_BACKEND_RESPONSE', mutation);
           const result = { data: parsed.data };

@@ -345,7 +345,7 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 ## ADR-027：远程 MCP 使用独立授权与逐用户下游身份
 
-**状态：设计合同，尚未实现。** 当前仍只有 stdio。`stdio.ts` 从安全环境读取一个管理员会话，`AdminBackend` 固定其请求头；`createAdminServer` 的 allowWrites 只决定本进程是否注册写工具。不能把这三个对象作为多用户 HTTP 单例，也不能将工具 annotations 当成授权控制。本决策不启用 `auth.oauth_server`、不新增公开监听端口、不改变现有 RLS/RPC 权限。
+**状态：设计合同；已实现工具 scope 清单与受信宿主校验接口，远程认证尚未实现。** 当前仍只有 stdio。`stdio.ts` 从安全环境读取一个管理员会话，`AdminBackend` 固定其请求头；`createAdminServer` 的 allowWrites 只决定本进程是否注册写工具。不能把这三个对象作为多用户 HTTP 单例，也不能将工具 annotations 当成授权控制。本决策不启用 `auth.oauth_server`、不新增公开监听端口、不改变现有 RLS/RPC 权限。
 
 ### 令牌分开，业务仍由原用户执行
 
@@ -392,6 +392,10 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 HTTP bearer 只出现在 Authorization header，不在 query/cookie；浏览器授权站点的 cookie 独立使用 HTTPS、HttpOnly、SameSite 与 CSRF 防护。MCP 入口需要 Origin 检查、受限 CORS、受信代理配置、请求体/并发/超时预算，以及按 grant/主体与未认证来源分别限流。日志仅保留脱敏身份关联、工具名、结果码与时延，不能记录 token、完整请求/响应或客户资料；refresh/callback/token endpoint 同样脱敏。
 
 ### 按可验收批次实现
+
+本地兼容性核对（2026-09-21）：当前 Auth 镜像为 `v2.196.0`，OAuth discovery 实际返回 404 / `feature_disabled`，没有开启 OAuth 或完成授权端到端验收。对该 tag 的源码核对显示：authorize 可以保存单个 resource，但 [token handler](https://github.com/supabase/auth/blob/v2.196.0/internal/api/oauthserver/handlers.go#L254-L359) 的标准表单分支没有读取 resource，仅在该参数存在时比较；[access-token 签发](https://github.com/supabase/auth/blob/v2.196.0/internal/tokens/service.go#L702-L753) 使用用户的 Aud，不是授权 resource；[scope 清单](https://github.com/supabase/auth/blob/v2.196.0/internal/models/oauth_scope.go#L5-L21) 固定为 OIDC scopes，不支持本 ADR 的业务 scopes。token endpoint 不提供 RFC 8693 token exchange；grant 删除可撤销 OAuth 会话/刷新资格，但不能据此宣称下游所有已签发 JWT 立即失效。结论仅针对该版本的原生实现：不能仅启用开关或改 aud hook 就满足本设计。下一步应验证独立授权服务及身份代理方案，产品尚未选定。
+
+已落地的 [permissions.ts](../mcp/src/permissions.ts) 为 112 个工具逐个声明 scopes，注册遇到未分类工具立即失败。可选 `ToolAuthorization` 只能由受信宿主构造：初始 scopes 过滤注册，每次调用通过 `currentScopes()` 重新取得有效权限，缺权限或回调失败均在访问后端前拒绝，`outcome_unknown=false`，不泄漏回调异常。宿主将来负责验证令牌、身份绑定并求 token/grant/部署权限交集；该接口本身不完成这些工作。当前 stdio 不传此接口，保留原有管理员检查和写开关。工具发现是初始化快照，降权后旧工具调用会拒绝，但尚不动态更新 tools/list；升权、降权后的列表和 HTTP 会话重建由后续 transport 批次完成。作用域测试的会话隔离不代表逐用户凭据隔离已验收。
 
 1. **授权兼容性与工具权限清单。** 在本地验证候选授权服务的实际 resource/aud、PKCE、issuer、刷新/撤销合同；建立覆盖所有工具的 scope 清单与拒绝未知工具测试。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
