@@ -2200,6 +2200,18 @@ export type Database = {
         Args: { after_id?: string; category_id?: string; page_size?: number }
         Returns: Json
       }
+      managed_media_command: {
+        Args: {
+          action: string
+          actor_id: string
+          byte_size?: number
+          content_type?: string
+          media_id?: string
+          request_id?: string
+          sha256?: string
+        }
+        Returns: Json
+      }
       mark_order_paid: {
         Args: {
           idempotency_key: string

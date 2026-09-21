@@ -17,6 +17,13 @@ ON CONFLICT (id) DO UPDATE SET
   file_size_limit = EXCLUDED.file_size_limit,
   allowed_mime_types = EXCLUDED.allowed_mime_types;
 
+-- No client read/list/sign/upload/delete policy for private staging. Only the
+-- authenticated managed-media Edge workflow operates on server-assigned keys.
+INSERT INTO storage.buckets (id,name,public,file_size_limit,allowed_mime_types)
+VALUES ('media-staging','media-staging',false,1048576,ARRAY['image/jpeg','image/png','image/webp'])
+ON CONFLICT (id) DO UPDATE SET public=false,file_size_limit=1048576,
+  allowed_mime_types=EXCLUDED.allowed_mime_types;
+
 -- Storefront view
 
 CREATE VIEW public.product_listing AS
@@ -807,6 +814,9 @@ GRANT EXECUTE ON FUNCTION public.get_admin_checkout_quote(uuid),
 
 REVOKE ALL ON FUNCTION public.list_admin_product_media(uuid,integer,uuid) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.list_admin_product_media(uuid,integer,uuid) TO authenticated,service_role;
+
+REVOKE ALL ON FUNCTION public.managed_media_command(uuid,text,uuid,uuid,text,integer,text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.managed_media_command(uuid,text,uuid,uuid,text,integer,text) TO service_role;
 
 -- Preserve service-role access to future public objects; clients stay opt-in.
 alter default privileges for role postgres in schema public grant all on tables to service_role;

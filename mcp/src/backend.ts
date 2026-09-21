@@ -1,7 +1,7 @@
 import type { Database, Json } from '../../types/database';
 import { createHash } from 'node:crypto';
 import * as z from 'zod/v4';
-import { paypalRefund, paypalRefundResult, productMediaIdentity } from './schemas';
+import { paypalRefund, paypalRefundResult, productMediaIdentity, managedMedia } from './schemas';
 
 export type Functions = Database['public']['Functions'];
 // Supabase emits Args: never for parameterless RPCs; PostgREST accepts {}.
@@ -114,6 +114,38 @@ export class AdminBackend {
     // The target RPC also checks permissions within its own transaction.
     await this.assertAdmin();
     return this.json(`/rest/v1/rpc/${name}`, args, mutation);
+  }
+
+  async managedMedia(
+    action: 'upload' | 'get' | 'recover' | 'publish' | 'discard',
+    args: Record<string, unknown>,
+  ): Promise<Json> {
+    await this.assertAdmin();
+    const mutation = action !== 'get';
+    try {
+      const parsed = managedMedia.safeParse(
+        await this.json('/functions/v1/managed-media', { ...args, action }, mutation),
+      );
+      if (
+        !parsed.success ||
+        (action === 'upload'
+          ? parsed.data.request_id.toLowerCase() !== String(args.request_id).toLowerCase()
+          : parsed.data.id.toLowerCase() !== String(args.media_id).toLowerCase())
+      ) {
+        throw new BackendError('INVALID_BACKEND_RESPONSE', mutation);
+      }
+      const media = parsed.data;
+      const extension = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[media.content_type];
+      return {
+        media,
+        url: media.published
+          ? `${this.url}/storage/v1/object/public/catalog-media/managed/${media.id}.${extension}`
+          : null,
+      };
+    } catch (error) {
+      // A write rejection may follow a committed allocation or retention marker.
+      throw new BackendError(error instanceof BackendError ? error.code : 'BACKEND_UNAVAILABLE', mutation);
+    }
   }
 
   async refundPayPal(args: z.infer<typeof paypalRefund>): Promise<Json> {

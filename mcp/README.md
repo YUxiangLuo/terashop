@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，104 个显式工具（51 个只读、53 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，109 个显式工具（52 个只读、57 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -71,7 +71,7 @@
 | 运维 | `list_admin_outbox_events`、`list_admin_payment_provider_events`、`list_admin_reconciliation_issues`、`get_admin_operations_summary`、`redrive_outbox_event`；全店未对账资金及分组件区间积压概览，仅安全诊断，不开放资金重放或宣称整体健康 |
 | 导出 | `export_admin_orders`；固定字段 JSON 分页，不含客户联系方式，订单号/金额为字符串；不写文件或外发，不保证跨页冻结快照 |
 
-- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 104 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
+- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 109 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
 - 管理员报价详情额外返回 customer_id、stored_status，缺失返回 null；列表/详情的 status 是有效状态（open/converted 到期即 expired），筛选同样按有效状态。is_reserved 不是库存数量或支付成功证明。读取不触发 Worker、取消或续期，客户 UUID 不等于 Auth UUID；完整合同见 [管理员报价查询](../docs/api.md#管理员报价查询)。
 - 订单备注回执保留 null 与空字符串的区别；事件列表只含安全元数据，ID/游标保留精确 bigint 字符串，不含原始 data。结账报价保留后端计算的过期/预留状态与存储快照，不把它当作当前重新报价；缺失报价仍报错。零对价取消返回独立数量及回库事实，不是退款。PayPal 输出声明复用后端白名单合同，仍先剔除 Edge 额外字段并验证订单关联，pending_reconciliation 不被改写为资金已结算。
 - 全部 Metafield／Metaobject 工具使用逐字段输出 schema，包含定义、值、分页及删除回执。定义字段声明和验证规则拒绝未知字段；value 与 values 内部保留原始动态 JSON，不展开引用。无定义字段保留 definition_id:null；definition_access 是配置，Metaobject 的 is_public 是后端当前可见性计算，均不代表披露批准或前台展示保证。缺失详情返回 null；删除成功只接受 `{id,deleted:true}`，异常写响应标记结果未知，不自动重试。
@@ -106,7 +106,16 @@
 
 `list_admin_product_media(product_id, page_size?, after_id?)` 可按商品路径分页发现规范命名的 Storage 对象，包括未关联上传及商品删除后保留的对象。对象身份沿用 Storage id，游标不是文件名中的 media_id；默认 20 条，最多 100 条。返回的 expected_content_type 仅由扩展名推导，不宣称字节已验证，也不暴露 owner/metadata。完整字段与范围见 [管理员商品媒体发现](../docs/api.md#管理员商品媒体发现)。
 
-对象删除仍被数据库策略禁止。商品/分类的显式图片 URL 已在源写入事务内维护私有引用登记，但它不扫描富文本或任意 JSON，也不将 URL 自动认领为 Storage 对象。采用 [保守保留策略](../docs/architecture-decisions.md#adr-026媒体采用保守保留与显式引用边界)：旧媒体和自由 URL 使用的媒体不开放删除；零登记引用不等于删除许可。现有公开上传接口未来上传的文件也继续保留。新增通路已选定为私有暂存、发布前永久保留、仅未公开暂存对象可准备丢弃，尚未实现；不因商品草稿或解除关联恢复删除资格。大文件传输也仍是后续能力。
+对象删除仍被数据库策略禁止。商品/分类的显式图片 URL 已在源写入事务内维护私有引用登记，但它不扫描富文本或任意 JSON，也不将 URL 自动认领为 Storage 对象。采用 [保守保留策略](../docs/architecture-decisions.md#adr-026媒体采用保守保留与显式引用边界)：旧媒体和自由 URL 使用的媒体不开放删除；零登记引用不等于删除许可。现有公开上传接口未来上传的文件也继续保留。
+
+新增私有暂存通路（同样仅支持 1 byte–1 MiB JPEG/PNG/WebP）：
+- `stage_media_upload`：传入 `request_id`、`content_type`、规范 `data_base64`；服务端分配媒体 ID，不接受路径或旧对象，不返回暂存 URL。
+- `get_managed_media`：按 `media_id` 读状态；`url` 仅在确认公开写入后返回。
+- `recover_media_upload`：核验原私有字节，将 `uploading` 完成为 `staged`，不重新上传。
+- `publish_managed_media`：先永久保留，再公开写入并核验；随后另用商品/分类版本化命令关联 URL。
+- `prepare_media_discard`：将 `staged` 冻结为 `discard_prepared`，**不删除字节**。
+
+发布与丢弃竞争同一持久记录，`retained` 永不回退；失败、解除关联或商品草稿不会恢复删除资格。调用不自动重试。响应丢失先按原媒体 ID 重读；若分配响应丢失而无媒体 ID，可经明确批准以原 request_id 和完全相同内容重放上传。不提供 signed preview、旧对象导入、大文件或物理删除。部署需配置 [managed-media Edge](../supabase/functions/README.md#私有媒体通路)。
 
 ## 完整 Admin 的后续覆盖范围
 
@@ -145,7 +154,7 @@ Worker 的 claim/complete、Inbox ingest/retry、原始渠道资金处理始终�
 建议后续按以下可独立验收的批次推进；除明确标注已接入的部分外，其余仍为规划：
 
 1. **报价查询与取消已接入。** 取消沿用原 UUID 和数据库锁/资金保护，不把取消当作退款，也不代发 Capture。测试覆盖未转单、converted、completed、过期、陌生客户权限、重复取消及与支付竞争。没有版本前置条件，读取后仍可能转单，因此用户批准须涵盖连带取消订单；终态重放保留原原因，未知结果先重读而非自动重试。完整合同见 [报价取消](../docs/api.md#报价取消)。
-2. **媒体生命周期。** 已完成 Storage 对象发现/内容核验及商品/分类显式图片 URL 的事务内引用登记。下一批按 ADR-026 实现独立私有暂存上传、状态恢复、发布与丢弃准备：`uploading → staged → retained / discard_prepared`。发布必须先提交永久保留，再复制到公开位置，最后通过原版本化命令关联；保留与丢弃竞争同一持久行。初版不提供暂存读取 URL，不将旧对象导入删除通路，也不开放物理删除。故障注入、两种胜出顺序和旧快照测试通过后，再单独实现物理删除执行/确认恢复。大文件传输另行使用受限上传流程，不开放任意 URL 抓取或本地文件读取。
+2. **媒体生命周期。** 已完成 Storage 对象发现/内容核验、显式 URL 引用登记，以及 ADR-026 的私有暂存上传、状态恢复、发布与丢弃准备：`uploading → staged → retained / discard_prepared`。下一批单独设计并验收物理删除执行/确认恢复，尤其是冻结前已在途的上传，不能仅以准备状态允许删除。大文件传输另行使用受限上传流程，不开放任意 URL 抓取或本地文件读取。
 3. **独立扩展的收尾。** Metafield 定义删除须单独确定已有值的规则（拒绝还是转为无定义私有值），不能隐式级联；设置消费端属于 Storefront 工作，不是 MCP 再加一层写接口。快照导出需要不可变批次、敏感数据边界与有时限的文件访问，现有分页 JSON 不承诺跨页冻结。
 4. **远程 MCP 身份设计与实现。** 先落实上面的用户身份映射、scope/撤销合同，再实现 HTTP transport、限流、日志脱敏和多会话隔离。必须验证错误 audience、过期/撤销令牌、管理员降级、跨用户会话复用及 SDK 客户端兼容；不能把当前进程级管理员 JWT 共享给网络用户。保持现有 SDK v2，不以更换 SDK 代替认证设计。
 5. **生产验收。** PayPal 真实 Sandbox、Worker/告警及部署安全按支付文档验收；需要真实外部配置和授权，不能用本地模拟结果替代。报价/媒体开发与 HTTP 设计可以分开推进，缺少远程认证不阻止本地 stdio 业务完善。
@@ -159,6 +168,8 @@ P0 验证基于媒体发现提交 `e4a409d` 的代码：`bun run test` 重建可
 ```bash
 bun run typecheck
 bun run test:unit
+bunx --no-install supabase functions serve --network-id tera-headless-loopback # 独立终端；新增函数后重载本地 Edge
+bun run test:current tests/managed-media.test.ts # 含真实 Edge 网关，不仅直接调用 handler
 bun run test:current tests/mcp.test.ts # 已启动并初始化的可丢弃本地 Supabase
 bun run test:current tests/admin-categories.test.ts
 bun run test:current tests/storage-admin.test.ts

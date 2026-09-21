@@ -2,6 +2,14 @@
 
 本页维护渠道配置、部署安全、Worker 和人工恢复。请求参数见 [API 使用参考](../../docs/api.md#支付与退款)，交易不变量见 [ADR](../../docs/architecture-decisions.md)，浏览器 SDK 与 Sandbox 清单见 [前台接入](../../docs/storefront-paypal.md)。
 
+## 私有媒体通路
+
+`managed-media` 使用运行时 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY`，无需支付渠道配置。`verify_jwt=false` 仅关闭网关旧式校验；handler 经 Auth 验证用户 JWT，service-only `managed_media_command` 再校验非匿名管理员 actor。MCP 不持有 service key。生产部署须包含此函数及 SQL/Storage 基线；禁止客户端直调该 RPC 或写入 `media-staging`、`catalog-media/managed/` 命名空间。
+
+仅接受无 Origin 的 POST JSON（最大 1,400,000 bytes）：`action=upload` 带 `request_id,content_type,data_base64`；`get/recover/publish/discard` 仅带 `media_id`。未知字段拒绝，不接收 URL、文件路径、actor 或客户端摘要。上传仅允许 1 byte–1 MiB JPEG/PNG/WebP；MIME/摘要核验不等于图片解码或内容安全扫描。输出仅含 `id,request_id,state,content_type,byte_size,sha256,published`，无私有读取 URL。MCP 在 `published=true` 时从配置 origin 构造公开 URL。
+
+先分配记录、写入私有对象并核验，再标记 staged；发布先提交永久 retained，再写公开对象、核验并标记 published。所有写入不可覆盖且不自动重试。未知结果先保留原身份并读取；分配响应丢失可明确使用同 request_id 和相同内容重放上传。发布与商品/分类关联不是一个事务，关联仍使用原版本化命令。discard 仅冻结 staged，不调用 Storage DELETE。旧公开媒体永不导入此通路，物理删除、signed preview 和大文件传输仍未实现。
+
 ## 环境与认证
 
 以 [`.env.example`](../../.env.example) 的服务端支付分组为模板，通过 `supabase secrets set` 配置所用渠道的变量，不提交实际密钥，也不要上传包含前台/OAuth 配置的整个模板。

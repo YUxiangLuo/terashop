@@ -99,7 +99,7 @@ POST /rest/v1/rpc/update_product
 
 `expected_content_type` 根据扩展名推导，不证明实际 MIME、图片有效性或字节存在。取得列表后可将 product_id/media_id/expected_content_type 作为 `inspect_product_media` 的 product_id/media_id/content_type 核验实际读取内容；上传与核验合同见 [MCP 媒体](../mcp/README.md#公开商品媒体上传)。空列表不证明商品不存在或在途上传失败。此列表不返回引用登记，不声明对象未被引用或可删除。
 
-商品图片 URL 和非 null 的分类图片 URL 已由数据库同步到私有引用登记，RPC 与底表写入同样覆盖，编辑/解除/源删除及回滚与登记保持同事务。它只保留完整 URL 与源记录关系，不改变现有 DTO，也不扫描富文本或扩展 JSON。旧媒体与自由 URL 使用的媒体继续保留，零登记引用不是删除许可；完整受管理生命周期及物理删除仍未实现。见 [ADR-026](architecture-decisions.md#adr-026媒体采用保守保留与显式引用边界)。
+商品图片 URL 和非 null 的分类图片 URL 已由数据库同步到私有引用登记，RPC 与底表写入同样覆盖，编辑/解除/源删除及回滚与登记保持同事务。它只保留完整 URL 与源记录关系，不改变现有 DTO，也不扫描富文本或扩展 JSON。旧媒体与自由 URL 使用的媒体继续保留，零登记引用不是删除许可。独立私有暂存/发布/丢弃准备已实现，物理删除尚未实现。见 [ADR-026](architecture-decisions.md#adr-026媒体采用保守保留与显式引用边界) 和 [Edge 合同](../supabase/functions/README.md#私有媒体通路)。
 
 ### 现有底表查询
 

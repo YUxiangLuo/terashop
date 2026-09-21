@@ -12,6 +12,49 @@ import { mcpSession, toolData } from '../support/mcp';
 const config = { url: 'http://127.0.0.1:54321', anonKey: 'public-key', accessToken: 'private-session' };
 const user = { id: crypto.randomUUID(), role: 'authenticated', is_anonymous: false };
 
+test('managed media validates identities and output, routes explicit actions and never retries', async () => {
+  const media = {
+    id: crypto.randomUUID(),
+    request_id: crypto.randomUUID(),
+    state: 'staged',
+    content_type: 'image/png',
+    byte_size: 3,
+    sha256: 'a'.repeat(64),
+    published: false,
+  };
+  let result: unknown = media;
+  const { backend, calls } = fakeBackend(() => Response.json(result));
+  for (const action of ['upload', 'get', 'recover', 'publish', 'discard'] as const) {
+    calls.length = 0;
+    const args = action === 'upload' ? { request_id: media.request_id } : { media_id: media.id };
+    expect(await backend.managedMedia(action, args)).toEqual({ media, url: null });
+    expect(calls.map((r) => new URL(r.url).pathname)).toEqual([
+      '/auth/v1/user',
+      '/rest/v1/rpc/is_admin',
+      '/functions/v1/managed-media',
+    ]);
+    expect(await calls[2].json()).toEqual({ ...args, action });
+    for (const invalid of [
+      { ...media, secret: 'PRIVATE' },
+      { ...media, id: crypto.randomUUID(), request_id: crypto.randomUUID() },
+      { ...media, published: true },
+    ]) {
+      result = invalid;
+      calls.length = 0;
+      await expect(backend.managedMedia(action, args)).rejects.toMatchObject({
+        code: 'INVALID_BACKEND_RESPONSE',
+      });
+      expect(calls.length).toBe(3);
+    }
+    result = media;
+  }
+  const denied = fakeBackend(() => {
+    throw new Error('must not reach Edge');
+  }, false);
+  await expect(denied.backend.managedMedia('get', { media_id: media.id })).rejects.toBeDefined();
+  expect(denied.calls.length).toBe(2);
+});
+
 function fakeBackend(response: (request: Request) => Response | Promise<Response>, admin = true) {
   const calls: Request[] = [];
   const backend = new AdminBackend(config, async (url, init) => {
@@ -1800,8 +1843,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(51);
-    expect(writeTools.length).toBe(104);
+    expect(readTools.length).toBe(52);
+    expect(writeTools.length).toBe(109);
     expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,

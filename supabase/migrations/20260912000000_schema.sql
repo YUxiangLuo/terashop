@@ -34,6 +34,20 @@ INSERT INTO private.shop_settings DEFAULT VALUES;
 ALTER TABLE private.shop_settings ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.shop_settings FROM PUBLIC, anon, authenticated, service_role;
 
+-- Private staging provenance is created before any bytes, never adopted from a
+-- caller-supplied Storage path. Public exposure is an irreversible retention veto.
+CREATE TABLE private.managed_media (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  request_id uuid NOT NULL UNIQUE,
+  content_type text NOT NULL CHECK (content_type IN ('image/jpeg','image/png','image/webp')),
+  byte_size integer NOT NULL CHECK (byte_size BETWEEN 1 AND 1048576),
+  sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
+  state text NOT NULL DEFAULT 'uploading' CHECK (state IN ('uploading','staged','retained','discard_prepared')),
+  published boolean NOT NULL DEFAULT false CHECK (NOT published OR state='retained')
+);
+ALTER TABLE private.managed_media ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.managed_media FROM PUBLIC, anon, authenticated, service_role;
+
 -- Constraint helpers
 
 CREATE FUNCTION private.valid_country_codes(p_countries text[]) RETURNS boolean

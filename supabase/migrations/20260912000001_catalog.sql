@@ -3126,4 +3126,61 @@ begin
 end;
 $$;
 
+-- Only the authenticated Edge handler supplies actor_id. Never grant this
+-- service command to authenticated: verification/publication are trusted facts.
+CREATE FUNCTION public.managed_media_command(actor_id uuid, action text, media_id uuid DEFAULT NULL,
+    request_id uuid DEFAULT NULL, content_type text DEFAULT NULL, byte_size integer DEFAULT NULL,
+    sha256 text DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_media private.managed_media;
+begin
+  if auth.role() is distinct from 'service_role' or not exists (
+    select 1 from public.profiles p join auth.users u on u.id=p.id
+    where p.id=actor_id and p.role='admin' and not coalesce(u.is_anonymous,true)
+  ) then raise exception using errcode='42501', message='admin actor and service required'; end if;
+  if action is null or action not in ('allocate','get','verified','retain','discard','published') then
+    raise exception using errcode='22023', message='invalid media action';
+  end if;
+  if action='allocate' then
+    if media_id is not null or request_id is null or content_type is null or byte_size is null or sha256 is null then
+      raise exception using errcode='22023', message='invalid upload identity';
+    end if;
+    insert into private.managed_media(request_id,content_type,byte_size,sha256)
+      values (request_id,content_type,byte_size,sha256) on conflict on constraint managed_media_request_id_key do nothing;
+    select * into v_media from private.managed_media m where m.request_id=managed_media_command.request_id for update;
+    if not found then raise exception using errcode='40001', message='retry media allocation'; end if;
+    if v_media.content_type<>content_type or v_media.byte_size<>byte_size or v_media.sha256<>sha256 then
+      raise exception using errcode='PT409', message='upload request content conflict';
+    end if;
+  else
+    if media_id is null or request_id is not null or content_type is not null or byte_size is not null or sha256 is not null then
+      raise exception using errcode='22023', message='invalid media identity';
+    end if;
+    select * into v_media from private.managed_media m where m.id=media_id for update;
+    if not found then raise exception using errcode='PT404', message='media not found'; end if;
+    if action='verified' then
+      if v_media.state not in ('uploading','staged') then
+        raise exception using errcode='PT409', message='media is frozen';
+      end if;
+      update private.managed_media set state='staged' where id=media_id returning * into v_media;
+    elsif action='retain' then
+      if v_media.state not in ('staged','retained') then
+        raise exception using errcode='PT409', message='media cannot be published';
+      end if;
+      update private.managed_media set state='retained' where id=media_id returning * into v_media;
+    elsif action='discard' then
+      if v_media.state not in ('staged','discard_prepared') then
+        raise exception using errcode='PT409', message='media cannot be discarded';
+      end if;
+      update private.managed_media set state='discard_prepared' where id=media_id returning * into v_media;
+    elsif action='published' then
+      if v_media.state<>'retained' then raise exception using errcode='PT409', message='media not retained'; end if;
+      update private.managed_media set published=true where id=media_id returning * into v_media;
+    end if;
+  end if;
+  return jsonb_build_object('id',v_media.id,'request_id',v_media.request_id,'state',v_media.state,
+    'content_type',v_media.content_type,'byte_size',v_media.byte_size,'sha256',v_media.sha256,'published',v_media.published);
+end;
+$$;
+
 commit;

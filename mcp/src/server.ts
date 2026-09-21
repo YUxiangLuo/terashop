@@ -62,6 +62,7 @@ import {
   productMediaIdentity,
   productMediaInspection,
   adminProductMediaPage,
+  managedMediaResult,
   metafieldDefinitionResult,
   metafieldDefinitionPage,
   metafieldResult,
@@ -177,6 +178,48 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       mutation,
       idempotent,
       dataSchema,
+    );
+  }
+
+  tool(
+    'stage_media_upload',
+    'Stage private image bytes (canonical base64, 1 byte to 1 MiB). Retain request_id and identical bytes; replay with changed content rejects. Server assigns media id. No staging URL, previews, arbitrary paths or legacy adoption. Does not attach or publish. On unknown outcome preserve request_id; no automatic retries. Read media state when its id is known; explicit same-request upload replay can recover allocation if the response was lost.',
+    uploadProductMedia.omit({ product_id: true, media_id: true }).extend({ request_id: id }),
+    (args) => backend.managedMedia('upload', args),
+    true,
+    true,
+    managedMediaResult,
+  );
+  for (const [name, action, description] of [
+    [
+      'get_managed_media',
+      'get',
+      'Read managed media state, not private bytes. URL is present only after publication is confirmed. retained may still be unpublished. Missing id is an error, not evidence of failed upload.',
+    ],
+    [
+      'recover_media_upload',
+      'recover',
+      'Verify original private bytes for an uploading record and mark staged. Never writes bytes or allocates another id. Other states are returned unchanged. No automatic retries.',
+    ],
+    [
+      'publish_managed_media',
+      'publish',
+      'After explicit approval, permanently retain private staged media BEFORE public exposure, then publish immutable bytes. Retention survives failure. Cannot publish discard_prepared media. Does not attach: use existing revision-checked product/category editing with returned URL. Published media is never deletable even after all associations are removed. No automatic retries; reread same id after uncertainty.',
+    ],
+    [
+      'prepare_media_discard',
+      'discard',
+      'After explicit approval, freeze verified unpublished staged media for future discard. No physical deletion; bytes remain. Cannot discard uploading, retained, published or legacy media. Replays return the same frozen state. No automatic retries.',
+    ],
+  ] as const) {
+    tool(
+      name,
+      description,
+      z.strictObject({ media_id: id }),
+      (args) => backend.managedMedia(action, args),
+      action !== 'get',
+      true,
+      managedMediaResult,
     );
   }
 

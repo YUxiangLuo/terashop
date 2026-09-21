@@ -196,6 +196,9 @@ verify_jwt = false
 [functions.paypal-reconcile-captures]
 verify_jwt = false
 
+[functions.managed-media]
+verify_jwt = false
+
 [analytics]
 enabled = true
 port = 54327

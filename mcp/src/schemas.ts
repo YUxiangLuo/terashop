@@ -996,6 +996,18 @@ export const productMediaInspection = productMediaResult.extend({
   byte_size: z.number().int().min(1).max(5242880),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
 });
+export const managedMedia = z
+  .strictObject({
+    id,
+    request_id: id,
+    state: z.enum(['uploading', 'staged', 'retained', 'discard_prepared']),
+    content_type: productMediaIdentity.shape.content_type,
+    byte_size: z.number().int().min(1).max(1048576),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    published: z.boolean(),
+  })
+  .refine((value) => !value.published || value.state === 'retained');
+export const managedMediaResult = z.strictObject({ media: managedMedia, url: z.url().nullable() });
 export const adminProductMediaPage = z.strictObject({
   items: z.array(
     z.strictObject({
