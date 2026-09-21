@@ -6,6 +6,10 @@ import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KeycloakGrantAuthorizer } from '../mcp/src/authorization';
+import { localSupabase } from './lib/local-supabase';
+
+// Opt-in only. Resolve this checkout's loopback credentials before creating fixtures.
+const local = Bun.argv.includes('--with-supabase') ? localSupabase() : undefined;
 
 const image =
   'quay.io/keycloak/keycloak:26.7.0@sha256:0f198be292568439d700cdbfb893e69a6009bb43a94a06a945b1d3d506c76b13';
@@ -473,6 +477,40 @@ try {
     assert.equal(current.sid, original.sid);
   }
   console.log('PASS: two-user/two-client scope isolation, shared SSO sid and targeted revocation');
+  if (local) {
+    const { verifyLocalAuthorization } = await import('../tests/support/mcp-authorization-integration');
+    const a: FixtureBrowser = { username: 'fixture-admin', cookies: new Map() };
+    const b: FixtureBrowser = { username: 'fixture-admin-b', cookies: new Map() };
+    const issued = [
+      await issue(client, a),
+      await issue(secondClient, a, 'openid store:read store:write'),
+      await issue(client, b),
+      await issue(secondClient, b),
+    ] as const;
+    await verifyLocalAuthorization(
+      local,
+      {
+        issuer,
+        introspectionEndpoint: metadata.introspection_endpoint,
+        introspectionClientId: resource,
+        introspectionClientSecret: secret,
+        resource,
+      },
+      [issued[0].access_token, issued[1].access_token, issued[2].access_token, issued[3].access_token],
+      async () => {
+        const response = await fetch(metadata!.revocation_endpoint, {
+          method: 'POST',
+          body: new URLSearchParams({
+            client_id: secondClient,
+            token: issued[1].refresh_token,
+            token_type_hint: 'refresh_token',
+          }),
+        });
+        assert.equal(response.status, 200);
+        await response.text();
+      },
+    );
+  }
 } finally {
   try {
     docker('rm', '--force', name);

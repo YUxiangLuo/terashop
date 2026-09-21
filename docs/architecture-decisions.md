@@ -442,7 +442,11 @@ Keycloak `26.7.0` 已完成 [独立 Docker 实验](../scripts/mcp-keycloak-compa
 
 通过校验后，以完整六字段 binding 调用 mcp_grant_command(resolve)，仅接受 active/version=1 和合法 UUID/scopes；返回 expectedUserId、grantId 与 ToolAuthorization。初始权限是 token ∩ grant ∩ 部署 scopes；逐调用重新 introspect 和 resolve，固定原 grant/user UUID，并将权限限制在初始集合内，升权须重建上下文。grant 查询结束再次检查过期；故障、非法响应、撤销及身份变化均统一 AUTHORIZATION_DENIED，不暴露原异常。该检查是调用准入，不能撤回已执行业务，也不消除检查后发生撤销的时间窗口。
 
-单测覆盖拒绝、权限交集与上下文固定；固定版本 Keycloak Docker 实验调用实际适配器验证 access token、refresh/伪造 token 拒绝及已有上下文的在线撤销，grant 端为合成 fixture。数据库契约已有独立集成测试，但授权服务→真实 grant→管理员业务后端的联合双用户隔离仍待下一批验证，可信双身份关联和加密凭据管理也未实现。模块尚未接 stdio 或 HTTP，不持久化入站 token，不将入站 token 传给 Supabase；未来宿主必须用独立下游用户会话与 expectedUserId 构造 AdminBackend。Keycloak 仍是候选，不因新增适配器而批准其生产部署。
+单测覆盖拒绝、权限交集与上下文固定；固定版本 Keycloak Docker 实验调用实际适配器验证 access token、refresh/伪造 token 拒绝及已有上下文的在线撤销，默认 grant 端为合成 fixture。模块尚未接 stdio 或 HTTP，不持久化入站 token，不将入站 token 传给 Supabase；未来宿主必须用独立下游用户会话与 expectedUserId 构造 AdminBackend。Keycloak 仍是候选，不因新增适配器而批准其生产部署。
+
+可选 `bun scripts/mcp-keycloak-compat.ts --with-supabase` 已把真实 Keycloak、PostgreSQL grant、InMemory MCP transport 和 AdminBackend 串联验收。仅连接 CLI 确认的本地实例，创建并清理两名临时管理员；四组 user/client token 各自批准，批准前均拒绝，两个客户端共享 sid 不导致 grant 混用。成功调用核对真实 profile 与下游用户 Authorization；只读上下文直接调用隐藏写工具拒绝且不访问后端。故意把用户 A 的 grant 配上用户 B 的管理员会话，得到 IDENTITY_MISMATCH，只有 Auth 身份请求、没有 is_admin/业务 RPC。单个本地 grant 撤销后，新 authorizer 和已有 MCP 上下文都拒绝，同用户另一客户端与另一个用户仍可用；降权拒绝该用户剩余上下文，恢复角色后重新检查通过；随后上游撤销也在业务访问前拒绝，另一用户保持可用。清理仅删除该次 fixture，客户不可删除保护仅在本地清理事务中临时绕过，不改变 schema/生产授权记录规则。
+
+这证明的是顺序场景下各层身份和撤销检查可以协作，不证明可信账号关联、远程 HTTP、并发竞态或生产配置。测试手工批准两个账号的对应关系，不以邮箱/sub 推导 Supabase UUID；下一步仍需可信双身份关联和加密凭据保存/轮换，之后才能接远程 transport。
 
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
