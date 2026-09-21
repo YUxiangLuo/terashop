@@ -540,3 +540,9 @@ provider 9.12.2 先 find/check 再 consume，单纯更新 consumed 不能防止�
 销毁 ID 和撤销标记不自动回收；过期记录查询不可见但 payload 尚未定期清理。授权 payload 含敏感身份/协议状态，现无应用层加密、生产备份与保留期实现；需后续运维设计，不能宣称完成生产秘密管理。
 
 集成测试在可丢弃本地集群创建并删除随机独立数据库，验证新连接读取、索引替换、TTL/容差、两个连接竞争单次消费、撤销先于/后于写入两种有锁屏障的顺序、授权隔离、旧 save 和真实 provider opaque 协议。当前持久化集成在 Bun 执行；Node LTS 容器检查仍使用内存 adapter。下一批需将真实持久化路径带入受支持运行时并验证进程重启、并发 HTTP 兑换，随后串联真实登录同意；目前没有生产服务或 HTTP listener。
+
+后续 `bun scripts/mcp-oidc-compat.ts --with-storage` 已补齐受支持运行时的持久化检查：新建内部 Docker 网络、digest 固定的 PostgreSQL 17 和 Node 22 LTS，不发布端口、不使用现有 Supabase 或环境 DB_URL。数据库采用临时内存目录，结束移除容器和网络；Node 仅挂载构建产物、依赖和一次性运行账号凭据。初始化账号密码独立，运行账号无超级用户/建库/建角色权限，仅有 oidc schema usage 与表 DML；实际测试建表被 42501 拒绝。
+
+两个顺序启动的独立 Node 进程验证存储恢复：首进程写入会话、消费 refresh、撤销另一 grant 后退出；第二进程读取会话与 consumed，重复消费和复活撤销授权均拒绝。此后真实 provider 的 code 和 refresh HTTP 请求使用测试 adapter 屏障，在两个请求均读到未消费状态后放行，验证最多一个 200、其他响应为 invalid_grant 且无令牌，竞争后该组 access/refresh 均不可用，另一授权保持有效。同一并发场景也纳入 Bun 数据库集成回归。
+
+此证据不涵盖完整 provider 进程重启后继续浏览器交互、签名/Cookie 密钥恢复、数据库重启或多节点同时服务；没有人为终止在途进程或证明所有崩溃点。持久化检查和协议并发场景仍使用合成身份/自动同意，不是登录服务。下一步串联真实 Supabase 登录与显式同意、本地 grant 和凭据保存，同时落实稳定部署配置与服务重启检查，再接远程 transport。

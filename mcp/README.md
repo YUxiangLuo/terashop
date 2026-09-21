@@ -212,9 +212,11 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 所有写入在短事务内使用同一数据库 advisory lock，跨连接/进程串行化；事务内不调用外部服务。consume 只允许一次，竞争失败提交整组 grant 撤销后返回 invalid_grant；旧 save 不能清除 consumed、改换 grant 或复活已销毁 ID。Grant.destroy / revokeByGrantId 保留永久撤销标记并清除该组 payload，在途 upsert 不能重新创建其令牌。销毁记录也保留 ID；没有自动清理或容量治理，不能手工删标记来“恢复”。这不是消费与全部后继签发的单事务，崩溃后可能需重新授权，不自动重试。
 
-`bun run test:current tests/mcp-oidc-storage.test.ts` 在已验证的可丢弃本地集群中新建随机独立数据库，结束关闭连接并删除该库；覆盖连接重建、过期/索引、双连接消费、撤销前后两种写入竞争和真实 provider opaque 协议。该集成测试使用 Bun；已有 Node Docker 命令仍使用内存 adapter，尚未完成持久化路径的 Node 容器、多进程重启和 HTTP 并发兑换验收。数据库 payload 含敏感授权信息，尚无应用层加密、清理和生产备份方案，不得把本地验证当成部署许可。
+`bun run test:current tests/mcp-oidc-storage.test.ts` 在已验证的可丢弃本地集群中新建随机独立数据库，结束关闭连接并删除该库；覆盖连接重建、过期/索引、双连接消费、撤销前后两种写入竞争和真实 provider opaque 协议，以及有屏障的并发 HTTP code/refresh 兑换。数据库 payload 含敏感授权信息，尚无应用层加密、清理和生产备份方案，不得把本地验证当成部署许可。
 
-下一步验证持久化路径的受支持运行时与进程恢复，再接真实 Supabase 登录/同意、本地授权与凭据保存、Streamable HTTP、生产配置及客户端验收。现有 Docker 命令仅是 opt-in 协议检查，不创建或部署授权服务。详见 ADR-027。
+受支持运行时的持久化验收：`bun scripts/mcp-oidc-compat.ts --with-storage`。新建内部 Docker 网络、digest 固定的 PostgreSQL 17 容器（临时内存数据目录）和 Node 22 LTS 容器，不连接 Supabase、不继承 DB_URL、不发布端口；结束删除容器、网络和临时文件。初始化账号与运行账号密码独立，Node 仅持有非超级用户的授权 schema DML 凭据，测试确认建表返回 42501。两个依次执行的独立 Node 进程验证会话、已消费状态和撤销标记跨进程保留；另用真实 provider 的两个 HTTP 请求在 consume 前设置屏障，确保都读到未消费状态后竞争。最多一个响应成功，失败为 invalid_grant；竞争后该组所有返回的令牌都不可用，其他授权仍 active。
+
+上述是存储进程重建和单 provider 进程内的 HTTP 并发验收，不是完整授权服务重启、数据库重启、多节点服务或崩溃恢复证明；合成身份/自动同意仍仅用于测试。下一步接真实 Supabase 登录/同意、本地授权与凭据保存，并补全签名密钥/Cookie 配置的服务重启验收，再接 Streamable HTTP、生产配置及客户端验收。Docker 命令不部署生产授权服务。详见 ADR-027。
 
 ```bash
 bun run typecheck

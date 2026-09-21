@@ -9,7 +9,28 @@ import { GrantAuthorizer } from '../../mcp/src/authorization';
 export async function verifyOAuthProvider(
   accessTokenFormat: 'jwt' | 'opaque' = 'jwt',
   adapter?: AdapterConstructor,
+  concurrent = false,
 ) {
+  assert(!concurrent || (adapter && accessTokenFormat === 'opaque'));
+  let barrier:
+    { model: string; count: number; ready: ReturnType<typeof Promise.withResolvers<void>> } | undefined;
+  const Base = adapter;
+  const instrumented =
+    Base &&
+    class extends Base {
+      constructor(private readonly modelName: string) {
+        super(modelName);
+      }
+      async consume(id: string) {
+        const current = barrier;
+        if (current && current.model === this.modelName) {
+          current.count++;
+          if (current.count === 2) current.ready.resolve();
+          await current.ready.promise;
+        }
+        await super.consume(id);
+      }
+    };
   const resource = 'https://tera.example/mcp';
   const callback = 'http://127.0.0.1:49199/callback';
   const clientId = 'tera-compatibility';
@@ -61,7 +82,7 @@ export async function verifyOAuthProvider(
   const issuer = `http://127.0.0.1:${address.port}`;
   try {
     provider = new Provider(issuer, {
-      adapter,
+      adapter: instrumented,
       jwks: { keys: [key] },
       cookies: { keys: [randomBytes(32).toString('hex')] },
       renderError: (ctx, output) => {
@@ -400,6 +421,52 @@ export async function verifyOAuthProvider(
     // the online grant, not claim that RFC7009 rewrites an already issued JWT.
     if (accessTokenFormat === 'jwt') await claims(second.access_token);
     else assert.deepEqual(await introspect(second.access_token), { active: false });
+
+    if (concurrent) {
+      const unaffected = await issue();
+      for (const model of ['AuthorizationCode', 'RefreshToken']) {
+        const source = model === 'RefreshToken' ? await issue() : undefined;
+        const params: Record<string, string> = source
+          ? { grant_type: 'refresh_token', refresh_token: source.refresh_token }
+          : {
+              grant_type: 'authorization_code',
+              code: (await authorize()).get('code')!,
+              redirect_uri: callback,
+              code_verifier: verifier,
+            };
+        const ready = Promise.withResolvers<void>();
+        // Both HTTP requests must reach consume with stale unconsumed model instances.
+        barrier = { model, count: 0, ready };
+        const timer = setTimeout(() => ready.reject(new Error('Consumption barrier timed out')), 5000);
+        try {
+          const results = await Promise.all([token(params), token(params)]);
+          assert.equal(barrier.count, 2);
+          assert(results.filter((r) => r.status === 200).length <= 1);
+          assert(results.some((r) => r.status === 400 && r.data.error === 'invalid_grant'));
+          for (const result of results) {
+            if (result.status === 200) {
+              assert.deepEqual(await introspect(result.data.access_token), { active: false });
+              assert.equal(
+                (await token({ grant_type: 'refresh_token', refresh_token: result.data.refresh_token })).data
+                  .error,
+                'invalid_grant',
+              );
+            } else {
+              assert.equal(result.status, 400);
+              assert.equal(result.data.error, 'invalid_grant');
+              assert.equal(result.data.access_token, undefined);
+              assert.equal(result.data.refresh_token, undefined);
+            }
+          }
+          if (source) assert.deepEqual(await introspect(source.access_token), { active: false });
+          assert.equal((await introspect(unaffected.access_token)).active, true);
+        } finally {
+          clearTimeout(timer);
+          ready.resolve();
+          barrier = undefined;
+        }
+      }
+    }
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

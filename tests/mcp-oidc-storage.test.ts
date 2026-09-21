@@ -119,8 +119,8 @@ test('a writer blocked behind committed revocation cannot resurrect the grant', 
   await Promise.all([token.revokeByGrantId(grantId), new Adapter('RefreshToken').revokeByGrantId(grantId)]);
 });
 
-test('real provider opaque token protocol works with durable adapter', async () => {
-  await verifyOAuthProvider('opaque', Adapter);
+test('real provider opaque protocol and concurrent HTTP exchanges work with durable adapter', async () => {
+  await verifyOAuthProvider('opaque', Adapter, true);
 }, 15000);
 
 test('revocation waiting behind issuance deletes that family only, even without a Grant row', async () => {
