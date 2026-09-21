@@ -77,7 +77,13 @@ test('账户分页和角色/邮箱 AND 筛选，Auth 与 Customer ID 明确分�
 
 test('读身份再提升/降级，撤权后旧 MCP 会话立即拒绝查询；匿名化不等于删除 Auth', async () => {
   expect((await get(second.userId))!.role).toBe('customer');
-  await toolData(session.client, 'set_user_role', { user_id: second.userId, role: 'admin' });
+  const changed = await toolData<{ id: string; role: string; email: string }>(
+    session.client,
+    'set_user_role',
+    { user_id: second.userId, role: 'admin' },
+  );
+  expect(changed).toMatchObject({ id: second.userId, role: 'admin', email: second.email });
+  expect(Object.keys(changed).sort()).toEqual(['id', 'email', 'role', 'created_at', 'updated_at'].sort());
   const promoted = await mcpSession(
     new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: second.token }),
   );
@@ -95,7 +101,13 @@ test('读身份再提升/降级，撤权后旧 MCP 会话立即拒绝查询；�
   } finally {
     await promoted.close();
   }
-  await toolData(session.client, 'anonymize_user', { p_user_id: second.userId });
+  const result = await toolData<{ id: string; email: string; role: string }>(
+    session.client,
+    'anonymize_user',
+    { p_user_id: second.userId },
+  );
+  expect(result).toMatchObject({ id: second.userId, email: '', role: 'customer' });
+  expect(Object.keys(result).sort()).toEqual(['id', 'email', 'role', 'created_at', 'updated_at'].sort());
   const anonymized = (await get(second.userId))!;
   expect(anonymized).toMatchObject({
     user_id: second.userId,

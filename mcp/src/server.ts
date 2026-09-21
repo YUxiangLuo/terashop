@@ -26,6 +26,9 @@ import {
   customerAddress,
   adminCustomerDetail,
   adminCustomerPage,
+  profileResult,
+  adminUser,
+  adminUserPage,
   orderReturns,
   returnAuthorization,
   returnReceipt,
@@ -989,6 +992,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     z.strictObject({ user_id: id, role: z.enum(['admin', 'customer']) }),
     true,
     true,
+    profileResult,
   );
   rpc(
     'list_admin_users',
@@ -999,17 +1003,25 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       role_filter: z.enum(['admin', 'customer']).optional(),
       search,
     }),
+    false,
+    false,
+    adminUserPage,
   );
   rpc(
     'get_admin_user',
     'Read one application profile by Auth user_id before role changes. Missing returns null. Includes role, profile email, associated Customer UUID and customer anonymization timestamp; no credentials or login/ban/verification status. A missing customer link does not prove Auth deletion. Do not infer account access from profile existence.',
     z.strictObject({ user_id: id }),
+    false,
+    false,
+    adminUser.nullable(),
   );
   rpc(
     'anonymize_user',
     'Irreversibly anonymize the Auth-linked profile, customer and audit actor. Does not delete Auth credentials or historical orders.',
     z.strictObject({ p_user_id: id }),
     true,
+    false,
+    profileResult,
   );
 
   rpc(

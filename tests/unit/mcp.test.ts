@@ -24,6 +24,68 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('用户输出区分 profile 和商业客户身份，拒绝 Auth 秘密且异常写入不重试', async () => {
+  const id = crypto.randomUUID(),
+    customer = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const profile = { id, email: '', role: 'admin', created_at: at, updated_at: at };
+  const detail = {
+    user_id: id,
+    customer_id: customer,
+    customer_anonymized_at: at,
+    email: '',
+    role: 'admin',
+    created_at: at,
+    updated_at: at,
+  };
+  const cases = [
+    ['get_admin_user', { user_id: id }, detail, false],
+    ['list_admin_users', {}, { items: [detail], next_cursor: id }, false],
+    ['set_user_role', { user_id: id, role: 'admin' }, profile, true],
+    ['anonymize_user', { p_user_id: id }, profile, true],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      for (const invalid of [{ ...expected, encrypted_password: 'SECRET' }, {}]) {
+        response = invalid;
+        const before = calls.length;
+        const failed = await session.client.callTool({ name, arguments: args });
+        expect(failed.isError).toBe(true);
+        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: 'INVALID_BACKEND_RESPONSE',
+          outcome_unknown: mutation,
+        });
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+        expect(calls.length - before).toBe(3);
+      }
+    }
+    for (const valid of [null, { ...detail, customer_id: null, customer_anonymized_at: null }]) {
+      response = valid;
+      expect(await toolData<typeof valid>(session.client, 'get_admin_user', { user_id: id })).toEqual(valid);
+    }
+    for (const invalid of [
+      { ...detail, role: 'service_role' },
+      { ...detail, email: null },
+      { ...detail, updated_at: 123456 },
+      { ...detail, identities: ['SECRET'] },
+      profile,
+    ]) {
+      response = { items: [invalid], next_cursor: null };
+      const failed = await session.client.callTool({ name: 'list_admin_users', arguments: {} });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('客户与地址合同保留微秒令牌及合法 Metafield，拒绝身份字段泄漏和畸形写响应', async () => {
   const id = crypto.randomUUID(),
     other = crypto.randomUUID(),

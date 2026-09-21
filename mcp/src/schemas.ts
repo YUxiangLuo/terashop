@@ -35,6 +35,22 @@ export const adminOrderPage = z.strictObject({
 });
 
 const timestamp = z.iso.datetime({ offset: true });
+export const profileResult = z.strictObject({
+  id,
+  email: z.string(),
+  role: z.enum(['admin', 'customer']),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+export const adminUser = profileResult.omit({ id: true }).extend({
+  user_id: id,
+  customer_id: id.nullable(),
+  customer_anonymized_at: timestamp.nullable(),
+});
+export const adminUserPage = z.strictObject({
+  items: z.array(adminUser).max(100),
+  next_cursor: id.nullable(),
+});
 export const customerResult = z.strictObject({
   id,
   auth_user_id: id.nullable(),

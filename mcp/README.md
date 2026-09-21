@@ -71,6 +71,7 @@
 | 导出 | `export_admin_orders`；固定字段 JSON 分页，不含客户联系方式，订单号/金额为字符串；不写文件或外发，不保证跨页冻结快照 |
 
 - 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。`list_admin_orders`、`get_admin_order`、`get_order_pricing`、`cancel_order`、`mark_order_paid`、`refund_order`、`list_admin_payment_operations`、`get_admin_payment_summary`、`get_order_ledger`、`get_order_fulfillment_balance` 及全部五个退货工具已使用逐字段输出 schema，固定结构和嵌套关系行拒绝未知字段。订单地址、选项、政策与促销等 JSON 快照仍按既有动态内容合同保留；schema 不重算金额或替代数据库业务校验。其他工具的 `outputSchema` 仍约束统一 JSON 信封，后续逐领域收紧。
+- 应用用户列表/详情、角色变更和用户匿名化使用逐字段输出 schema。读取使用 user_id 和可空 customer_id/customer_anonymized_at；写入返回 profile 行（id/email/role/created_at/updated_at），不将 id 改名或与商业客户 ID 混用。保留匿名化后的空邮箱及微秒时间戳，拒绝额外 Auth 字段和未知角色；资料存在不证明可登录，匿名化不撤销 Auth 凭据。
 - 客户列表/详情/创建/更新/匿名化、地址创建/更新/删除及默认地址操作使用逐字段输出 schema。列表/详情只返回 has_account，不含 auth_user_id；创建和匿名化沿用客户行合同，保留可空 auth_user_id（关联 ID，不是凭据）。默认地址操作返回地址行，地址 CRUD 返回客户详情。嵌套地址和 Metafield 外层拒绝额外字段，value 保留合法 JSON；时间戳保留微秒字符串。创建重放读取当前客户，不缓存或恢复匿名化前的个人信息；匿名化不删除 Auth 账户或历史订单。
 - 履约创建/更新、库存可用量/调整/流水/调拨，以及仓库读取/分页/创建/更新/默认切换也使用逐字段输出 schema。可用量允许负数；仓库地址保留既有 JSON 内容。`adjust_inventory` 重放返回当前库存，调拨重放返回原始调拨事实，校验不改变此语义。履约 version 和库存 reservation_revision 仍为数值型，超出安全整数范围时拒绝输出，不静默舍入。
 - 账本含渠道引用、退款原因及有符号调整金额，不等于脱敏支付操作列表。退货授权、收货、处置和资金退款仍独立。账本 `adjustments[].id` 与处置 `inventory_movement_id` 改为精确的规范有符号 bigint 十进制字符串，禁止转 Number；报废处置的库存流水 ID 仍为 null。SQL 源头输出字符串，覆盖退货嵌套读取、首次写入和幂等重放；MCP 拒绝数值型、非规范或越界 ID。底层存储与排序仍为 bigint。
