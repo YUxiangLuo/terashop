@@ -117,7 +117,7 @@ export class AdminBackend {
   }
 
   async managedMedia(
-    action: 'upload' | 'get' | 'recover' | 'publish' | 'discard',
+    action: 'upload' | 'get' | 'recover' | 'publish' | 'discard' | 'delete' | 'recover_delete',
     args: Record<string, unknown>,
   ): Promise<Json> {
     await this.assertAdmin();

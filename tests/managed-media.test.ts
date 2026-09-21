@@ -17,6 +17,7 @@ interface Media {
   id: string;
   request_id: string;
   state: string;
+  upload_status: string;
   content_type: string;
   byte_size: number;
   sha256: string;
@@ -72,6 +73,7 @@ function edge(body: unknown, token = admin.token) {
 type Intercept = (request: Request, send: () => Promise<Response>) => Promise<Response>;
 async function runtime(
   run: (session: Awaited<ReturnType<typeof mcpSession>>, setFault: (f?: Intercept) => void) => Promise<void>,
+  allowDelete = false,
 ) {
   const original = globalThis.fetch,
     deno = Object.getOwnPropertyDescriptor(globalThis, 'Deno');
@@ -88,7 +90,7 @@ async function runtime(
   globalThis.fetch = (async (input, init) => {
     const request = new Request(input, init);
     expect(new URL(request.url).origin).toBe(new URL(API).origin);
-    if (request.url.includes('/storage/v1/')) expect(request.method).not.toBe('DELETE');
+    if (request.url.includes('/storage/v1/') && !allowDelete) expect(request.method).not.toBe('DELETE');
     return fault ? fault(request, () => original(request)) : original(request);
   }) as typeof fetch;
   const session = await mcpSession(
@@ -263,6 +265,178 @@ test('private staging, immutable replay, publication/attachment and discard prep
   });
 });
 
+test('one-shot upload admission blocks replay and discard while the original response is in flight', async () => {
+  await runtime(async (session, fault) => {
+    const args = upload();
+    const ready = Promise.withResolvers<void>(),
+      release = Promise.withResolvers<void>();
+    let writes = 0;
+    fault(async (request, send) => {
+      if (request.method === 'POST' && request.url.includes('/object/media-staging/')) {
+        writes++;
+        const response = await send();
+        ready.resolve();
+        await release.promise;
+        return response;
+      }
+      return send();
+    });
+    const first = edge({ action: 'upload', ...args });
+    try {
+      await ready.promise;
+      expect(await (await edge({ action: 'upload', ...args })).json()).toMatchObject({
+        state: 'uploading',
+        upload_status: 'pending',
+      });
+      const [{ id }] =
+        await db`select id from private.managed_media where request_id=${args.request_id}::uuid`;
+      expect(await toolData<Result>(session.client, 'recover_media_upload', { media_id: id })).toMatchObject({
+        media: { state: 'staged', upload_status: 'pending' },
+      });
+      expect((await edge({ action: 'discard', media_id: id })).status).toBe(409);
+      expect((await edge({ action: 'delete', media_id: id })).status).toBe(409);
+      expect(writes).toBe(1);
+    } finally {
+      release.resolve();
+      await first;
+      fault();
+    }
+    expect(await (await first).json()).toMatchObject({ state: 'staged', upload_status: 'settled' });
+  });
+});
+
+test('lost upload admission remains pending and replay returns identity without granting another write', async () => {
+  await runtime(async (session, fault) => {
+    const args = upload();
+    fault(async (request, send) => {
+      expect(request.url).not.toContain('/storage/v1/');
+      const action = request.url.endsWith('/rpc/managed_media_command')
+        ? (await request.clone().json()).action
+        : '';
+      const response = await send();
+      if (action === 'begin_upload') throw new Error('lost committed admission');
+      return response;
+    });
+    expect((await edge({ action: 'upload', ...args })).status).toBe(502);
+    fault(async (request, send) => {
+      expect(request.url).not.toContain('/storage/v1/');
+      return send();
+    });
+    const replay = await toolData<Result>(session.client, 'stage_media_upload', args);
+    expect(replay.media).toMatchObject({ state: 'uploading', upload_status: 'pending' });
+    expect((await edge({ action: 'discard', media_id: replay.media.id })).status).toBe(409);
+    expect((await edge({ action: 'delete', media_id: replay.media.id })).status).toBe(409);
+    fault();
+    expect((await edge({ action: 'recover', media_id: replay.media.id })).status).toBe(409);
+  });
+});
+
+test('private deletion preserves tombstones and recovers each lost response without deleting public media', async () => {
+  await runtime(async (session, fault) => {
+    for (const phase of ['none', 'before_delete', 'after_delete', 'before_confirm', 'after_confirm']) {
+      const args = upload();
+      const staged = await toolData<Result>(session.client, 'stage_media_upload', args);
+      const id = staged.media.id;
+      expect((await edge({ action: 'delete', media_id: id })).status).toBe(409);
+      await toolData(session.client, 'prepare_media_discard', { media_id: id });
+      expect(
+        await toolData<Result>(session.client, 'recover_media_deletion', { media_id: id }),
+      ).toMatchObject({ media: { state: 'discard_prepared' } });
+      let deletes = 0,
+        fired = false;
+      fault(async (request, send) => {
+        if (request.method === 'DELETE') {
+          expect(new URL(request.url).pathname).toBe(`/storage/v1/object/media-staging/${id}.png`);
+          deletes++;
+          if (phase === 'before_delete') {
+            fired = true;
+            throw new Error('LOST');
+          }
+          const response = await send();
+          if (phase === 'after_delete') {
+            fired = true;
+            throw new Error('LOST');
+          }
+          return response;
+        }
+        if (
+          request.url.endsWith('/rpc/managed_media_command') &&
+          (await request.clone().json()).action === 'deleted'
+        ) {
+          if (phase === 'before_confirm') {
+            fired = true;
+            throw new Error('LOST');
+          }
+          const response = await send();
+          if (phase === 'after_confirm') {
+            fired = true;
+            throw new Error('LOST');
+          }
+          return response;
+        }
+        return send();
+      });
+      const result = await session.client.callTool({
+        name: 'delete_managed_media',
+        arguments: { media_id: id },
+      });
+      expect(Boolean(result.isError)).toBe(phase !== 'none');
+      expect(fired).toBe(phase !== 'none');
+      expect(deletes).toBe(1);
+      fault(async (request, send) => {
+        expect(request.method).not.toBe('DELETE');
+        return send();
+      });
+      const recovered = await toolData<Result>(session.client, 'recover_media_deletion', { media_id: id });
+      expect(recovered.media.state).toBe(phase === 'before_delete' ? 'discard_prepared' : 'discarded');
+      fault();
+      expect(await toolData<Result>(session.client, 'delete_managed_media', { media_id: id })).toMatchObject({
+        url: null,
+        media: { state: 'discarded', upload_status: 'settled' },
+      });
+      fault(async (request, send) => {
+        expect(request.url).not.toContain('/storage/v1/');
+        return send();
+      });
+      expect(await toolData<Result>(session.client, 'stage_media_upload', args)).toMatchObject({
+        media: { state: 'discarded' },
+      });
+      expect((await edge({ action: 'publish', media_id: id })).status).toBe(409);
+      await toolData(session.client, 'delete_managed_media', { media_id: id });
+      fault();
+    }
+    const retained = await toolData<Result>(session.client, 'stage_media_upload', upload());
+    await toolData(session.client, 'publish_managed_media', { media_id: retained.media.id });
+    fault(async (request, send) => {
+      expect(request.method).not.toBe('DELETE');
+      return send();
+    });
+    expect((await edge({ action: 'delete', media_id: retained.media.id })).status).toBe(409);
+  }, true);
+}, 20000);
+
+test('absence recovery rejects generic 404, permission, bucket and network errors', async () => {
+  await runtime(async (session, fault) => {
+    const staged = await toolData<Result>(session.client, 'stage_media_upload', upload());
+    const id = staged.media.id;
+    await toolData(session.client, 'prepare_media_discard', { media_id: id });
+    for (const status of [403, 404, 500]) {
+      fault(async (request, send) =>
+        request.url.includes('/storage/v1/')
+          ? Response.json({ code: 'NoSuchBucket', message: 'SECRET' }, { status })
+          : send(),
+      );
+      const result = await edge({ action: 'recover_delete', media_id: id });
+      expect(result.status).toBe(502);
+      expect(await result.text()).not.toContain('SECRET');
+      fault();
+      expect(await toolData<Result>(session.client, 'get_managed_media', { media_id: id })).toMatchObject({
+        media: { state: 'discard_prepared' },
+      });
+    }
+  });
+});
+
 test('managed media runs through the real local Edge gateway', async () => {
   const session = await mcpSession(
     new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }),
@@ -274,6 +448,11 @@ test('managed media runs through the real local Edge gateway', async () => {
     expect(
       await toolData<Result>(session.client, 'publish_managed_media', { media_id: staged.media.id }),
     ).toMatchObject({ media: { state: 'retained', published: true } });
+    const disposable = await toolData<Result>(session.client, 'stage_media_upload', upload());
+    await toolData(session.client, 'prepare_media_discard', { media_id: disposable.media.id });
+    expect(
+      await toolData<Result>(session.client, 'delete_managed_media', { media_id: disposable.media.id }),
+    ).toMatchObject({ media: { state: 'discarded' } });
   } finally {
     await session.close();
   }
@@ -319,7 +498,9 @@ test('lost upload/publication responses retain identity and never reverse the pu
         expect((await edge({ action: 'discard', media_id: row.id })).status).toBe(409);
         expect(
           await toolData<Result>(session.client, 'recover_media_upload', { media_id: row.id }),
-        ).toMatchObject({ media: { state: 'staged' } });
+        ).toMatchObject({ media: { state: 'staged', upload_status: 'pending' } });
+        expect((await edge({ action: 'discard', media_id: row.id })).status).toBe(409);
+        expect((await edge({ action: 'delete', media_id: row.id })).status).toBe(409);
       } else {
         expect(first.isError).not.toBe(true);
         fault(intercept);
@@ -358,14 +539,11 @@ async function stagedRecord() {
       true,
     ),
   );
-  await checked(
-    rpc(
-      'managed_media_command',
-      { action: 'verified', actor_id: admin.userId, media_id: media.id },
-      undefined,
-      true,
-    ),
-  );
+  for (const action of ['begin_upload', 'uploaded']) {
+    await checked(
+      rpc('managed_media_command', { action, actor_id: admin.userId, media_id: media.id }, undefined, true),
+    );
+  }
   return media.id;
 }
 test('retention versus discard is serialized in both directions and rejects stale RR snapshots', async () => {

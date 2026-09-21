@@ -3138,7 +3138,7 @@ begin
     select 1 from public.profiles p join auth.users u on u.id=p.id
     where p.id=actor_id and p.role='admin' and not coalesce(u.is_anonymous,true)
   ) then raise exception using errcode='42501', message='admin actor and service required'; end if;
-  if action is null or action not in ('allocate','get','verified','retain','discard','published') then
+  if action is null or action not in ('allocate','get','begin_upload','uploaded','verified','retain','discard','delete','deleted','published') then
     raise exception using errcode='22023', message='invalid media action';
   end if;
   if action='allocate' then
@@ -3158,7 +3158,20 @@ begin
     end if;
     select * into v_media from private.managed_media m where m.id=media_id for update;
     if not found then raise exception using errcode='PT404', message='media not found'; end if;
-    if action='verified' then
+    if action='begin_upload' then
+      if v_media.state<>'uploading' or v_media.upload_status<>'not_started' then
+        raise exception using errcode='PT409', message='upload already admitted; recover without writing';
+      end if;
+      -- No expiry or reset: a timed-out Storage request may still write later.
+      update private.managed_media set upload_status='pending' where id=media_id returning * into v_media;
+    elsif action='uploaded' then
+      if v_media.upload_status<>'pending' or v_media.state not in ('uploading','staged','retained') then
+        raise exception using errcode='PT409', message='upload cannot be settled';
+      end if;
+      update private.managed_media set upload_status='settled',
+        state=case when state='uploading' then 'staged' else state end
+        where id=media_id returning * into v_media;
+    elsif action='verified' then
       if v_media.state not in ('uploading','staged') then
         raise exception using errcode='PT409', message='media is frozen';
       end if;
@@ -3169,17 +3182,25 @@ begin
       end if;
       update private.managed_media set state='retained' where id=media_id returning * into v_media;
     elsif action='discard' then
-      if v_media.state not in ('staged','discard_prepared') then
+      if v_media.state not in ('staged','discard_prepared','discarded') or v_media.upload_status<>'settled' then
         raise exception using errcode='PT409', message='media cannot be discarded';
       end if;
-      update private.managed_media set state='discard_prepared' where id=media_id returning * into v_media;
+      update private.managed_media set state=case when state='discarded' then state else 'discard_prepared' end
+        where id=media_id returning * into v_media;
+    elsif action in ('delete','deleted') then
+      if v_media.state not in ('discard_prepared','discarded') or v_media.upload_status<>'settled' then
+        raise exception using errcode='PT409', message='media not prepared for deletion';
+      end if;
+      update private.managed_media set state=case when action='deleted' then 'discarded' else state end
+        where id=media_id returning * into v_media;
     elsif action='published' then
       if v_media.state<>'retained' then raise exception using errcode='PT409', message='media not retained'; end if;
       update private.managed_media set published=true where id=media_id returning * into v_media;
     end if;
   end if;
   return jsonb_build_object('id',v_media.id,'request_id',v_media.request_id,'state',v_media.state,
-    'content_type',v_media.content_type,'byte_size',v_media.byte_size,'sha256',v_media.sha256,'published',v_media.published);
+    'content_type',v_media.content_type,'byte_size',v_media.byte_size,'sha256',v_media.sha256,
+    'published',v_media.published,'upload_status',v_media.upload_status);
 end;
 $$;
 

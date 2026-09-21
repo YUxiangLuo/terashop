@@ -42,7 +42,9 @@ CREATE TABLE private.managed_media (
   content_type text NOT NULL CHECK (content_type IN ('image/jpeg','image/png','image/webp')),
   byte_size integer NOT NULL CHECK (byte_size BETWEEN 1 AND 1048576),
   sha256 text NOT NULL CHECK (sha256 ~ '^[0-9a-f]{64}$'),
-  state text NOT NULL DEFAULT 'uploading' CHECK (state IN ('uploading','staged','retained','discard_prepared')),
+  state text NOT NULL DEFAULT 'uploading' CHECK (state IN ('uploading','staged','retained','discard_prepared','discarded')),
+  upload_status text NOT NULL DEFAULT 'not_started' CHECK (upload_status IN ('not_started','pending','settled')),
+  CHECK (state NOT IN ('discard_prepared','discarded') OR upload_status='settled'),
   published boolean NOT NULL DEFAULT false CHECK (NOT published OR state='retained')
 );
 ALTER TABLE private.managed_media ENABLE ROW LEVEL SECURITY;

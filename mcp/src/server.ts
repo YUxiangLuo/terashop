@@ -183,7 +183,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
 
   tool(
     'stage_media_upload',
-    'Stage private image bytes (canonical base64, 1 byte to 1 MiB). Retain request_id and identical bytes; replay with changed content rejects. Server assigns media id. No staging URL, previews, arbitrary paths or legacy adoption. Does not attach or publish. On unknown outcome preserve request_id; no automatic retries. Read media state when its id is known; explicit same-request upload replay can recover allocation if the response was lost.',
+    'Stage private image bytes (canonical base64, 1 byte to 1 MiB). Retain request_id and identical bytes; changed content rejects. One private write admission per media id. Explicit replay returns pending or terminal state without rewriting bytes; success is not necessarily staged. No staging URL, previews, arbitrary paths or legacy adoption. Does not attach or publish. On unknown outcome preserve request_id; no automatic retries. Read state by media id; explicit same-request replay can recover allocation identity if its response was lost.',
     uploadProductMedia.omit({ product_id: true, media_id: true }).extend({ request_id: id }),
     (args) => backend.managedMedia('upload', args),
     true,
@@ -199,7 +199,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     [
       'recover_media_upload',
       'recover',
-      'Verify original private bytes for an uploading record and mark staged. Never writes bytes or allocates another id. Other states are returned unchanged. No automatic retries.',
+      'Verify original private bytes for an uploading record and mark staged. Never writes bytes or allocates another id. Does not clear upload_status=pending or grant deletion eligibility: readable bytes do not prove an in-flight upload has ended. Other states are returned unchanged. No automatic retries.',
     ],
     [
       'publish_managed_media',
@@ -209,7 +209,17 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     [
       'prepare_media_discard',
       'discard',
-      'After explicit approval, freeze verified unpublished staged media for future discard. No physical deletion; bytes remain. Cannot discard uploading, retained, published or legacy media. Replays return the same frozen state. No automatic retries.',
+      'After explicit approval, freeze verified unpublished staged media for discard. Requires upload_status=settled; pending uploads never gain deletion eligibility by timeout or read recovery. No physical deletion; bytes remain. Cannot discard uploading, retained, published or legacy media. Replays preserve terminal state. No automatic retries.',
+    ],
+    [
+      'delete_managed_media',
+      'delete',
+      'After explicit approval, physically delete only previously discard_prepared private media and confirm absence. Preserves the media tombstone and original IDs. Never deletes retained, published, legacy, pending-upload or unprepared media. An unknown result is not success: read state then recover deletion before an explicitly approved same-ID retry. No automatic retries.',
+    ],
+    [
+      'recover_media_deletion',
+      'recover_delete',
+      'Check absence of previously discard_prepared private media and record discarded only when confirmed. Does not send Storage DELETE; still a database mutation. Existing bytes leave state unchanged. Auth, bucket and network failures are not proof of absence. No automatic retries.',
     ],
   ] as const) {
     tool(

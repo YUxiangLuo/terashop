@@ -1000,13 +1000,17 @@ export const managedMedia = z
   .strictObject({
     id,
     request_id: id,
-    state: z.enum(['uploading', 'staged', 'retained', 'discard_prepared']),
+    state: z.enum(['uploading', 'staged', 'retained', 'discard_prepared', 'discarded']),
+    upload_status: z.enum(['not_started', 'pending', 'settled']),
     content_type: productMediaIdentity.shape.content_type,
     byte_size: z.number().int().min(1).max(1048576),
     sha256: z.string().regex(/^[0-9a-f]{64}$/),
     published: z.boolean(),
   })
-  .refine((value) => !value.published || value.state === 'retained');
+  .refine((value) => !value.published || value.state === 'retained')
+  .refine(
+    (value) => !['discard_prepared', 'discarded'].includes(value.state) || value.upload_status === 'settled',
+  );
 export const managedMediaResult = z.strictObject({ media: managedMedia, url: z.url().nullable() });
 export const adminProductMediaPage = z.strictObject({
   items: z.array(

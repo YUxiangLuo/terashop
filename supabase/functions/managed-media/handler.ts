@@ -11,7 +11,8 @@ import {
 interface Media {
   id: string;
   request_id: string;
-  state: 'uploading' | 'staged' | 'retained' | 'discard_prepared';
+  state: 'uploading' | 'staged' | 'retained' | 'discard_prepared' | 'discarded';
+  upload_status: 'not_started' | 'pending' | 'settled';
   content_type: 'image/jpeg' | 'image/png' | 'image/webp';
   byte_size: number;
   sha256: string;
@@ -107,6 +108,24 @@ async function writeOnce(
   await verifiedBytes(media, bucket, path);
 }
 
+async function absent(path: string): Promise<boolean> {
+  const response = await storage(`authenticated/media-staging/${path}`);
+  if (response.status === 200) {
+    await response.body?.cancel();
+    return false;
+  }
+  const error = await response.json().catch(() => null);
+  // Storage can use HTTP 400 for a missing key. Never treat arbitrary HTTP
+  // failures (including auth/bucket errors) as proof that an object is absent.
+  if (
+    (response.status === 400 || response.status === 404) &&
+    (error?.code === 'NoSuchKey' ||
+      (String(error?.statusCode) === '404' && error?.message === 'Object not found'))
+  )
+    return true;
+  throw new HttpError('Cannot confirm deletion', 502, 'storage_unavailable');
+}
+
 export async function handleManagedMedia(request: Request): Promise<Response> {
   try {
     // Initial interface is programmatic MCP, not a browser upload/signing API.
@@ -122,7 +141,9 @@ export async function handleManagedMedia(request: Request): Promise<Response> {
     }
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError('Invalid request');
     const action = body.action;
-    if (!['upload', 'get', 'recover', 'publish', 'discard'].includes(String(action)))
+    if (
+      !['upload', 'get', 'recover', 'publish', 'discard', 'delete', 'recover_delete'].includes(String(action))
+    )
       throw new HttpError('Invalid action');
     const allowed =
       action === 'upload' ? ['action', 'request_id', 'content_type', 'data_base64'] : ['action', 'media_id'];
@@ -154,9 +175,12 @@ export async function handleManagedMedia(request: Request): Promise<Response> {
         byte_size: bytes.length,
         sha256: await hash(bytes),
       });
-      if (media.state === 'uploading') {
+      if (media.state === 'uploading' && media.upload_status === 'not_started') {
+        media = await command('begin_upload', { media_id: media.id });
         await writeOnce(media, 'media-staging', `${media.id}.${extensions[media.content_type]}`, bytes);
-        media = await command('verified', { media_id: media.id });
+        // Only the request holding the one-shot admission can attest completion.
+        // Do not clear pending in finally or on timeout, even if bytes exist.
+        media = await command('uploaded', { media_id: media.id });
       }
     } else {
       const id = requireUuid(body.media_id, 'media_id');
@@ -174,6 +198,19 @@ export async function handleManagedMedia(request: Request): Promise<Response> {
           media = await command('published', { media_id: id });
         }
       } else if (action === 'discard') media = await command('discard', { media_id: id });
+      else if (action === 'delete' || action === 'recover_delete') {
+        media = await command('delete', { media_id: id });
+        if (media.state !== 'discarded') {
+          if (action === 'delete' && !(await absent(path))) {
+            const response = await storage(`media-staging/${path}`, 'DELETE');
+            await response.body?.cancel();
+            if (!response.ok) throw new HttpError('Deletion not confirmed', 502, 'storage_unavailable');
+          }
+          if (await absent(path)) media = await command('deleted', { media_id: id });
+          else if (action === 'delete')
+            throw new HttpError('Deletion not confirmed', 409, 'media_unverified');
+        }
+      }
     }
     // Never return arbitrary DB fields, credentials, staging keys or signed URLs.
     return jsonResponse({
@@ -184,6 +221,7 @@ export async function handleManagedMedia(request: Request): Promise<Response> {
       byte_size: media.byte_size,
       sha256: media.sha256,
       published: media.published,
+      upload_status: media.upload_status,
     });
   } catch (error) {
     const status = error instanceof HttpError ? error.status : 502;

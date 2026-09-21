@@ -6,9 +6,13 @@
 
 `managed-media` 使用运行时 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY`，无需支付渠道配置。`verify_jwt=false` 仅关闭网关旧式校验；handler 经 Auth 验证用户 JWT，service-only `managed_media_command` 再校验非匿名管理员 actor。MCP 不持有 service key。生产部署须包含此函数及 SQL/Storage 基线；禁止客户端直调该 RPC 或写入 `media-staging`、`catalog-media/managed/` 命名空间。
 
-仅接受无 Origin 的 POST JSON（最大 1,400,000 bytes）：`action=upload` 带 `request_id,content_type,data_base64`；`get/recover/publish/discard` 仅带 `media_id`。未知字段拒绝，不接收 URL、文件路径、actor 或客户端摘要。上传仅允许 1 byte–1 MiB JPEG/PNG/WebP；MIME/摘要核验不等于图片解码或内容安全扫描。输出仅含 `id,request_id,state,content_type,byte_size,sha256,published`，无私有读取 URL。MCP 在 `published=true` 时从配置 origin 构造公开 URL。
+仅接受无 Origin 的 POST JSON（最大 1,400,000 bytes）：`action=upload` 带 `request_id,content_type,data_base64`；`get/recover/publish/discard/delete/recover_delete` 仅带 `media_id`。未知字段拒绝，不接收 URL、文件路径、actor 或客户端摘要。上传仅允许 1 byte–1 MiB JPEG/PNG/WebP；MIME/摘要核验不等于图片解码或内容安全扫描。输出仅含 `id,request_id,state,content_type,byte_size,sha256,published,upload_status`，无私有读取 URL。MCP 在 `published=true` 时从配置 origin 构造公开 URL。
 
-先分配记录、写入私有对象并核验，再标记 staged；发布先提交永久 retained，再写公开对象、核验并标记 published。所有写入不可覆盖且不自动重试。未知结果先保留原身份并读取；分配响应丢失可明确使用同 request_id 和相同内容重放上传。发布与商品/分类关联不是一个事务，关联仍使用原版本化命令。discard 仅冻结 staged，不调用 Storage DELETE。旧公开媒体永不导入此通路，物理删除、signed preview 和大文件传输仍未实现。
+先分配记录、提交一次性上传许可，再写私有对象并核验，最后标记 staged/settled；发布先提交永久 retained，再公开写入、核验并标记 published。所有写入不可覆盖且不自动重试。未知结果先保留原身份并读取；分配响应丢失可明确使用同 request_id 和相同内容重放，pending 或终态仅返回状态，不再次上传。pending 无过期重置，读取恢复不能使上传 settled，无法确认的对象保守保留。发布与商品/分类关联不是一个事务，关联仍使用原版本化命令。
+
+discard 仅冻结 settled 的 staged 对象，不调用 Storage DELETE；delete 仅接受已冻结私有对象，执行固定 key 删除并确认不存在后标记 discarded。recover_delete 只查询缺失并提交确认，不发 DELETE；权限、bucket 或网络错误不能当作缺失。重复执行保留同一媒体身份，终态不再写入 Storage。旧公开媒体永不导入，signed preview 与大文件尚未实现。
+
+删除安全依赖所有上传从首次写入起使用一次性许可。不得混跑旧版上传执行器，也不得把旧记录补标 settled。本次只更新可重建基线，没有既有数据库迁移；已有部署须另行设计升级并获得授权，既有对象默认保留。
 
 ## 环境与认证
 

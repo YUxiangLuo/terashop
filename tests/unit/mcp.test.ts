@@ -17,6 +17,7 @@ test('managed media validates identities and output, routes explicit actions and
     id: crypto.randomUUID(),
     request_id: crypto.randomUUID(),
     state: 'staged',
+    upload_status: 'settled',
     content_type: 'image/png',
     byte_size: 3,
     sha256: 'a'.repeat(64),
@@ -24,7 +25,15 @@ test('managed media validates identities and output, routes explicit actions and
   };
   let result: unknown = media;
   const { backend, calls } = fakeBackend(() => Response.json(result));
-  for (const action of ['upload', 'get', 'recover', 'publish', 'discard'] as const) {
+  for (const action of [
+    'upload',
+    'get',
+    'recover',
+    'publish',
+    'discard',
+    'delete',
+    'recover_delete',
+  ] as const) {
     calls.length = 0;
     const args = action === 'upload' ? { request_id: media.request_id } : { media_id: media.id };
     expect(await backend.managedMedia(action, args)).toEqual({ media, url: null });
@@ -38,6 +47,7 @@ test('managed media validates identities and output, routes explicit actions and
       { ...media, secret: 'PRIVATE' },
       { ...media, id: crypto.randomUUID(), request_id: crypto.randomUUID() },
       { ...media, published: true },
+      { ...media, state: 'discarded', upload_status: 'pending' },
     ]) {
       result = invalid;
       calls.length = 0;
@@ -1844,7 +1854,7 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
     expect(readTools.length).toBe(52);
-    expect(writeTools.length).toBe(109);
+    expect(writeTools.length).toBe(111);
     expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
