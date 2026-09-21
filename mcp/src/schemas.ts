@@ -2,7 +2,7 @@ import * as z from 'zod/v4';
 
 export const id = z.uuid();
 export const version = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
-export const orderNumber = z
+const bigintString = z
   .string()
   .regex(/^(0|-?[1-9][0-9]{0,18})$/)
   .refine((value) => {
@@ -13,6 +13,7 @@ export const orderNumber = z
       return false;
     }
   }, 'Expected a canonical signed bigint decimal string');
+export const orderNumber = bigintString;
 export const adminOrderPage = z.strictObject({
   items: z
     .array(
@@ -164,7 +165,7 @@ export const orderLedger = z.strictObject({
   }),
   adjustments: z.array(
     z.strictObject({
-      id: z.number().int(),
+      id: bigintString,
       order_item_id: id.nullable(),
       kind: z.enum(['discount', 'shipping', 'tax', 'manual', 'rounding']),
       amount: z.number(),
@@ -256,7 +257,7 @@ export const returnDisposition = z.strictObject({
   receipt_line_id: id,
   quantity: quantity.positive(),
   disposition: z.enum(['restock', 'discard']),
-  inventory_movement_id: z.number().int().nullable(),
+  inventory_movement_id: bigintString.nullable(),
   note: z.string().nullable(),
   created_at: timestamp,
 });

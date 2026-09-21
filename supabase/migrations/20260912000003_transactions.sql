@@ -205,7 +205,7 @@ $$;
 CREATE FUNCTION private.return_disposition_json(p_row commerce.return_dispositions) RETURNS jsonb
     LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
   select jsonb_build_object('id',p_row.id,'receipt_line_id',p_row.receipt_line_id,'quantity',p_row.quantity,
-    'disposition',p_row.disposition,'inventory_movement_id',p_row.inventory_movement_id,'note',p_row.note,'created_at',p_row.created_at);
+    'disposition',p_row.disposition,'inventory_movement_id',p_row.inventory_movement_id::text,'note',p_row.note,'created_at',p_row.created_at);
 $$;
 
 CREATE FUNCTION private.return_receipt_json(p_row commerce.return_receipts) RETURNS jsonb
@@ -2165,7 +2165,7 @@ begin
     ),
     'adjustments', (
       select coalesce(jsonb_agg(jsonb_build_object(
-        'id', a.id, 'order_item_id', a.order_item_id, 'kind', a.kind,
+        'id', a.id::text, 'order_item_id', a.order_item_id, 'kind', a.kind,
         'amount', a.amount, 'currency', a.currency, 'label', a.label,
         'source_type', a.source_type, 'source_ref', a.source_ref,
         'created_at', a.created_at

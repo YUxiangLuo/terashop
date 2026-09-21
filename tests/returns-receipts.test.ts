@@ -2,8 +2,9 @@ import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { api, rpc, signup, makeAdmin, stockOf as stockAt, TEST_ADDRESS, type TestUser } from './helpers';
 import { checked, paymentFixture, fixtureOrder, fixtureIntent, settleIntent, paymentEvent, type PaymentFixture, type FixtureOrder, type FixtureIntent } from './payment-fixtures';
 import { heldTransactionRace, staleAfterCommit, testDatabase } from './database-concurrency';
+import { withRollback } from '../scripts/lib/transactions';
 
-interface Disposition { id: string; receipt_line_id: string; quantity: number; disposition: string; inventory_movement_id: number | null }
+interface Disposition { id: string; receipt_line_id: string; quantity: number; disposition: string; inventory_movement_id: string | null }
 interface Receipt { id: string; return_id: string; location_id: string; lines: Array<{ id: string; return_line_id: string; quantity: number; undisposed_quantity: number; dispositions: Disposition[] }> }
 interface Return { id: string; order_id: string; fulfillment_id: string; status: string; lines: Array<{ id: string; order_item_id: string; quantity: number; received_quantity: number; receivable_quantity: number }>; receipts: Receipt[] }
 interface Shipment { order: FixtureOrder; buyer: TestUser; id: string; intent?: FixtureIntent }
@@ -50,7 +51,7 @@ test('授权、收货、验收处置三步分离；只有 restock 增加可售�
   const receipt = await receive(r, 3); expect(await stockOf(fixture.sku)).toBe(before);
   expect(receipt.lines[0]).toMatchObject({ quantity: 3, undisposed_quantity: 3 });
   const restocked = await disposition(receipt, 2); const discarded = await disposition(receipt, 1, 'discard');
-  expect(typeof restocked.inventory_movement_id).toBe('number'); expect(discarded.inventory_movement_id).toBeNull();
+  expect(typeof restocked.inventory_movement_id).toBe('string'); expect(discarded.inventory_movement_id).toBeNull();
   expect(await stockOf(fixture.sku)).toBe(before + 2);
   expect((await summary(s)).returns[0].receipts[0].lines[0].undisposed_quantity).toBe(0);
   expect((await ledger(s)).balances).toMatchObject({ captured: 30, refunded: 0, is_balanced: true });
@@ -58,6 +59,28 @@ test('授权、收货、验收处置三步分离；只有 restock 增加可售�
   const events = await checked<Array<{ type: string }>>(api(`/rest/v1/order_events?order_id=eq.${s.order.id}&type=like.return.*&select=type&order=id.asc`, { service: true }));
   expect(events.map(e => e.type)).toEqual(['return.open','return.received','return.disposed','return.disposed']);
   const [outbox] = await database`select count(*)::int as n from commerce.outbox_events where aggregate_id=${s.order.id}::uuid and event_type like 'return.%'`; expect(outbox.n).toBe(4);
+});
+
+test('账本调整与退货处置 JSON 在 bigint 边界不丢精度，账本仍按数值排序', async () => {
+  const s = await shipped(1);
+  const r = await authorize(s), receipt = await receive(r), d = await disposition(receipt);
+  await withRollback(database, async tx => {
+    for (const value of ['9007199254740994', '9007199254740993', '9223372036854775807', '-9223372036854775808', '-2']) {
+      await tx`insert into commerce.order_adjustments(id,order_id,kind,amount,currency,idempotency_key)
+        overriding system value values (${value}::bigint,${s.order.id}::uuid,'manual',1,'USD',${crypto.randomUUID()})`;
+      // Exercise the shared serializer on a typed row without changing immutable stock facts or sequences.
+      const [row] = await tx`select private.return_disposition_json(jsonb_populate_record(null::commerce.return_dispositions,
+        to_jsonb(d) || jsonb_build_object('inventory_movement_id',${value}::bigint))) dto
+        from commerce.return_dispositions d where d.id=${d.id}::uuid`;
+      expect(row.dto.inventory_movement_id).toBe(value);
+    }
+    await tx`select set_config('request.jwt.claims',${claims()},true)`;
+    await tx`set local role authenticated`;
+    const [row] = await tx`select public.get_order_ledger(${s.order.id}::uuid) dto`;
+    expect(row.dto.adjustments.map((a: { id: string }) => a.id)).toEqual([
+      '-9223372036854775808', '-2', '9007199254740993', '9007199254740994', '9223372036854775807',
+    ]);
+  });
 });
 
 test('退货引用单次实际发货行：拒绝未发货、已取消发货、跨单/跨发货商品和超量授权', async () => {

@@ -1,6 +1,12 @@
 import { expect, test } from 'bun:test';
 import { AdminBackend } from '../../mcp/src/backend';
-import { productChanges, uploadProductMedia, paypalRefund } from '../../mcp/src/schemas';
+import {
+  productChanges,
+  uploadProductMedia,
+  paypalRefund,
+  orderLedger,
+  returnDisposition,
+} from '../../mcp/src/schemas';
 import { mcpSession, toolData } from '../support/mcp';
 
 const config = { url: 'http://127.0.0.1:54321', anonKey: 'public-key', accessToken: 'private-session' };
@@ -25,8 +31,8 @@ test('退货嵌套合同保留收货与处置，拒绝审计字段泄漏；所�
     id,
     receipt_line_id: id,
     quantity: 1,
-    disposition: 'discard',
-    inventory_movement_id: null,
+    disposition: 'restock',
+    inventory_movement_id: '9007199254740993',
     note: null,
     created_at: at,
   };
@@ -105,7 +111,7 @@ test('退货嵌套合同保留收货与处置，拒绝审计字段泄漏；所�
       ],
       [
         'dispose_return_receipt',
-        { receipt_line_id: id, quantity: 1, disposition: 'discard', idempotency_key: 'retained' },
+        { receipt_line_id: id, quantity: 1, disposition: 'restock', idempotency_key: 'retained' },
         disposition,
         true,
       ],
@@ -158,7 +164,7 @@ test('退货嵌套合同保留收货与处置，拒绝审计字段泄漏；所�
   }
 });
 
-test('账本保留负调整和既有渠道引用，但拒绝额外支付秘密及不安全整数', async () => {
+test('账本保留负调整和既有渠道引用，但拒绝额外支付秘密及数值型 ID', async () => {
   const id = crypto.randomUUID(),
     at = '2026-09-20T11:12:13.123456+00:00';
   const ledger = {
@@ -176,7 +182,7 @@ test('账本保留负调整和既有渠道引用，但拒绝额外支付秘密�
     balances: { adjustment_total: -2, captured: 10, refunded: 0, net_paid: 10, is_balanced: true },
     adjustments: [
       {
-        id: 1,
+        id: '9007199254740993',
         order_item_id: null,
         kind: 'discount',
         amount: -2,
@@ -231,6 +237,40 @@ test('账本保留负调整和既有渠道引用，但拒绝额外支付秘密�
   } finally {
     await session.close();
   }
+});
+
+test('账本与退货库存流水 ID 使用精确规范 bigint 字符串，拒绝数值和越界', () => {
+  const schemas = [
+    orderLedger.shape.adjustments.element.shape.id,
+    returnDisposition.shape.inventory_movement_id,
+  ];
+  for (const schema of schemas) {
+    for (const value of [
+      '0',
+      '1',
+      '9007199254740993',
+      '9007199254740994',
+      '-9223372036854775808',
+      '9223372036854775807',
+    ])
+      expect(schema.parse(value)).toBe(value);
+    for (const value of [
+      1,
+      9007199254740992,
+      '01',
+      '-0',
+      '+1',
+      '1e3',
+      '1.0',
+      '1\n',
+      ' 1',
+      '9223372036854775808',
+      '-9223372036854775809',
+    ])
+      expect(schema.safeParse(value).success).toBe(false);
+  }
+  expect(returnDisposition.shape.inventory_movement_id.parse(null)).toBeNull();
+  expect(orderLedger.shape.adjustments.element.shape.id.safeParse(null).success).toBe(false);
 });
 
 test('PayPal 明确范围、JWT 透传及返回白名单；Edge 失败/畸形成功均不可盲目重试', async () => {
