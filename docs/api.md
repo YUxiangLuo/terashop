@@ -867,6 +867,14 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 
 `private.mcp_grants` 不向任何 API 角色开放直接读写，不保存 access/refresh token、密码或邮箱；撤销记录不删除。用户 UUID 无级联删除关系，防止删除账户同时丢失阻止旧绑定复用的记录。授权元数据仅支持不可变批准及终态撤销，不支持 scope 原地升级/降级、恢复或批量撤销；凭据密文使用下述独立接口。SQL 仍为可重建开发基线，不是已有部署的升级脚本。
 
+## MCP 下游会话归属（受信服务内部接口）
+
+`mcp_bind_downstream_session(p_binding,p_grant_id,p_user_id,p_session_id)` 仅 service_role 执行，不注册 MCP 工具。先 resolve 完整上游 binding 并锁定 grant，核对 grant/user UUID 及当前非匿名管理员；再锁定 `auth.sessions` 中与该用户匹配的会话，保存其 UUID。返回 `{grant_id,session_id}`，不返回 token。这里的 session ID 是下游 Supabase Auth UUID，不是 binding 中的上游 session_id。
+
+每个 grant 最多绑定一个下游会话，每个下游会话在本数据库中只能归属一个 grant（不因上游 client/resource/project 不同而放宽）。相同绑定可重放；更换会话或被其他 grant 占用返回 `PT409`，grant/用户不匹配为 `PT404`，无效会话、撤销或降权为 `42501`，空 UUID 为 `22023`；旧 RR 快照可能返回 `40001`。并发独占依靠数据库唯一约束，不依靠进程缓存。撤销保留归属；Auth 会话删除也不会删除或释放记录。重新授权须使用新的上游绑定及独立下游会话。
+
+**仅实现归属记录，尚未接入凭据存取或刷新准入。** 此接口只核对会话存在且属于该用户，不证明调用方持有它、不验证 session 的超时策略、access/refresh token 配对或用户同意。受信关联流程必须从已验证的登录结果取得 session ID，不能从客户端参数或未经验证的 JWT claim 取值。现有宿主仍没有该关联流程，不能据此启用真实刷新。
+
 ## MCP 下游凭据密文（受信服务内部接口）
 
 `mcp_credential_command(p_action,p_binding,p_grant_id,p_user_id,p_expected_revision?,p_envelope?,p_refresh_id?)` 仅 service_role 执行，不注册 MCP 工具；底表 `private.mcp_credentials` 启用 RLS，所有 API 角色均无直接读写权限。复用 grant resolve 验证完整 binding、active 状态和当前非匿名管理员，再核对 grant/user UUID；不代替上游 token 验证或可信账号关联。

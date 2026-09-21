@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { checked, command, rpc, signup, makeAdmin, type TestUser } from './helpers';
+import { api, checked, command, rpc, signup, makeAdmin, type TestUser } from './helpers';
 import { testDatabase, heldTransactionRace, staleAfterCommit } from './database-concurrency';
 
 const db = testDatabase();
@@ -187,5 +187,113 @@ test('concurrent creation deduplicates; revocation blocks replay and stale snaps
       isolation,
     );
     expect(stale.error).toMatchObject({ errno: isolation === 'repeatable read' ? '40001' : '42501' });
+  }
+});
+
+async function downstreamSession(user = admin): Promise<string> {
+  const login = await checked<{ access_token: string }>(
+    api('/auth/v1/token?grant_type=password', {
+      method: 'POST',
+      body: { email: user.email, password: 'password123' },
+    }),
+  );
+  // Test fixture only: read the session ID from a response issued by local Auth.
+  return JSON.parse(Buffer.from(login.access_token.split('.')[1]!, 'base64url').toString()).session_id;
+}
+
+async function sessionBinding(sessionId: string, user = admin) {
+  const identity = binding();
+  const grant = await create(identity, user.userId);
+  const args = { p_binding: identity, p_grant_id: grant.id, p_user_id: user.userId, p_session_id: sessionId };
+  const bind = (extra: Record<string, unknown> = {}) =>
+    rpc('mcp_bind_downstream_session', { ...args, ...extra }, undefined, true);
+  return { identity, grant, args, bind };
+}
+
+test('downstream session ownership is service-only, identity-checked, immutable and retained after revoke/logout', async () => {
+  const session = await downstreamSession();
+  const f = await sessionBinding(session);
+  for (const token of [undefined, admin.token])
+    expect((await rpc('mcp_bind_downstream_session', f.args, token)).data).toMatchObject({ code: '42501' });
+  expect((await f.bind({ p_session_id: null })).data).toMatchObject({ code: '22023' });
+  expect((await f.bind({ p_grant_id: crypto.randomUUID() })).data).toMatchObject({ code: 'PT404' });
+  expect((await f.bind({ p_user_id: other.userId })).data).toMatchObject({ code: 'PT404' });
+  expect((await f.bind({ p_binding: { ...f.identity, client_id: 'unknown' } })).data).toMatchObject({
+    code: 'PT404',
+  });
+  expect((await f.bind({ p_session_id: crypto.randomUUID() })).data).toMatchObject({ code: '42501' });
+  expect((await f.bind({ p_session_id: await downstreamSession(other) })).data).toMatchObject({
+    code: '42501',
+  });
+  const expected = { grant_id: f.grant.id, session_id: session };
+  expect((await f.bind()).data).toEqual(expected);
+  expect((await f.bind()).data).toEqual(expected);
+  expect((await f.bind({ p_session_id: await downstreamSession() })).data).toMatchObject({ code: 'PT409' });
+  const competitor = await sessionBinding(session);
+  expect((await competitor.bind()).data).toMatchObject({ code: 'PT409' });
+  await checked(call('revoke', f.identity, { p_grant_id: f.grant.id }));
+  expect((await f.bind()).data).toMatchObject({ code: '42501' });
+  expect((await competitor.bind()).data).toMatchObject({ code: 'PT409' });
+  await db`delete from auth.sessions where id=${session}::uuid`;
+  const [retained] =
+    await db`select downstream_session_id from private.mcp_grants where id=${f.grant.id}::uuid`;
+  expect(retained.downstream_session_id).toBe(session);
+  expect((await competitor.bind()).data).toMatchObject({ code: '42501' });
+  const independent = await downstreamSession();
+  expect((await competitor.bind({ p_session_id: independent })).data).toEqual({
+    grant_id: competitor.grant.id,
+    session_id: independent,
+  });
+});
+
+test('two grants racing for one downstream session have only one owner', async () => {
+  const session = await downstreamSession();
+  const a = await sessionBinding(session),
+    b = await sessionBinding(session);
+  const loser = await heldTransactionRace(
+    db,
+    async (sql) => {
+      await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+      await sql`select public.mcp_bind_downstream_session(${JSON.stringify(a.identity)}::text::jsonb,${a.grant.id}::uuid,${admin.userId}::uuid,${session}::uuid)`;
+    },
+    () => b.bind(),
+  );
+  expect(loser.data).toMatchObject({ code: 'PT409' });
+  const rows = await db`select id from private.mcp_grants where downstream_session_id=${session}::uuid`;
+  expect(rows).toHaveLength(1);
+  expect(rows[0].id).toBe(a.grant.id);
+});
+
+test('revoke, demotion and stale snapshots cannot establish new downstream ownership', async () => {
+  const session = await downstreamSession();
+  const f = await sessionBinding(session);
+  const denied = await heldTransactionRace(
+    db,
+    async (sql) => {
+      await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+      await sql`select public.mcp_grant_command('revoke',${JSON.stringify(f.identity)}::text::jsonb,null,null,${f.grant.id}::uuid)`;
+    },
+    () => f.bind(),
+  );
+  expect(denied.data).toMatchObject({ code: '42501' });
+  for (const isolation of ['read committed', 'repeatable read'] as const) {
+    const current = await sessionBinding(session);
+    const stale = await staleAfterCommit(
+      db,
+      async (sql) => {
+        await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+        return sql`select public.mcp_bind_downstream_session(${JSON.stringify(current.identity)}::text::jsonb,${current.grant.id}::uuid,${admin.userId}::uuid,${session}::uuid)`;
+      },
+      () => checked(call('revoke', current.identity, { p_grant_id: current.grant.id })),
+      isolation,
+    );
+    expect(stale.error).toMatchObject({ errno: isolation === 'repeatable read' ? '40001' : '42501' });
+  }
+  const demoted = await sessionBinding(session);
+  await db`update public.profiles set role='customer' where id=${admin.userId}::uuid`;
+  try {
+    expect((await demoted.bind()).data).toMatchObject({ code: '42501' });
+  } finally {
+    await makeAdmin(admin.userId);
   }
 });

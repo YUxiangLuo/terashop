@@ -188,6 +188,8 @@ grant 元数据已通过私有 PostgreSQL 表和 service-only `mcp_grant_command
 
 刷新准入原语：密文 RPC 已增加 claim_refresh/complete_refresh。同一 grant 领取后持久阻塞普通读写及再次领取，只有原回执和版本可提交下一版密文；无到期接管或自动重试，无法恢复须撤销并重新授权。数据库测试覆盖并发领取、RC/RR 旧快照、回执跨 grant/重放及撤销后完成拒绝。尚未接入宿主或调用真实刷新端点；多个 grant 共用下游 Auth 会话不受该锁保护，真实刷新前须落实独占会话或共同所有权。完整合同见 [API](../docs/api.md#mcp-下游凭据密文受信服务内部接口)。
 
+下游会话归属原语：service-only [mcp_bind_downstream_session](../docs/api.md#mcp-下游会话归属受信服务内部接口) 将真实 Auth session UUID 不可变地绑定到一个 grant，拒绝同一会话跨 grant 复用，撤销/会话删除仍保留归属。`tests/mcp-grants.test.ts` 使用本地真实登录验证独占竞争及身份/撤销检查。尚未接入宿主凭据方法或刷新准入；不证明 token 配对、会话有效性或用户同意。下一步将可信登录取得的 session 与密文绑定后再强制执行刷新归属检查，不启用真实刷新。
+
 独立授权候选实验：`bun test tests/unit/oauth-provider.test.ts`。固定开发依赖 `oidc-provider 9.12.2`，只在回环随机端口验证 Code/S256、resource/aud、业务 scopes、刷新轮换和 grant 撤销，不连接真实账号或 Supabase。已验证错误 resource 的刷新可能消耗旧 token、重试导致 grant 撤销；JWT 签名仍有效不代表 grant 仍有效。库明确警告 Bun 不受官方支持，内存 adapter 和自动同意仅用于实验；尚未选定生产授权服务。下一批优先核对独立部署的受支持方案，再推进持久化和逐用户凭据代理，不将该 fixture 改成远程登录入口。详见 ADR-027 的实验记录。
 
 ```bash

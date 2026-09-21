@@ -3310,6 +3310,44 @@ begin
 end;
 $$;
 
+-- Ownership metadata only. The trusted linking flow must independently prove
+-- consent and that its access/refresh pair belongs to this downstream session.
+CREATE FUNCTION public.mcp_bind_downstream_session(p_binding jsonb, p_grant_id uuid,
+    p_user_id uuid, p_session_id uuid)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_grant jsonb;
+  v_session_id uuid;
+begin
+  if auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='trusted authorization host required';
+  end if;
+  if p_grant_id is null or p_user_id is null or p_session_id is null then
+    raise exception using errcode='22023', message='invalid downstream session binding';
+  end if;
+  v_grant := public.mcp_grant_command('resolve',p_binding);
+  if (v_grant->>'id')::uuid<>p_grant_id or (v_grant->>'user_id')::uuid<>p_user_id then
+    raise exception using errcode='PT404', message='grant not found';
+  end if;
+  select downstream_session_id into v_session_id from private.mcp_grants where id=p_grant_id;
+  if v_session_id is not null and v_session_id<>p_session_id then
+    raise exception using errcode='PT409', message='downstream session binding cannot be changed';
+  end if;
+  -- Grant lock precedes Auth session lock. This validates existence/ownership,
+  -- not refresh-token validity, inactivity limits, or ownership of supplied JWTs.
+  perform 1 from auth.sessions where id=p_session_id and user_id=p_user_id for share;
+  if not found then
+    raise exception using errcode='42501', message='downstream session is not authorized';
+  end if;
+  begin
+    update private.mcp_grants set downstream_session_id=p_session_id where id=p_grant_id;
+  exception when unique_violation then
+    raise exception using errcode='PT409', message='downstream session already owned';
+  end;
+  return jsonb_build_object('grant_id',p_grant_id,'session_id',p_session_id);
+end;
+$$;
+
 CREATE FUNCTION public.mcp_credential_command(p_action text, p_binding jsonb, p_grant_id uuid,
     p_user_id uuid, p_expected_revision bigint DEFAULT NULL, p_envelope jsonb DEFAULT NULL,
     p_refresh_id uuid DEFAULT NULL)

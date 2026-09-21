@@ -470,6 +470,10 @@ grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保
 
 此锁只协调同一 grant，不协调多个 grant 共用下游 Auth 会话。当前联合 fixture 的同一用户两个 grant 共用会话，只验证身份隔离与持久化，没有下游刷新；启用刷新前必须落实独占下游会话或共同所有权，不能把这些 fixture 当成刷新架构。数据库测试覆盖领取竞争、RC/RR 旧快照、重连后的待完成状态、回执重放/跨 grant、阻止普通读写及撤销后完成拒绝。可信关联、宿主刷新代理与生产恢复仍未实现。
 
+独占会话归属先落实为 grant 上的唯一 downstream_session_id 和 service-only [mcp_bind_downstream_session](api.md#mcp-下游会话归属受信服务内部接口)。复用完整 grant 解析及管理员检查，并核对 auth.sessions 的 user_id；会话仅能绑定一次，不能改绑，多个 grant 竞争由唯一约束裁决。撤销和 Auth 会话删除都保留归属，不以可回收的凭据行承载所有权。测试使用本地 Auth 登录创建独立会话，验证跨管理员拒绝、同用户跨 grant 竞争、改绑拒绝、撤销/会话删除后的记录保留以及 RC/RR 旧快照拒绝。
+
+这一批只是归属存储原语，尚未接入宿主或约束密文 read/write/claim_refresh。数据库验证会话存在和用户归属，不证明持有凭据、refresh token 配对、会话超时策略或同意。后续须把可信登录得到的 session 与凭据绑定，并在刷新准入时强制核对；不能将未经验证 JWT 中的 session_id 当作已证明身份，也不能仅凭该接口存在就启用真实刷新。
+
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
 3. **受保护 HTTP transport。** 接 metadata/challenge、SDK transport 和逐请求 context；验证错误 issuer/audience、过期 token、缺失 scope、匿名/普通客户、scope 降级及直接调用隐藏工具全部拒绝。

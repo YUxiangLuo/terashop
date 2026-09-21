@@ -56,6 +56,8 @@ CREATE TABLE private.mcp_grants (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   binding jsonb NOT NULL UNIQUE CHECK (jsonb_typeof(binding)='object' AND octet_length(binding::text)<=1800),
   user_id uuid NOT NULL,
+  -- No Auth FK: logout/deletion must not release a previously owned session.
+  downstream_session_id uuid UNIQUE,
   scopes text[] NOT NULL,
   state text NOT NULL DEFAULT 'active' CHECK (state IN ('active','revoked')),
   version integer NOT NULL DEFAULT 1,

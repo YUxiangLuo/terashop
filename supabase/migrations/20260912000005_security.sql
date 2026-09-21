@@ -824,6 +824,9 @@ GRANT EXECUTE ON FUNCTION public.list_admin_managed_media(integer,uuid,text,text
 REVOKE ALL ON FUNCTION public.mcp_grant_command(text,jsonb,uuid,text[],uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.mcp_grant_command(text,jsonb,uuid,text[],uuid) TO service_role;
 
+REVOKE ALL ON FUNCTION public.mcp_bind_downstream_session(jsonb,uuid,uuid,uuid) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.mcp_bind_downstream_session(jsonb,uuid,uuid,uuid) TO service_role;
+
 REVOKE ALL ON FUNCTION public.mcp_credential_command(text,jsonb,uuid,uuid,bigint,jsonb,uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.mcp_credential_command(text,jsonb,uuid,uuid,bigint,jsonb,uuid) TO service_role;
 

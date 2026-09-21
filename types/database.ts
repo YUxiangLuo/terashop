@@ -2232,6 +2232,15 @@ export type Database = {
         }
         Returns: Json
       }
+      mcp_bind_downstream_session: {
+        Args: {
+          p_binding: Json
+          p_grant_id: string
+          p_session_id: string
+          p_user_id: string
+        }
+        Returns: Json
+      }
       mcp_credential_command: {
         Args: {
           p_action: string
