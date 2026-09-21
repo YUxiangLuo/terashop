@@ -24,6 +24,139 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('分类、配送和税率输出保留配置边界，拒绝字段漂移且写失败不重试', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const category = {
+    id,
+    slug: 'category',
+    name: 'Category',
+    description: '',
+    parent_id: null,
+    image_url: null,
+    position: -2147483648,
+    is_active: false,
+    created_at: at,
+    updated_at: at,
+  };
+  const shipping = {
+    id,
+    revision: 2,
+    name: 'Shipping',
+    description: '',
+    countries: [],
+    price: 1.25,
+    free_above: null,
+    estimated_days: '',
+    position: -1,
+    is_active: false,
+    created_at: at,
+    updated_at: at,
+  };
+  const tax = {
+    id,
+    revision: 2,
+    name: 'Tax',
+    country: '*',
+    rate: 0.1325,
+    include_shipping: true,
+    is_active: false,
+    created_at: at,
+  };
+  const groups = [
+    [
+      'get_admin_category',
+      'list_admin_categories',
+      'create_category',
+      'update_category',
+      { category_id: id },
+      { slug: 'category', name: 'Category' },
+      { expected_updated_at: at },
+      category,
+    ],
+    [
+      'get_admin_shipping_method',
+      'list_admin_shipping_methods',
+      'create_shipping_method',
+      'update_shipping_method',
+      { shipping_method_id: id },
+      { name: 'Shipping', price: 1.25 },
+      { expected_revision: 1 },
+      shipping,
+    ],
+    [
+      'get_admin_tax_rate',
+      'list_admin_tax_rates',
+      'create_tax_rate',
+      'update_tax_rate',
+      { tax_rate_id: id },
+      { name: 'Tax', country: '*', rate: 0.1325 },
+      { expected_revision: 1 },
+      tax,
+    ],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [get, list, create, update, identity, changes, token, row] of groups) {
+      for (const [name, args, expected, mutation] of [
+        [get, identity, row, false],
+        [list, {}, { items: [row], next_cursor: id }, false],
+        [create, { ...identity, changes }, row, true],
+        [update, { ...identity, ...token, changes: {} }, row, true],
+      ] as const) {
+        response = expected;
+        expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+        for (const invalid of [{ ...expected, secret: 'SECRET' }, {}]) {
+          response = invalid;
+          const before = calls.length;
+          const failed = await session.client.callTool({ name, arguments: args });
+          expect(failed.isError).toBe(true);
+          expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+            code: 'INVALID_BACKEND_RESPONSE',
+            outcome_unknown: mutation,
+          });
+          expect(JSON.stringify(failed)).not.toContain('SECRET');
+          expect(calls.length - before).toBe(3);
+        }
+      }
+      response = null;
+      expect(await toolData(session.client, get, identity)).toBeNull();
+      response = { items: [{ ...row, secret: 'SECRET' }], next_cursor: null };
+      const failed = await session.client.callTool({ name: list, arguments: {} });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+    for (const free_above of [0, -1.25]) {
+      response = { ...shipping, free_above };
+      expect(
+        await toolData<typeof response>(session.client, 'get_admin_shipping_method', {
+          shipping_method_id: id,
+        }),
+      ).toEqual(response);
+    }
+    for (const rate of [0, 1]) {
+      response = { ...tax, rate };
+      expect(
+        await toolData<typeof response>(session.client, 'get_admin_tax_rate', { tax_rate_id: id }),
+      ).toEqual(response);
+    }
+    for (const [name, args, invalid] of [
+      ['get_admin_category', { category_id: id }, { ...category, position: -2147483649 }],
+      ['get_admin_shipping_method', { shipping_method_id: id }, { ...shipping, countries: null }],
+      ['get_admin_shipping_method', { shipping_method_id: id }, { ...shipping, price: '1.25' }],
+      ['get_admin_tax_rate', { tax_rate_id: id }, { ...tax, rate: 13.25 }],
+      ['get_admin_tax_rate', { tax_rate_id: id }, { ...tax, revision: 0 }],
+    ] as const) {
+      response = invalid;
+      expect((await session.client.callTool({ name, arguments: args })).isError).toBe(true);
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('订单统计、导出和店铺设置输出保持精确合同，拒绝个人信息及畸形写结果', async () => {
   const id = crypto.randomUUID(),
     at = '2026-09-20T11:12:13.123456+00:00';

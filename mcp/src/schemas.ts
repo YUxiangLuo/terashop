@@ -818,6 +818,55 @@ export const categoryChanges = z.strictObject({
   position: position.optional(),
   is_active: z.boolean().optional(),
 });
+export const categoryResult = z.strictObject({
+  id,
+  slug: z.string(),
+  name: z.string(),
+  description: z.string(),
+  parent_id: id.nullable(),
+  image_url: z.string().nullable(),
+  position,
+  is_active: z.boolean(),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+export const shippingMethodResult = z.strictObject({
+  id,
+  revision: version,
+  name: z.string(),
+  description: z.string(),
+  countries: z.array(z.string().regex(/^[A-Z]{2}$/)),
+  price: shippingMoney,
+  // Historical table rows can have a negative threshold; do not reinterpret it.
+  free_above: z.number().min(-9999999999.99).max(9999999999.99).nullable(),
+  estimated_days: z.string(),
+  position,
+  is_active: z.boolean(),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+export const taxRateResult = z.strictObject({
+  id,
+  revision: version,
+  name: z.string(),
+  country: z.string().regex(/^(\*|[A-Z]{2})$/),
+  rate: taxFraction,
+  include_shipping: z.boolean(),
+  is_active: z.boolean(),
+  created_at: timestamp,
+});
+export const categoryPage = z.strictObject({
+  items: z.array(categoryResult).max(100),
+  next_cursor: id.nullable(),
+});
+export const shippingMethodPage = z.strictObject({
+  items: z.array(shippingMethodResult).max(100),
+  next_cursor: id.nullable(),
+});
+export const taxRatePage = z.strictObject({
+  items: z.array(taxRateResult).max(100),
+  next_cursor: id.nullable(),
+});
 const deletion = z.strictObject({ id, delete: z.literal(true) });
 const resources = <S extends z.ZodType>(schema: S) =>
   z
