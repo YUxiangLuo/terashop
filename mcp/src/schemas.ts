@@ -32,6 +32,186 @@ export const adminOrderPage = z.strictObject({
     .max(100),
   next_cursor: orderNumber.nullable(),
 });
+
+const timestamp = z.iso.datetime({ offset: true });
+const money = z
+  .number()
+  .nonnegative()
+  .max(Number.MAX_SAFE_INTEGER / 100);
+const totals = {
+  subtotal: money,
+  discount_total: money,
+  shipping_total: money,
+  tax_total: money,
+  total: money,
+};
+// These are stored JSON snapshots, not new input commands. Keep their contents
+// unchanged; fixed DTO envelopes and relational rows below remain strict.
+const jsonObject = z.record(z.string(), z.json());
+export const orderResult = adminOrderPage.shape.items.element.extend({
+  ...totals,
+  tax_context: jsonObject,
+  shipping_address: jsonObject,
+  billing_address: jsonObject.nullable(),
+  shipping_method_id: id.nullable(),
+  shipping_method_name: z.string().nullable(),
+  discount_code: z.string().nullable(),
+  customer_note: z.string().nullable(),
+  cancel_reason: z.string().nullable(),
+  paid_at: timestamp.nullable(),
+  payment_expires_at: timestamp,
+  cancelled_at: timestamp.nullable(),
+  completed_at: timestamp.nullable(),
+  updated_at: timestamp,
+});
+export const adminOrderResult = orderResult.extend({ admin_note: z.string().nullable() });
+const discountAllocation = z.strictObject({ promotion_id: id, label: z.string(), amount: money });
+const taxLine = z.strictObject({
+  id,
+  tax_rate_id: id,
+  name: z.string(),
+  country: z.string(),
+  rate: z.number().min(0).max(1),
+  taxable_amount: money,
+  amount: money,
+});
+const allocations = {
+  discount_allocations: z.array(discountAllocation),
+  tax_lines: z.array(taxLine),
+};
+export const orderPricing = z.strictObject({
+  order_id: id,
+  currency: z.literal('USD'),
+  ...totals,
+  tax_context: jsonObject,
+  shipping_method_id: id.nullable(),
+  shipping_method_name: z.string().nullable(),
+  lines: z.array(
+    z.strictObject({
+      id,
+      line_key: z.string(),
+      variant_id: id.nullable(),
+      product_id: id.nullable(),
+      name: z.string(),
+      sku: z.string().nullable(),
+      variant_title: z.string(),
+      options: z.json(),
+      attributes: z.record(z.string(), z.string()),
+      unit_price: money,
+      quantity: z.number().int().positive(),
+      total: money,
+      discount_total: money,
+      line_total: money,
+      ...allocations,
+    }),
+  ),
+  shipping_line: z
+    .strictObject({
+      id,
+      shipping_method_id: id.nullable(),
+      name: z.string(),
+      gross_amount: money,
+      discount_total: money,
+      threshold_discount: money,
+      total: money,
+      policy: jsonObject,
+      ...allocations,
+    })
+    .nullable(),
+  promotions: z.array(
+    z.strictObject({
+      promotion_id: id,
+      name: z.string(),
+      code: z.string().nullable(),
+      amount: money,
+      snapshot: z.json(),
+    }),
+  ),
+});
+export const adminOrderDetail = adminOrderResult
+  .extend({
+    pricing: orderPricing,
+    fulfillments: z.array(
+      z.strictObject({
+        id,
+        order_id: id,
+        version,
+        status: z.enum(['pending', 'shipped', 'delivered', 'cancelled']),
+        carrier: z.string(),
+        tracking_number: z.string(),
+        tracking_url: z.string().nullable(),
+        shipped_at: timestamp.nullable(),
+        delivered_at: timestamp.nullable(),
+        created_at: timestamp,
+        lines: z.array(z.strictObject({ order_item_id: id, quantity: z.number().int().positive() })),
+      }),
+    ),
+  })
+  .nullable();
+
+const decimalAmount = z.string().regex(/^(0|[1-9][0-9]*)\.[0-9]{2}$/);
+export const paymentSummary = z.strictObject({
+  start_at: timestamp,
+  end_at: timestamp,
+  currency: z.literal('USD'),
+  time_basis: z.literal('payment_transactions.created_at'),
+  capture_count: z.string().regex(/^(0|[1-9][0-9]*)$/),
+  refund_count: z.string().regex(/^(0|[1-9][0-9]*)$/),
+  captured_amount: decimalAmount,
+  refunded_amount: decimalAmount,
+  net_amount: z.string().regex(/^-?(0|[1-9][0-9]*)\.[0-9]{2}$/),
+});
+const paymentOperation = z.strictObject({
+  id,
+  order_id: id,
+  provider: z.literal('paypal'),
+  amount: decimalAmount,
+  currency: z.literal('USD'),
+  created_at: timestamp,
+});
+const polling = {
+  last_provider_poll_at: timestamp.nullable(),
+  provider_poll_attempts: z.number().int().nonnegative(),
+  updated_at: timestamp,
+};
+const paymentIntent = paymentOperation.extend({
+  payment_method: z.enum(['paypal', 'card']),
+  status: z.enum(['requires_action', 'processing', 'succeeded', 'failed', 'cancelled']),
+  expires_at: timestamp,
+  provider_capture_requested_at: timestamp.nullable(),
+  ...polling,
+});
+const refundRequest = paymentOperation.extend({
+  parent_transaction_id: id,
+  status: z.enum(['requested', 'submitted', 'processing', 'succeeded', 'failed', 'cancelled']),
+  source: z.enum(['items', 'shipping', 'custom_amount', 'remaining']),
+  restock_requested: z.boolean(),
+  result_refund_id: id.nullable(),
+  has_error: z.boolean(),
+  submitted_at: timestamp.nullable(),
+  processed_at: timestamp.nullable(),
+  provider_refund_requested_at: timestamp.nullable(),
+  ...polling,
+});
+const moneyMovement = paymentOperation.extend({
+  // Unmatched provider facts may be non-USD and have eight fractional digits.
+  amount: z.string().regex(/^(0|[1-9][0-9]*)\.[0-9]{8}$/),
+  currency: z.string().regex(/^[A-Z]{3}$/),
+  provider_event_id: id,
+  kind: z.enum(['capture', 'refund']),
+  payment_intent_id: id.nullable(),
+  refund_request_id: id.nullable(),
+  payment_transaction_id: id.nullable(),
+  reconciliation_status: z.enum(['unmatched', 'matched', 'action_required']),
+  has_error: z.boolean(),
+  matched_at: timestamp.nullable(),
+});
+const paymentPage = z.strictObject({ order_id: id, next_cursor: id.nullable() });
+export const paymentOperations = z.discriminatedUnion('kind', [
+  paymentPage.extend({ kind: z.literal('payment_intent'), items: z.array(paymentIntent).max(100) }),
+  paymentPage.extend({ kind: z.literal('refund_request'), items: z.array(refundRequest).max(100) }),
+  paymentPage.extend({ kind: z.literal('money_movement'), items: z.array(moneyMovement).max(100) }),
+]);
 // Preserve key identity across clients. PostgreSQL owns btrim and character
 // length validation; JS trim/UTF-16 length have different semantics.
 export const key = z
@@ -124,10 +304,6 @@ export const itemQuantities = z
   .array(z.strictObject({ order_item_id: id, quantity: version }))
   .min(1)
   .max(100);
-const money = z
-  .number()
-  .nonnegative()
-  .max(Number.MAX_SAFE_INTEGER / 100);
 const position = z.number().int().min(-2147483648).max(2147483647);
 export const metafieldType = z.enum([
   'text',

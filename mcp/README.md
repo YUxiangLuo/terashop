@@ -70,7 +70,8 @@
 | 运维 | `list_admin_outbox_events`、`list_admin_payment_provider_events`、`list_admin_reconciliation_issues`、`get_admin_operations_summary`、`redrive_outbox_event`；全店未对账资金及分组件区间积压概览，仅安全诊断，不开放资金重放或宣称整体健康 |
 | 导出 | `export_admin_orders`；固定字段 JSON 分页，不含客户联系方式，订单号/金额为字符串；不写文件或外发，不保证跨页冻结快照 |
 
-- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。`list_admin_orders` 已使用逐字段严格输出 schema 并在返回前验证，畸形结果仅返回脱敏 `INVALID_BACKEND_RESPONSE`；其他工具的 `outputSchema` 仍约束统一 JSON 信封，后续逐领域收紧，不声称全部 DTO 已完成字段校验。
+- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。`list_admin_orders`、`get_admin_order`、`get_order_pricing`、`cancel_order`、`mark_order_paid`、`refund_order`、`list_admin_payment_operations`、`get_admin_payment_summary` 已使用逐字段输出 schema，固定结构和嵌套关系行拒绝未知字段。订单地址、选项、政策与促销等 JSON 快照仍按既有动态内容合同保留；schema 不重算金额或替代数据库业务校验。其他工具的 `outputSchema` 仍约束统一 JSON 信封，后续逐领域收紧。
+- 畸形输出仅返回脱敏 `INVALID_BACKEND_RESPONSE`，不透出失败字段、校验详情或原始响应。写工具发生输出校验失败时仍可能已经执行，必须标记 `outcome_unknown:true`，不能自动重试或换幂等键。支付操作区分意图、退款请求和资金事实；保留非 USD 外部资金的八位小数字符串，以及汇总中合法的负净额。
 - 订单列表、详情、账本和手工收款返回的订单号以及列表游标均为精确十进制字符串；`list_admin_orders.after_order_number` 只接受规范 bigint 字符串，原样传回 `next_cursor`，不得转为 Number。数据库按数值倒序，不按字符串排序；这是对旧数值型合同的替换。`mark_order_paid` 改为显式 JSON DTO，保留原有字段（含 admin_note），首次执行与重放一致。
 - 工具执行错误返回 `isError:true`，文本 JSON 含 `code/outcome_unknown/guidance`。不返回 SQL message/detail/hint 或原始异常，以免泄漏 PII/凭据。未知工具由 SDK 返回协议错误；输入 schema 错误由 SDK 返回校验错误。
 - 不自动重试写入。网络断开、超时、无法解析成功响应或服务端 5xx 可能意味着写入结果未知。保留原 UUID、幂等键、参数和版本，先读取事实再决定恢复；不可自动换键重建。

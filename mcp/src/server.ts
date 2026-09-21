@@ -7,6 +7,12 @@ import {
   version,
   orderNumber,
   adminOrderPage,
+  orderResult,
+  adminOrderResult,
+  adminOrderDetail,
+  orderPricing,
+  paymentSummary,
+  paymentOperations,
   key,
   pageSize,
   search,
@@ -129,6 +135,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'get_admin_payment_summary',
     'Summarize succeeded USD capture/refund ledger entries by their database created_at in [start_at,end_at), not order creation or provider event time. Require explicit ISO timestamps with offsets, at most 744 hours and 10000 matching entries; PT422 means narrow the range, never truncated totals. Counts and amounts are decimal strings. Includes manual bookkeeping; excludes intents, pending/failed entries and unmatched provider movements. Net may be negative. Not revenue, profit, bank settlement or verified provider cash. No PII or per-order data. Separate calls are not a shared snapshot; shop timezone is not applied.',
     z.strictObject({ start_at: z.iso.datetime({ offset: true }), end_at: z.iso.datetime({ offset: true }) }),
+    false,
+    false,
+    paymentSummary,
   );
   rpc(
     'get_admin_order_summary',
@@ -670,7 +679,14 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     false,
     adminOrderPage,
   );
-  rpc('get_admin_order', 'Read order details and internal note. Commercial snapshots are immutable.', order);
+  rpc(
+    'get_admin_order',
+    'Read order details and internal note. Commercial snapshots are immutable.',
+    order,
+    false,
+    false,
+    adminOrderDetail,
+  );
   rpc(
     'update_order_admin_note',
     'Replace only the internal note after reading get_admin_order. changes requires expected_admin_note and admin_note, each string or null; null clears, empty string is distinct, no trimming. Database limits new text to 10000 characters. Atomic comparison checks current text, not edit history or order version (A→B→A is not detected). No note history or event is created. Never silently replace expected text on conflict or retry an uncertain write; reread first. Does not change customer note, price, payment or fulfillment.',
@@ -697,7 +713,14 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       type_filter: z.string().min(1).max(200).optional(),
     }),
   );
-  rpc('get_order_pricing', 'Read historical pricing, discounts, shipping and tax snapshots.', order);
+  rpc(
+    'get_order_pricing',
+    'Read historical pricing, discounts, shipping and tax snapshots.',
+    order,
+    false,
+    false,
+    orderPricing,
+  );
   rpc(
     'list_admin_payment_operations',
     'Read sanitized provider operations for one order and kind, UUID ascending. Amounts are exact decimal STRINGS; preserve precision. No provider references, keys, metadata, reasons or raw errors. has_error signals stored diagnostics, not final failure. A pending refund is not money returned; a provider movement is not a reconciled ledger entry. No network calls or retries. Empty does not prove order existence, and manual ledger transactions are not provider operations. Reset cursor when changing order/kind; no cross-page snapshot. provider_event_id is an internal event UUID, not the provider event reference.',
@@ -707,6 +730,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       page_size: pageSize,
       after_id: id.optional(),
     }),
+    false,
+    false,
+    paymentOperations,
   );
   rpc(
     'get_order_ledger',
@@ -724,6 +750,8 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'Cancel only eligible unpaid, unshipped orders. Not a paid-order refund or order edit.',
     order.extend({ reason }),
     true,
+    false,
+    orderResult,
   );
   rpc(
     'cancel_zero_value_order_item',
@@ -743,6 +771,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    adminOrderResult,
   );
   rpc(
     'refund_order',
@@ -750,6 +779,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     refund,
     true,
     true,
+    orderResult,
   );
   tool(
     'refund_paypal',

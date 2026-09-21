@@ -419,6 +419,251 @@ test('订单分页保留精确字符串，严格输出合同拒绝畸形 DTO 且
   }
 });
 
+test('订单嵌套输出保留快照，拒绝字段漂移；写入畸形响应必须标记结果未知且不重试', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const header = {
+    id,
+    order_number: '9007199254740993',
+    customer_id: crypto.randomUUID(),
+    email: 'customer@example.com',
+    status: 'open',
+    financial_status: 'paid',
+    fulfillment_status: 'partially_fulfilled',
+    currency: 'USD',
+    subtotal: 20,
+    discount_total: 2,
+    shipping_total: 3,
+    tax_total: 2.1,
+    total: 23.1,
+    tax_context: { status: 'calculated' },
+    shipping_address: { country: 'US', custom: { retained: true } },
+    billing_address: null,
+    shipping_method_id: id,
+    shipping_method_name: 'Ground',
+    discount_code: null,
+    customer_note: 'untrusted text',
+    cancel_reason: null,
+    paid_at: at,
+    payment_expires_at: at,
+    cancelled_at: null,
+    completed_at: null,
+    created_at: at,
+    updated_at: at,
+  };
+  const allocations = {
+    discount_allocations: [{ promotion_id: id, label: 'Sale', amount: 2 }],
+    tax_lines: [
+      { id, tax_rate_id: id, name: 'Tax', country: '*', rate: 0.1, taxable_amount: 18, amount: 1.8 },
+    ],
+  };
+  const pricing = {
+    order_id: id,
+    currency: 'USD',
+    subtotal: 20,
+    discount_total: 2,
+    shipping_total: 3,
+    tax_total: 2.1,
+    total: 23.1,
+    tax_context: header.tax_context,
+    shipping_method_id: id,
+    shipping_method_name: 'Ground',
+    lines: [
+      {
+        id,
+        line_key: 'historical-key',
+        variant_id: null,
+        product_id: null,
+        name: 'Archived item',
+        sku: null,
+        variant_title: '',
+        options: { size: 'M' },
+        attributes: { engraving: 'text' },
+        unit_price: 10,
+        quantity: 2,
+        total: 20,
+        discount_total: 2,
+        line_total: 18,
+        ...allocations,
+      },
+    ],
+    shipping_line: {
+      id,
+      shipping_method_id: id,
+      name: 'Ground',
+      gross_amount: 3,
+      discount_total: 0,
+      threshold_discount: 0,
+      total: 3,
+      policy: { countries: ['US'] },
+      discount_allocations: [],
+      tax_lines: [{ ...allocations.tax_lines[0], taxable_amount: 3, amount: 0.3 }],
+    },
+    promotions: [
+      { promotion_id: id, name: 'Sale', code: null, amount: 2, snapshot: { application_index: 1 } },
+    ],
+  };
+  const detail = {
+    ...header,
+    admin_note: null,
+    pricing,
+    fulfillments: [
+      {
+        id,
+        order_id: id,
+        version: 1,
+        status: 'shipped',
+        carrier: '',
+        tracking_number: '',
+        tracking_url: null,
+        shipped_at: at,
+        delivered_at: null,
+        created_at: at,
+        lines: [{ order_item_id: id, quantity: 1 }],
+      },
+    ],
+  };
+  let response: unknown = detail;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    expect(await toolData<typeof detail>(session.client, 'get_admin_order', { order_id: id })).toEqual(
+      detail,
+    );
+    response = null;
+    expect(await toolData<null>(session.client, 'get_admin_order', { order_id: id })).toBeNull();
+    response = pricing;
+    expect(await toolData<typeof pricing>(session.client, 'get_order_pricing', { order_id: id })).toEqual(
+      pricing,
+    );
+    const writes = [
+      ['mark_order_paid', { ...header, admin_note: 'retained' }],
+      ['refund_order', header],
+      ['cancel_order', header],
+    ] as const;
+    for (const [name, expected] of writes) {
+      response = expected;
+      const args =
+        name === 'cancel_order' ? { order_id: id } : { order_id: id, idempotency_key: 'original-key' };
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      response = { ...expected, provider_secret: 'SECRET' };
+      const before = calls.length;
+      const failed = await session.client.callTool({ name, arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+        code: 'INVALID_BACKEND_RESPONSE',
+        outcome_unknown: true,
+      });
+      expect(failed.structuredContent).toBeUndefined();
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+      expect(calls.length - before).toBe(3);
+    }
+    for (const invalid of [
+      { ...detail, order_number: 9007199254740992 },
+      { ...detail, pricing: { ...pricing, lines: [{ ...pricing.lines[0], quantity: '2' }] } },
+      {
+        ...detail,
+        pricing: { ...pricing, shipping_line: { ...pricing.shipping_line, provider_secret: 'SECRET' } },
+      },
+      {
+        ...detail,
+        pricing: {
+          ...pricing,
+          lines: [{ ...pricing.lines[0], tax_lines: [{ ...allocations.tax_lines[0], secret: 'SECRET' }] }],
+        },
+      },
+      {
+        ...detail,
+        fulfillments: [
+          { ...detail.fulfillments[0], lines: [{ order_item_id: id, quantity: 1, secret: 'SECRET' }] },
+        ],
+      },
+    ]) {
+      response = invalid;
+      const failed = await session.client.callTool({ name: 'get_admin_order', arguments: { order_id: id } });
+      expect(failed.isError).toBe(true);
+      expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+        code: 'INVALID_BACKEND_RESPONSE',
+        outcome_unknown: false,
+      });
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
+test('支付输出按 kind 验证，保留八位非 USD 资金与负净额，拒绝数字金额和渠道秘密', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const movement = {
+    id,
+    order_id: id,
+    provider: 'paypal',
+    amount: '999999999999.12345678',
+    currency: 'EUR',
+    created_at: at,
+    provider_event_id: id,
+    kind: 'capture',
+    payment_intent_id: null,
+    refund_request_id: null,
+    payment_transaction_id: null,
+    reconciliation_status: 'action_required',
+    has_error: true,
+    matched_at: null,
+  };
+  const page = { order_id: id, kind: 'money_movement', items: [movement], next_cursor: null };
+  const summary = {
+    start_at: at,
+    end_at: '2026-09-21T00:00:00Z',
+    currency: 'USD',
+    time_basis: 'payment_transactions.created_at',
+    capture_count: '0',
+    refund_count: '2',
+    captured_amount: '0.00',
+    refunded_amount: '19.25',
+    net_amount: '-19.25',
+  };
+  let response: unknown = page;
+  const { backend } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend);
+  try {
+    const args = { order_id: id, kind: 'money_movement' };
+    expect(await toolData<typeof page>(session.client, 'list_admin_payment_operations', args)).toEqual(page);
+    for (const invalid of [
+      { ...page, kind: 'payment_intent' },
+      { ...page, items: [{ ...movement, amount: 12.3 }] },
+      { ...page, items: [{ ...movement, provider_reference: 'SECRET' }] },
+    ]) {
+      response = invalid;
+      const failed = await session.client.callTool({
+        name: 'list_admin_payment_operations',
+        arguments: args,
+      });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+    const range = { start_at: summary.start_at, end_at: summary.end_at };
+    response = summary;
+    expect(await toolData<typeof summary>(session.client, 'get_admin_payment_summary', range)).toEqual(
+      summary,
+    );
+    for (const invalid of [
+      { ...summary, net_amount: -19.25 },
+      { ...summary, capture_count: 0 },
+      { ...summary, secret: 'SECRET' },
+    ]) {
+      response = invalid;
+      const failed = await session.client.callTool({ name: 'get_admin_payment_summary', arguments: range });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('目录 position 接受 PostgreSQL int4 边界，拒绝越界及小数', () => {
   const id = crypto.randomUUID();
   for (const group of ['variants', 'images', 'options', 'option_values']) {

@@ -4,6 +4,9 @@ import { checked, paymentFixture, fixtureIntent, settleIntent, paymentEvent, typ
 import { heldTransactionRace, staleAfterCommit, testDatabase } from './database-concurrency';
 import { paymentRequest, withPaymentProviderMock } from './payment-handler-harness';
 import { handlePayPalCreateRefund } from '../supabase/functions/paypal-create-refund/handler';
+import { AdminBackend } from '../mcp/src/backend';
+import { API, ANON_KEY } from './helpers';
+import { mcpSession, toolData } from './support/mcp';
 
 interface Tax { id: string; tax_rate_id: string; name: string; country: string; rate: number; taxable_amount: number; amount: number }
 interface Allocation { promotion_id: string; label: string; amount: number }
@@ -131,6 +134,12 @@ for (const quoted of [false, true]) test(`${quoted ? 'Quote' : '即时订单'} �
   const order = await create(quoted);
   try {
     const actual = await pricing(order.id); conserved(actual);
+    const session = await mcpSession(new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }));
+    try {
+      expect(await toolData<Price>(session.client, 'get_order_pricing', { order_id: order.id })).toEqual(actual);
+      const detail = await toolData<{ pricing: Price }>(session.client, 'get_admin_order', { order_id: order.id });
+      expect(detail.pricing).toEqual(actual);
+    } finally { await session.close(); }
     expect(actual.total).toBe(expected.total);
     expect(actual.tax_context).toEqual(expected.tax_context);
     expect(actual.promotions).toEqual(expected.promotions);
