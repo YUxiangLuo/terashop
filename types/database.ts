@@ -1918,6 +1918,7 @@ export type Database = {
         Returns: Json
       }
       get_inventory_transfer: { Args: { transfer_id: string }; Returns: Json }
+      get_mcp_downstream_session: { Args: never; Returns: Json }
       get_order_checkout_quote: { Args: { order_id: string }; Returns: Json }
       get_order_fulfillment_balance: {
         Args: { order_id: string }

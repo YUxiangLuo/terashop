@@ -827,6 +827,9 @@ GRANT EXECUTE ON FUNCTION public.mcp_grant_command(text,jsonb,uuid,text[],uuid) 
 REVOKE ALL ON FUNCTION public.mcp_bind_downstream_session(jsonb,uuid,uuid,uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.mcp_bind_downstream_session(jsonb,uuid,uuid,uuid) TO service_role;
 
+REVOKE ALL ON FUNCTION public.get_mcp_downstream_session() FROM PUBLIC, anon, service_role;
+GRANT EXECUTE ON FUNCTION public.get_mcp_downstream_session() TO authenticated;
+
 REVOKE ALL ON FUNCTION public.mcp_credential_command(text,jsonb,uuid,uuid,bigint,jsonb,uuid) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.mcp_credential_command(text,jsonb,uuid,uuid,bigint,jsonb,uuid) TO service_role;
 

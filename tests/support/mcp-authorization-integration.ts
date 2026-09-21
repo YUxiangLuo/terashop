@@ -23,6 +23,7 @@ export async function verifyLocalAuthorization(
   const api = createApi({ url: local.API_URL, anonKey: local.ANON_KEY, serviceKey: local.SERVICE_ROLE_KEY });
   const project = `joint-${crypto.randomUUID()}`;
   const users: { id: string; token: string; refreshToken: string; expiresAt: number }[] = [];
+  const downstream: { accessToken: string; refreshToken: string; expiresAt: number }[] = [];
   const sessions: Awaited<ReturnType<typeof mcpSession>>[] = [];
   async function request<T>(path: string, options: ApiOptions): Promise<T> {
     const result = await api(path, options);
@@ -59,16 +60,23 @@ export async function verifyLocalAuthorization(
         method: 'PATCH',
         body: { role: 'admin' },
       });
-      const login = await request<{ access_token: string; refresh_token: string; expires_at: number }>(
-        '/auth/v1/token?grant_type=password',
-        {
-          method: 'POST',
-          body: { email, password },
-        },
-      );
-      users[i].token = login.access_token;
-      users[i].refreshToken = login.refresh_token;
-      users[i].expiresAt = login.expires_at;
+      for (let client = 0; client < 2; client++) {
+        const login = await request<{ access_token: string; refresh_token: string; expires_at: number }>(
+          '/auth/v1/token?grant_type=password',
+          {
+            method: 'POST',
+            body: { email, password },
+          },
+        );
+        users[i].token = login.access_token;
+        users[i].refreshToken = login.refresh_token;
+        users[i].expiresAt = login.expires_at;
+        downstream.push({
+          accessToken: login.access_token,
+          refreshToken: login.refresh_token,
+          expiresAt: login.expires_at,
+        });
+      }
     }
     const bindings: Record<string, string>[] = [];
     const grants: { id: string }[] = [];
@@ -119,12 +127,7 @@ export async function verifyLocalAuthorization(
       );
       const paths: string[] = [];
       calls.push(paths);
-      const owner = users[Math.floor(i / 2)];
-      const credentials = {
-        accessToken: owner.token,
-        refreshToken: owner.refreshToken,
-        expiresAt: owner.expiresAt,
-      };
+      const credentials = downstream[i];
       const input = { expectedRevision: 0, credentials, anonKey: local.ANON_KEY };
       await assert.rejects(
         authorizer.writeCredentials(tokens[i], cipher, {
@@ -135,6 +138,14 @@ export async function verifyLocalAuthorization(
       );
       assert.equal((await authorizer.readCredentials(tokens[i], cipher)).revision, 0);
       assert.deepEqual(await authorizer.writeCredentials(tokens[i], cipher, input), { revision: 1 });
+      await assert.rejects(
+        authorizer.writeCredentials(tokens[i], cipher, {
+          ...input,
+          expectedRevision: 1,
+          credentials: downstream[i ^ 1],
+        }),
+        /CREDENTIAL_WRITE_UNCONFIRMED/,
+      );
       await assert.rejects(
         authorizer.writeCredentials(tokens[i], cipher, input),
         /CREDENTIAL_WRITE_UNCONFIRMED/,
@@ -159,7 +170,7 @@ export async function verifyLocalAuthorization(
         async (url, init) => {
           paths.push(new URL(url).pathname);
           assert(
-            new Headers(init.headers).get('Authorization') === `Bearer ${users[Math.floor(i / 2)].token}`,
+            new Headers(init.headers).get('Authorization') === `Bearer ${credentials.accessToken}`,
             'Business requests must use the bound downstream user token',
           );
           return fetch(url, init);

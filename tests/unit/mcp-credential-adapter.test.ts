@@ -35,6 +35,8 @@ async function fixture() {
   const state = {
     stored: { revision: 0, envelope: null as unknown },
     userId: grant.user_id,
+    sessionId: crypto.randomUUID(),
+    boundSession: null as string | null,
     loseAck: false,
     corruptAck: false,
   };
@@ -46,6 +48,20 @@ async function fixture() {
     if (url.endsWith('/auth/v1/user'))
       return Response.json({ id: state.userId, role: 'authenticated', is_anonymous: false });
     if (url.endsWith('/is_admin')) return Response.json(true);
+    if (url.endsWith('/get_mcp_downstream_session')) {
+      expect(new Headers(init.headers).get('Authorization')).toBe('Bearer downstream-access');
+      return Response.json({ user_id: state.userId, session_id: state.sessionId });
+    }
+    if (url.endsWith('/mcp_bind_downstream_session')) {
+      const body = JSON.parse(init.body as string);
+      expect(body.p_grant_id).toBe(grant.id);
+      expect(body.p_user_id).toBe(grant.user_id);
+      expect(body.p_session_id).toBe(state.sessionId);
+      if (state.boundSession !== null && state.boundSession !== body.p_session_id)
+        return Response.json({ code: 'PT409' }, { status: 409 });
+      state.boundSession = body.p_session_id;
+      return Response.json({ grant_id: grant.id, session_id: state.boundSession });
+    }
     if (!url.endsWith('/mcp_credential_command')) throw new Error('Unexpected request');
     const body = JSON.parse(init.body as string);
     expect(body.p_binding).toEqual({
@@ -129,6 +145,30 @@ test('wrong downstream admin, revoked grant and inactive upstream stop before cr
       /^CREDENTIAL_WRITE_UNCONFIRMED$/,
     );
     expect(f.calls.some(({ url }) => url.endsWith('/mcp_credential_command'))).toBe(false);
+  }
+});
+
+test('same user with another session and invalid binding acknowledgements cannot replace credentials', async () => {
+  const f = await fixture();
+  await f.host.writeCredentials('inbound', f.cipher, f.input);
+  f.state.sessionId = crypto.randomUUID();
+  await expect(
+    f.host.writeCredentials('inbound', f.cipher, { ...f.input, expectedRevision: 1 }),
+  ).rejects.toThrow(/^CREDENTIAL_WRITE_UNCONFIRMED$/);
+  expect(f.state.stored.revision).toBe(1);
+  for (const bad of [
+    { grant_id: crypto.randomUUID(), session_id: f.state.sessionId },
+    { grant_id: f.grant.id, session_id: crypto.randomUUID() },
+    {},
+  ]) {
+    const host = new KeycloakGrantAuthorizer(f.config, async (url, init) => {
+      if (url.endsWith('/mcp_bind_downstream_session')) return Response.json(bad);
+      return f.request(url, init);
+    });
+    await expect(
+      host.writeCredentials('inbound', f.cipher, { ...f.input, expectedRevision: 1 }),
+    ).rejects.toThrow(/^CREDENTIAL_WRITE_UNCONFIRMED$/);
+    expect(f.state.stored.revision).toBe(1);
   }
 });
 

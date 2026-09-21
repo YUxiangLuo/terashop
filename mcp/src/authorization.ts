@@ -96,7 +96,10 @@ export class KeycloakGrantAuthorizer {
     return response.json();
   }
 
-  private rpc(name: 'mcp_grant_command' | 'mcp_credential_command', body: Record<string, unknown>) {
+  private rpc(
+    name: 'mcp_grant_command' | 'mcp_credential_command' | 'mcp_bind_downstream_session',
+    body: Record<string, unknown>,
+  ) {
     return this.json(`${this.config.supabaseUrl}/rest/v1/rpc/${name}`, {
       method: 'POST',
       headers: {
@@ -219,7 +222,7 @@ export class KeycloakGrantAuthorizer {
         },
         credentials,
       );
-      await new AdminBackend(
+      const backend = new AdminBackend(
         {
           url: this.config.supabaseUrl,
           anonKey,
@@ -227,7 +230,22 @@ export class KeycloakGrantAuthorizer {
           expectedUserId: current.expectedUserId,
         },
         this.request,
-      ).assertAdmin();
+      );
+      const session = z
+        .strictObject({ user_id: z.uuid(), session_id: z.uuid() })
+        .parse(await backend.rpc('get_mcp_downstream_session', {}, false));
+      if (session.user_id !== current.expectedUserId) throw new Error('Invalid downstream identity');
+      if (current.tokenExpiresAt <= Math.floor(Date.now() / 1000)) throw new Error('Expired token');
+      const bound = z.strictObject({ grant_id: z.uuid(), session_id: z.uuid() }).parse(
+        await this.rpc('mcp_bind_downstream_session', {
+          p_binding: current.binding,
+          p_grant_id: current.grantId,
+          p_user_id: current.expectedUserId,
+          p_session_id: session.session_id,
+        }),
+      );
+      if (bound.grant_id !== current.grantId || bound.session_id !== session.session_id)
+        throw new Error('Invalid session binding');
       if (current.tokenExpiresAt <= Math.floor(Date.now() / 1000)) throw new Error('Expired token');
       const stored = storedCredentials.parse(
         await this.rpc('mcp_credential_command', {

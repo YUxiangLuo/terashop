@@ -3312,6 +3312,24 @@ $$;
 
 -- Ownership metadata only. The trusted linking flow must independently prove
 -- consent and that its access/refresh pair belongs to this downstream session.
+CREATE FUNCTION public.get_mcp_downstream_session()
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_session_id uuid;
+begin
+  if auth.role() is distinct from 'authenticated' or not public.is_admin() or not exists (
+      select 1 from auth.users where id=auth.uid() and not coalesce(is_anonymous,true)) then
+    raise exception using errcode='42501', message='admin user session required';
+  end if;
+  -- PostgREST has verified the user JWT; never accept a caller-supplied UUID.
+  select id into v_session_id from auth.sessions
+    where id=(auth.jwt()->>'session_id')::uuid and user_id=auth.uid() for share;
+  if not found then
+    raise exception using errcode='42501', message='downstream session is not authorized';
+  end if;
+  return jsonb_build_object('user_id',auth.uid(),'session_id',v_session_id);
+end;
+$$;
+
 CREATE FUNCTION public.mcp_bind_downstream_session(p_binding jsonb, p_grant_id uuid,
     p_user_id uuid, p_session_id uuid)
     RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
@@ -3356,6 +3374,7 @@ declare
   v_grant jsonb;
   v_credential private.mcp_credentials;
   v_revision bigint;
+  v_session_id uuid;
 begin
   if auth.role() is distinct from 'service_role' then
     raise exception using errcode='42501', message='trusted authorization host required';
@@ -3403,6 +3422,13 @@ begin
   end if;
   select * into v_credential from private.mcp_credentials where grant_id=p_grant_id for update;
   v_revision := coalesce(v_credential.revision,0);
+  if p_action<>'read' or v_revision>0 then
+    select downstream_session_id into v_session_id from private.mcp_grants where id=p_grant_id;
+    perform 1 from auth.sessions where id=v_session_id and user_id=p_user_id for share;
+    if not found then
+      raise exception using errcode='42501', message='bound downstream session required';
+    end if;
+  end if;
   if p_action='complete_refresh' then
     if v_credential.refresh_id is null or v_credential.refresh_id<>p_refresh_id then
       raise exception using errcode='PT409', message='refresh receipt conflict';

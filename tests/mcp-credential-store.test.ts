@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { checked, rpc, signup, makeAdmin, type TestUser } from './helpers';
+import { api, checked, rpc, signup, makeAdmin, type TestUser } from './helpers';
 import { testDatabase, heldTransactionRace, staleAfterCommit } from './database-concurrency';
 import { createCredentialCipher, type CredentialEnvelope } from '../mcp/src/credentials';
 
@@ -22,7 +22,7 @@ afterAll(async () => {
     await db.close();
   }
 });
-async function fixture() {
+async function fixture(bindSession = true) {
   const binding = {
     issuer: 'https://auth.example',
     subject: 'a',
@@ -45,6 +45,27 @@ async function fixture() {
     ),
   );
   const args = { p_binding: binding, p_grant_id: grant.id, p_user_id: admin.userId };
+  const login = await checked<{ access_token: string }>(
+    api('/auth/v1/token?grant_type=password', {
+      method: 'POST',
+      body: { email: admin.email, password: 'password123' },
+    }),
+  );
+  const session = await checked<{ user_id: string; session_id: string }>(
+    rpc('get_mcp_downstream_session', {}, login.access_token),
+  );
+  if (bindSession)
+    await checked(
+      rpc(
+        'mcp_bind_downstream_session',
+        {
+          ...args,
+          p_session_id: session.session_id,
+        },
+        undefined,
+        true,
+      ),
+    );
   const seal = (revision: number) =>
     cipher.seal({ project, grantId: grant.id, userId: admin.userId, revision }, secret);
   const read = () => rpc('mcp_credential_command', { ...args, p_action: 'read' }, undefined, true);
@@ -67,8 +88,91 @@ async function fixture() {
       undefined,
       true,
     );
-  return { binding, grant, args, seal, read, write, revoke };
+  return { binding, grant, args, seal, read, write, revoke, session, token: login.access_token };
 }
+
+test('unbound credentials and deleted sessions fail closed without releasing ownership', async () => {
+  const f = await fixture(false);
+  expect((await f.read()).data).toEqual({ revision: 0, envelope: null });
+  expect((await f.write(0, await f.seal(1))).data).toMatchObject({ code: '42501' });
+  await checked(
+    rpc('mcp_bind_downstream_session', { ...f.args, p_session_id: f.session.session_id }, undefined, true),
+  );
+  await checked(f.write(0, await f.seal(1)));
+  const receipt = await checked<{ refresh_id: string }>(
+    rpc(
+      'mcp_credential_command',
+      {
+        ...f.args,
+        p_action: 'claim_refresh',
+        p_expected_revision: 1,
+      },
+      undefined,
+      true,
+    ),
+  );
+  await db`delete from auth.sessions where id=${f.session.session_id}::uuid`;
+  expect((await rpc('get_mcp_downstream_session', {}, f.token)).data).toMatchObject({ code: '42501' });
+  expect((await f.read()).data).toMatchObject({ code: '42501' });
+  expect((await f.write(1, await f.seal(2))).data).toMatchObject({ code: '42501' });
+  for (const action of ['claim_refresh', 'complete_refresh']) {
+    expect(
+      (
+        await rpc(
+          'mcp_credential_command',
+          {
+            ...f.args,
+            p_action: action,
+            p_expected_revision: 1,
+            ...(action === 'complete_refresh'
+              ? { p_refresh_id: receipt.refresh_id, p_envelope: await f.seal(2) }
+              : {}),
+          },
+          undefined,
+          true,
+        )
+      ).data,
+    ).toMatchObject({ code: '42501' });
+  }
+  await checked(f.revoke());
+});
+
+test('session deletion defeats stale credential reads in RC and RR transactions', async () => {
+  for (const isolation of ['read committed', 'repeatable read'] as const) {
+    const f = await fixture();
+    await checked(f.write(0, await f.seal(1)));
+    const stale = await staleAfterCommit(
+      db,
+      async (sql) => {
+        await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+        return sql`select public.mcp_credential_command('read',${JSON.stringify(f.binding)}::text::jsonb,${f.grant.id}::uuid,${admin.userId}::uuid)`;
+      },
+      () => db`delete from auth.sessions where id=${f.session.session_id}::uuid`,
+      isolation,
+    );
+    expect(stale.error).toMatchObject({ errno: isolation === 'repeatable read' ? '40001' : '42501' });
+  }
+});
+
+test('session identity requires a verified administrator user token, not service or caller claims', async () => {
+  const f = await fixture();
+  expect((await rpc('get_mcp_downstream_session', {}, f.token)).data).toEqual(f.session);
+  expect(f.session.user_id).toBe(admin.userId);
+  for (const service of [false, true])
+    expect((await rpc('get_mcp_downstream_session', {}, undefined, service)).data).toMatchObject({
+      code: '42501',
+    });
+  const customer = await signup();
+  expect((await rpc('get_mcp_downstream_session', {}, customer.token)).data).toMatchObject({ code: '42501' });
+  const parts = f.token.split('.');
+  parts[1] = Buffer.from(
+    JSON.stringify({
+      ...JSON.parse(Buffer.from(parts[1]!, 'base64url').toString()),
+      session_id: crypto.randomUUID(),
+    }),
+  ).toString('base64url');
+  expect((await rpc('get_mcp_downstream_session', {}, parts.join('.'))).status).toBe(401);
+});
 
 test('credential store is service-only and rejects malformed envelopes and identity substitution', async () => {
   const f = await fixture();

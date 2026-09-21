@@ -873,7 +873,9 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 
 每个 grant 最多绑定一个下游会话，每个下游会话在本数据库中只能归属一个 grant（不因上游 client/resource/project 不同而放宽）。相同绑定可重放；更换会话或被其他 grant 占用返回 `PT409`，grant/用户不匹配为 `PT404`，无效会话、撤销或降权为 `42501`，空 UUID 为 `22023`；旧 RR 快照可能返回 `40001`。并发独占依靠数据库唯一约束，不依靠进程缓存。撤销保留归属；Auth 会话删除也不会删除或释放记录。重新授权须使用新的上游绑定及独立下游会话。
 
-**仅实现归属记录，尚未接入凭据存取或刷新准入。** 此接口只核对会话存在且属于该用户，不证明调用方持有它、不验证 session 的超时策略、access/refresh token 配对或用户同意。受信关联流程必须从已验证的登录结果取得 session ID，不能从客户端参数或未经验证的 JWT claim 取值。现有宿主仍没有该关联流程，不能据此启用真实刷新。
+`get_mcp_downstream_session()` 仅 authenticated 管理员用户可调用，无参数，返回 `{user_id,session_id}`。以 PostgREST 已验证的用户 JWT 中的 session_id 查询 auth.sessions，并核对 auth.uid() 和非匿名管理员；anon/service_role、普通客户、已删除会话均拒绝。不注册 MCP 工具，不从调用参数或宿主解码的 JWT 读取身份。
+
+宿主 writeCredentials 在下游身份检查后用同一用户 JWT 调用此查询，再通过受信接口绑定会话，校验回执后保存密文。同一用户不同会话也不能替换；绑定成功但保存失败可能留下无密文的绑定，不自动解除或改绑。会话归属与存在性已接入凭据存取和刷新准入，但不证明 refresh token 配对、用户同意或完整 Auth 超时策略；实际刷新代理仍未启用。
 
 ## MCP 下游凭据密文（受信服务内部接口）
 
@@ -883,6 +885,8 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 - `write`：必须传 expected revision（0–9007199254740990）和 envelope，仅当前 revision 相同时成功。首次 0→1，之后每次加一，返回新版本和密文。宿主须用 **expected revision + 1** 作为加密 AAD 中的 revision；读取时用数据库返回的 revision 解密。相同写入重放也返回 `PT409`，结果不确定时先重读，不自动重试或重新刷新上游凭据。
 - envelope 恰好含 `version:1/keyId/iv/ciphertext`。keyId 为 1–64 个字母、数字、`_` 或 `-`；IV 为 16 字符 base64url；ciphertext 为 22–65536 字符 base64url。SQL 只检查字段、类型、长度和字符集，不持有密钥，不能验证 GCM tag、明文身份或 AAD。宿主必须先加密、读取后认证解密；不得把明文塞入 ciphertext。
 
+所有写动作（包括 claim_refresh/complete_refresh）和已初始化的读取，必须有不可变的下游会话归属，且 auth.sessions 中仍存在匹配用户的会话，否则返回 `42501`。未初始化读取允许无会话并返回 revision=0。数据库锁定会话行检查存在性，但不解密或证明 envelope 属于该 session；受信宿主必须执行上述用户 JWT 查询/绑定流程。会话删除后不返回密文，grant revoke 仍可清除它。
+
 权限失败、撤销或用户降权为 `42501`；绑定不存在或 UUID 不符为 `PT404`；版本冲突为 `PT409`；输入非法为 `22023`；旧 RR 快照或并发插入可返回 `40001`。锁顺序为 grant→credential，写入和撤销串行；grant revoke 同事务删除密文（包括重复撤销），保留授权 tombstone。降权本身拒绝读写但不删除密文；仍可撤销清除。已经读入进程的凭据不会被数据库撤销自动擦除，也不取消已获准业务。
 
 刷新准入（仅数据库原语，尚无宿主刷新调用）：
@@ -891,6 +895,6 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 - `complete_refresh`：传原 expected revision、领取的 refresh ID，以及按下一 revision 加密的新 envelope。验证同一授权、回执、版本及当前权限后递增 revision，清除待完成状态，返回 `{revision,envelope}`。回执不能跨授权使用或重放；其他动作禁止传 refresh ID。
 - 待完成期间 read/write/再次 claim 均返回 `PT409`，无超时接管、解锁或取消接口。领取响应丢失、进程退出、刷新结果未知时保持阻塞，不重新使用旧 refresh token；无法完成时撤销旧 grant 并走新的可信登录/授权流程。完成响应丢失时可重读确认，不能重新发起真实刷新。撤销在同一事务清除待完成凭据。
 
-CAS 防止通过此接口用旧版本覆盖新版本，不防御数据库管理员回滚整个数据库；旧 RR 快照在首次插入前可能读到未初始化状态，但不能覆盖后续插入。准入只在同一 grant 内串行，不能协调多个 grant 共用同一下游 Auth 会话。启用真实刷新前必须落实每个 grant 独占下游会话或共同会话所有权；当前联合实验共享会话，不执行真实下游刷新。尚不包含生产密钥管理、浏览器关联或刷新代理。
+CAS 防止通过此接口用旧版本覆盖新版本，不防御数据库管理员回滚整个数据库；旧 RR 快照在首次插入前可能读到未初始化状态，但不能覆盖后续插入。准入按 grant 串行，结合不可变的会话独占绑定防止多个 grant 使用同一已验证下游会话；受信 host 仍须保证 access/refresh 配对。联合实验使用四个独立下游会话，不执行真实下游刷新。尚不包含生产密钥管理、浏览器关联或刷新代理。
 
 宿主侧 [KeycloakGrantAuthorizer](../mcp/src/authorization.ts) 提供 `readCredentials(token,cipher)` 和 `writeCredentials(token,cipher,{expectedRevision,credentials,anonKey})`，每次在线校验上游 token/grant，并从已验证结果构造完整绑定，不接收调用方指定 grant/user。read 返回 `{grantId,expectedUserId,revision,credentials}`，未初始化时 credentials=null；失败只抛 CREDENTIAL_READ_FAILED，不返回部分明文。write 先加密并在线验证下游 access token 对应绑定管理员，再 CAS 保存；核对返回的版本和密文，成功只返回 `{revision}`，任何失败均为 CREDENTIAL_WRITE_UNCONFIRMED，必须先重读确认，不自动重试。refresh token 配对和用户同意仍由未来可信关联流程证明；不可将这些方法作为客户端获取或替换下游 token 的 HTTP/MCP 接口。读取凭据不是业务授权，后续业务仍须使用 ToolAuthorization 和绑定 expectedUserId 的 AdminBackend。
