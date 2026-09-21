@@ -5,6 +5,8 @@ import type { Json } from '../../types/database';
 import {
   id,
   version,
+  orderNumber,
+  adminOrderPage,
   key,
   pageSize,
   search,
@@ -40,8 +42,6 @@ Tool annotations are hints, not an approval mechanism. Do not repeat uncertain w
 Manual payment/refund tools only record bookkeeping; they do not move money at a payment provider.
 Returns, receipts, disposition, refunds and fulfillment cancellation are distinct operations.`;
 
-const resultSchema = z.strictObject({ data: z.json() });
-
 export function createAdminServer(backend: AdminBackend, options: { allowWrites?: boolean } = {}) {
   const server = new McpServer({ name: 'tera-admin', version: '0.1.0' }, { instructions });
 
@@ -52,6 +52,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     execute: (args: A) => Promise<Json>,
     mutation = false,
     idempotent = false,
+    dataSchema: z.ZodType<Json> = z.json(),
   ) {
     if (mutation && !options.allowWrites) return;
     server.registerTool(
@@ -59,7 +60,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       {
         description,
         inputSchema: schema,
-        outputSchema: resultSchema,
+        outputSchema: z.strictObject({ data: dataSchema }),
         annotations: {
           readOnlyHint: !mutation,
           destructiveHint: mutation,
@@ -69,7 +70,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       },
       async (args) => {
         try {
-          const result = { data: await execute(args) };
+          const parsed = dataSchema.safeParse(await execute(args));
+          if (!parsed.success) throw new BackendError('INVALID_BACKEND_RESPONSE', mutation);
+          const result = { data: parsed.data };
           return {
             content: [{ type: 'text' as const, text: JSON.stringify(result) }],
             structuredContent: result,
@@ -96,8 +99,17 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     schema: z.ZodType<NoInfer<RpcArgs<N>>>,
     mutation = false,
     idempotent = false,
+    dataSchema: z.ZodType<Json> = z.json(),
   ) {
-    tool(name, description, schema, (args) => backend.rpc(name, args, mutation), mutation, idempotent);
+    tool(
+      name,
+      description,
+      schema,
+      (args) => backend.rpc(name, args, mutation),
+      mutation,
+      idempotent,
+      dataSchema,
+    );
   }
 
   tool(
@@ -643,10 +655,10 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
 
   rpc(
     'list_admin_orders',
-    'List orders by descending order number. No exact total or cross-request snapshot.',
+    'List orders by descending numeric order number. Order numbers and next_cursor are exact decimal strings; pass next_cursor unchanged as after_order_number, never convert to Number. No exact total or cross-request snapshot.',
     z.strictObject({
       page_size: pageSize,
-      after_order_number: version.optional(),
+      after_order_number: orderNumber.optional(),
       customer_id: id.optional(),
       status_filter: z.enum(['open', 'completed', 'cancelled']).optional(),
       financial_status_filter: z
@@ -654,6 +666,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
         .optional(),
       fulfillment_status_filter: z.enum(['unfulfilled', 'partially_fulfilled', 'fulfilled']).optional(),
     }),
+    false,
+    false,
+    adminOrderPage,
   );
   rpc('get_admin_order', 'Read order details and internal note. Commercial snapshots are immutable.', order);
   rpc(

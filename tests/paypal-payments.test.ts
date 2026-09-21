@@ -16,7 +16,7 @@ interface Fixture {
 interface IntentDto {
   id: string;
   order_id: string;
-  order_number?: number;
+  order_number?: string;
   provider: string;
   status: string;
   amount: number;
@@ -172,7 +172,7 @@ describe('PayPal Orders v2 与 Provider Inbox', () => {
       provider: 'paypal',
       shipping_address: expect.objectContaining({ country: 'US' }),
     });
-    expect(created.intent.order_number).toBeGreaterThan(0);
+    expect(created.intent.order_number).toMatch(/^[1-9][0-9]*$/);
 
     const denied = await rpc('get_payment_intent_for_customer', {
       payment_intent_id: created.intent.id,

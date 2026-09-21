@@ -554,7 +554,7 @@ GRANT EXECUTE ON FUNCTION public.update_product(uuid,bigint,jsonb) TO authentica
 GRANT EXECUTE ON FUNCTION public.create_product(uuid,jsonb) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.list_admin_products(integer,text,uuid,text,jsonb) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_admin_order(uuid), public.get_customer_order(uuid),
-  public.list_admin_orders(integer,bigint,uuid,text,text,text), public.list_customer_orders(integer,bigint,text,text,text) TO authenticated, service_role;
+  public.list_admin_orders(integer,text,uuid,text,text,text), public.list_customer_orders(integer,text,text,text,text) TO authenticated, service_role;
 GRANT EXECUTE ON FUNCTION public.get_admin_customer(uuid), public.list_admin_customers(integer,text,boolean,jsonb) TO authenticated, service_role;
 GRANT ALL ON FUNCTION private.cancel_order(order_id uuid, reason text) TO service_role;
 GRANT ALL ON FUNCTION private.create_fulfillment(order_id uuid, items jsonb, carrier text, tracking_number text, tracking_url text) TO service_role;

@@ -209,6 +209,8 @@ PATCH 省略保留，只允许显式字段，JSONB 文本最多 256 KiB。客户
 
 列表返回 `{items,next_cursor}`，page_size 为 1–100；按不可变、唯一的 order_number 倒序，将 next_cursor 传给下一次 after_order_number，末页为 null。订单号顺序不等于事务提交时间，不承诺跨页快照；状态变化也可能改变筛选结果。状态筛选均为精确匹配、以 AND 组合；使用现有 status（open/completed/cancelled）、financial_status（pending/paid/partially_refunded/refunded/voided）、fulfillment_status（unfulfilled/partially_fulfilled/fulfilled），未知值拒绝。
 
+订单列表、详情、账本、下单安全 DTO 和渠道支付意图 DTO 的 `order_number` 均为十进制字符串；列表 `next_cursor` 和输入 `after_order_number` 同样使用字符串，禁止转为 JavaScript Number。游标是规范有符号 bigint（-9223372036854775808 至 9223372036854775807），不接受前导零、正号、空白、小数或指数形式；数据库仍按 bigint 数值比较，不按字符串排序。此合同替代旧数值型订单号/游标；原始订单表的 bigint 存储不变。
+
 客户列表仅返回 `id/order_number/status/financial_status/fulfillment_status/currency/total/created_at`；后台列表另有 customer_id 和下单时的 email 快照。不加载商品行、地址、内部备注或精确总数。
 
 详情复用下单返回的安全订单头、持久化 `pricing` 明细和 `fulfillments`（物流字段及关系化 order_item_id/quantity 行）；目录改价不会重算订单快照。Admin 详情额外返回 admin_note。两者不返回支付渠道操作信息；资金账本、退款/退货、履约余额继续用已有专项 RPC，并各自检查权限。

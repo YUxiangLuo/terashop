@@ -345,6 +345,80 @@ test('MCP 保留大整数游标/微秒时间戳且用户 JWT 透传，不暴露�
   }
 });
 
+test('订单分页保留精确字符串，严格输出合同拒绝畸形 DTO 且不泄漏字段', async () => {
+  const item = {
+    id: crypto.randomUUID(),
+    order_number: '9007199254740993',
+    customer_id: crypto.randomUUID(),
+    email: 'buyer@example.com',
+    status: 'open',
+    financial_status: 'pending',
+    fulfillment_status: 'unfulfilled',
+    currency: 'USD',
+    total: 12.34,
+    created_at: '2026-09-20T11:12:13.123456+00:00',
+  };
+  let response: Record<string, unknown> = { items: [item], next_cursor: item.order_number };
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend);
+  try {
+    const tools = await session.client.listTools();
+    expect(JSON.stringify(tools.tools.find((t) => t.name === 'list_admin_orders')?.outputSchema)).toContain(
+      'order_number',
+    );
+    for (const cursor of ['9007199254740993', '9223372036854775807', '-9223372036854775808', '0']) {
+      expect(
+        await toolData<Record<string, unknown>>(session.client, 'list_admin_orders', {
+          after_order_number: cursor,
+        }),
+      ).toEqual(response);
+      expect(await calls.at(-1)!.json()).toEqual({ after_order_number: cursor });
+    }
+    const count = calls.length;
+    for (const cursor of [
+      1,
+      9007199254740992,
+      '01',
+      '-0',
+      '+1',
+      '1e3',
+      '1.1',
+      '1\n',
+      '',
+      '9223372036854775808',
+      '-9223372036854775809',
+    ]) {
+      expect(
+        (
+          await session.client.callTool({
+            name: 'list_admin_orders',
+            arguments: { after_order_number: cursor },
+          })
+        ).isError,
+      ).toBe(true);
+    }
+    expect(calls).toHaveLength(count);
+    for (const invalid of [
+      { items: [{ ...item, order_number: 9007199254740992 }], next_cursor: null },
+      { items: [item], next_cursor: 9007199254740992 },
+      { items: [{ ...item, status: 'unknown' }], next_cursor: null },
+      { items: [{ ...item, email: undefined }], next_cursor: null },
+      { items: [{ ...item, secret: 'sensitive-backend-value' }], next_cursor: null },
+    ]) {
+      response = invalid;
+      const result = await session.client.callTool({ name: 'list_admin_orders', arguments: {} });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(result)).not.toContain('sensitive-backend-value');
+      expect(result.structuredContent).toBeUndefined();
+    }
+    response = { items: [], next_cursor: null };
+    expect(await toolData<Record<string, unknown>>(session.client, 'list_admin_orders')).toEqual(response);
+  } finally {
+    await session.close();
+  }
+});
+
 test('目录 position 接受 PostgreSQL int4 边界，拒绝越界及小数', () => {
   const id = crypto.randomUUID();
   for (const group of ['variants', 'images', 'options', 'option_values']) {

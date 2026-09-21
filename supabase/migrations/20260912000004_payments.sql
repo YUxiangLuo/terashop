@@ -756,7 +756,7 @@ CREATE FUNCTION private.provider_payment_intent_json(p_intent commerce.payment_i
     SET search_path TO ''
     AS $$
   select private.payment_intent_json(p_intent) || jsonb_build_object(
-    'order_number', o.order_number,
+    'order_number', o.order_number::text,
     'shipping_address', o.shipping_address
   )
   from public.orders o where o.id = p_intent.order_id;
@@ -1846,7 +1846,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.mark_order_paid(order_id uuid, idempotency_key text, provider text DEFAULT 'manual'::text, provider_ref text DEFAULT NULL::text) RETURNS public.orders
+CREATE FUNCTION public.mark_order_paid(order_id uuid, idempotency_key text, provider text DEFAULT 'manual'::text, provider_ref text DEFAULT NULL::text) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1871,7 +1871,7 @@ begin
     end if;
     select * into v_order from public.orders where id = v_record.resource_id;
     if not found then raise exception using errcode = 'PT404', message = 'idempotency resource no longer exists'; end if;
-    return v_order;
+    return private.storefront_order_json(v_order) || jsonb_build_object('admin_note',v_order.admin_note);
   end if;
   perform 1 from commerce.payment_intents i
   where i.order_id = mark_order_paid.order_id order by i.id for update;
@@ -1911,7 +1911,7 @@ begin
   end if;
   insert into commerce.command_idempotency(scope,subject_id,idempotency_key,request_hash,resource_type,resource_id)
     values ('order.pay',v_subject_id,v_key,v_hash,'order',v_order.id);
-  return v_order;
+  return private.storefront_order_json(v_order) || jsonb_build_object('admin_note',v_order.admin_note);
 end;
 $$;
 

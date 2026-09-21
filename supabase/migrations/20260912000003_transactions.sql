@@ -2143,7 +2143,7 @@ begin
 
   return jsonb_build_object(
     'order', jsonb_build_object(
-      'id', v_order.id, 'order_number', v_order.order_number,
+      'id', v_order.id, 'order_number', v_order.order_number::text,
       'status', v_order.status, 'financial_status', v_order.financial_status,
       'fulfillment_status', v_order.fulfillment_status,
       'currency', v_order.currency, 'subtotal', v_order.subtotal,
@@ -2316,11 +2316,17 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.list_orders(p_customer_id uuid, p_page_size integer, p_after_order_number bigint,
+CREATE FUNCTION private.list_orders(p_customer_id uuid, p_page_size integer, p_after_order_number text,
     p_status text, p_financial_status text, p_fulfillment_status text, p_admin boolean) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-declare v_items jsonb; v_next bigint;
+declare v_items jsonb; v_next bigint; v_after bigint;
 begin
+  if p_after_order_number is not null then
+    if p_after_order_number !~ '^(0|-?[1-9][0-9]{0,18})$' then
+      raise exception using errcode = '22023', message = 'invalid order cursor';
+    end if;
+    v_after := p_after_order_number::bigint;
+  end if;
   if p_page_size is null or p_page_size not between 1 and 100
     or (p_status is not null and p_status not in ('open','completed','cancelled'))
     or (p_financial_status is not null and p_financial_status not in ('pending','paid','partially_refunded','refunded','voided'))
@@ -2330,24 +2336,24 @@ begin
   with candidates as materialized (
     select o.id,o.order_number,o.customer_id,o.email,o.status,o.financial_status,o.fulfillment_status,o.currency,o.total,o.created_at
     from public.orders o where (p_customer_id is null or o.customer_id = p_customer_id)
-      and (p_after_order_number is null or o.order_number < p_after_order_number)
+      and (v_after is null or o.order_number < v_after)
       and (p_status is null or o.status = p_status)
       and (p_financial_status is null or o.financial_status = p_financial_status)
       and (p_fulfillment_status is null or o.fulfillment_status = p_fulfillment_status)
     order by o.order_number desc limit p_page_size + 1
   ), page as materialized (select * from candidates order by order_number desc limit p_page_size)
-  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'order_number',p.order_number,'status',p.status,
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'order_number',p.order_number::text,'status',p.status,
     'financial_status',p.financial_status,'fulfillment_status',p.fulfillment_status,'currency',p.currency,
     'total',p.total,'created_at',p.created_at)
     || case when p_admin then jsonb_build_object('customer_id',p.customer_id,'email',p.email) else '{}'::jsonb end
     order by p.order_number desc),'[]'::jsonb),
     case when (select count(*) from candidates) > p_page_size then (select min(order_number) from page) end
   into v_items,v_next from page p;
-  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+  return jsonb_build_object('items',v_items,'next_cursor',v_next::text);
 end;
 $$;
 
-CREATE FUNCTION public.list_customer_orders(page_size integer DEFAULT 20, after_order_number bigint DEFAULT NULL,
+CREATE FUNCTION public.list_customer_orders(page_size integer DEFAULT 20, after_order_number text DEFAULT NULL,
     status_filter text DEFAULT NULL, financial_status_filter text DEFAULT NULL, fulfillment_status_filter text DEFAULT NULL) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 declare v_customer uuid := public.current_customer_id();
@@ -2357,7 +2363,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.list_admin_orders(page_size integer DEFAULT 20, after_order_number bigint DEFAULT NULL,
+CREATE FUNCTION public.list_admin_orders(page_size integer DEFAULT 20, after_order_number text DEFAULT NULL,
     customer_id uuid DEFAULT NULL, status_filter text DEFAULT NULL, financial_status_filter text DEFAULT NULL,
     fulfillment_status_filter text DEFAULT NULL) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$

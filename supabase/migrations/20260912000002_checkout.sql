@@ -1442,7 +1442,7 @@ CREATE FUNCTION private.storefront_order_json(p_order public.orders) RETURNS jso
   -- 显式 allowlist；orders 以后新增内部列时不会自动进入 Storefront 响应。
   select jsonb_build_object(
     'id', p_order.id,
-    'order_number', p_order.order_number,
+    'order_number', p_order.order_number::text,
     'customer_id', p_order.customer_id,
     'email', p_order.email,
     'status', p_order.status,

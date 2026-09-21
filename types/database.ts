@@ -2048,7 +2048,7 @@ export type Database = {
       }
       list_admin_orders: {
         Args: {
-          after_order_number?: number
+          after_order_number?: string
           customer_id?: string
           financial_status_filter?: string
           fulfillment_status_filter?: string
@@ -2165,7 +2165,7 @@ export type Database = {
       list_carts: { Args: never; Returns: Json }
       list_customer_orders: {
         Args: {
-          after_order_number?: number
+          after_order_number?: string
           financial_status_filter?: string
           fulfillment_status_filter?: string
           page_size?: number
@@ -2192,42 +2192,7 @@ export type Database = {
           provider?: string
           provider_ref?: string
         }
-        Returns: {
-          admin_note: string | null
-          billing_address: Json | null
-          cancel_reason: string | null
-          cancelled_at: string | null
-          completed_at: string | null
-          created_at: string
-          currency: string
-          customer_id: string
-          customer_note: string | null
-          discount_code: string | null
-          discount_total: number
-          email: string
-          financial_status: string
-          fulfillment_status: string
-          id: string
-          order_number: number
-          paid_at: string | null
-          payment_expires_at: string
-          shipping_address: Json
-          shipping_method_id: string | null
-          shipping_method_name: string | null
-          shipping_total: number
-          status: string
-          subtotal: number
-          tax_context: Json
-          tax_total: number
-          total: number
-          updated_at: string
-        }
-        SetofOptions: {
-          from: "*"
-          to: "orders"
-          isOneToOne: true
-          isSetofReturn: false
-        }
+        Returns: Json
       }
       moderate_review: {
         Args: { expected_revision?: number; review_id: string; status: string }

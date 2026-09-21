@@ -2,6 +2,36 @@ import * as z from 'zod/v4';
 
 export const id = z.uuid();
 export const version = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+export const orderNumber = z
+  .string()
+  .regex(/^(0|-?[1-9][0-9]{0,18})$/)
+  .refine((value) => {
+    try {
+      const number = BigInt(value);
+      return number.toString() === value && number >= -9223372036854775808n && number <= 9223372036854775807n;
+    } catch {
+      return false;
+    }
+  }, 'Expected a canonical signed bigint decimal string');
+export const adminOrderPage = z.strictObject({
+  items: z
+    .array(
+      z.strictObject({
+        id,
+        order_number: orderNumber,
+        customer_id: id,
+        email: z.string(),
+        status: z.enum(['open', 'completed', 'cancelled']),
+        financial_status: z.enum(['pending', 'paid', 'partially_refunded', 'refunded', 'voided']),
+        fulfillment_status: z.enum(['unfulfilled', 'partially_fulfilled', 'fulfilled']),
+        currency: z.literal('USD'),
+        total: z.number().nonnegative(),
+        created_at: z.iso.datetime({ offset: true }),
+      }),
+    )
+    .max(100),
+  next_cursor: orderNumber.nullable(),
+});
 // Preserve key identity across clients. PostgreSQL owns btrim and character
 // length validation; JS trim/UTF-16 length have different semantics.
 export const key = z
