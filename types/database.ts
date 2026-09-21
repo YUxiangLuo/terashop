@@ -2232,6 +2232,17 @@ export type Database = {
         }
         Returns: Json
       }
+      mcp_credential_command: {
+        Args: {
+          p_action: string
+          p_binding: Json
+          p_envelope?: Json
+          p_expected_revision?: number
+          p_grant_id: string
+          p_user_id: string
+        }
+        Returns: Json
+      }
       mcp_grant_command: {
         Args: {
           p_action: string

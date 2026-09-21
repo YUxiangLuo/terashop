@@ -67,6 +67,16 @@ CREATE TABLE private.mcp_grants (
 ALTER TABLE private.mcp_grants ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.mcp_grants FROM PUBLIC, anon, authenticated, service_role;
 
+-- Ciphertext only; keys live outside PostgreSQL. Grant revocation erases this
+-- payload while retaining the immutable authorization tombstone.
+CREATE TABLE private.mcp_credentials (
+  grant_id uuid PRIMARY KEY REFERENCES private.mcp_grants(id) ON DELETE CASCADE,
+  revision bigint NOT NULL CHECK (revision BETWEEN 1 AND 9007199254740991),
+  envelope jsonb NOT NULL CHECK (jsonb_typeof(envelope)='object')
+);
+ALTER TABLE private.mcp_credentials ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.mcp_credentials FROM PUBLIC, anon, authenticated, service_role;
+
 -- Constraint helpers
 
 CREATE FUNCTION private.valid_country_codes(p_countries text[]) RETURNS boolean

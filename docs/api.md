@@ -865,4 +865,16 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 
 返回 `{id,user_id,scopes,state,version}`，仅供受信 host 使用。不存在或撤销身份不匹配为 `PT404`；创建内容冲突、尝试改绑/改 scopes、复用 revoked binding 为 `PT409`；无权限、resolve 已撤销或用户已降权/删除为 `42501`；非法输入为 `22023`。并发插入或旧 Repeatable Read 快照冲突可能为 `40001`，调用方重读，不自动重新授权。resolve 与 revoke 通过行锁串行；不保证撤销取消已获准、正在执行的业务调用。
 
-`private.mcp_grants` 不向任何 API 角色开放直接读写，不保存 access/refresh token、密码或邮箱；撤销记录不删除。用户 UUID 无级联删除关系，防止删除账户同时丢失阻止旧绑定复用的记录。当前仅实现不可变批准及终态撤销，不支持 scope 原地升级/降级、恢复、批量撤销或凭据保存。SQL 仍为可重建开发基线，不是已有部署的升级脚本。
+`private.mcp_grants` 不向任何 API 角色开放直接读写，不保存 access/refresh token、密码或邮箱；撤销记录不删除。用户 UUID 无级联删除关系，防止删除账户同时丢失阻止旧绑定复用的记录。授权元数据仅支持不可变批准及终态撤销，不支持 scope 原地升级/降级、恢复或批量撤销；凭据密文使用下述独立接口。SQL 仍为可重建开发基线，不是已有部署的升级脚本。
+
+## MCP 下游凭据密文（受信服务内部接口）
+
+`mcp_credential_command(p_action,p_binding,p_grant_id,p_user_id,p_expected_revision?,p_envelope?)` 仅 service_role 执行，不注册 MCP 工具；底表 `private.mcp_credentials` 启用 RLS，所有 API 角色均无直接读写权限。复用 grant resolve 验证完整 binding、active 状态和当前非匿名管理员，再核对 grant/user UUID；不代替上游 token 验证或可信账号关联。
+
+- `read`：不传 expected revision/envelope。返回 `{revision,envelope}`，尚未初始化时为 `{revision:0,envelope:null}`。
+- `write`：必须传 expected revision（0–9007199254740990）和 envelope，仅当前 revision 相同时成功。首次 0→1，之后每次加一，返回新版本和密文。宿主须用 **expected revision + 1** 作为加密 AAD 中的 revision；读取时用数据库返回的 revision 解密。相同写入重放也返回 `PT409`，结果不确定时先重读，不自动重试或重新刷新上游凭据。
+- envelope 恰好含 `version:1/keyId/iv/ciphertext`。keyId 为 1–64 个字母、数字、`_` 或 `-`；IV 为 16 字符 base64url；ciphertext 为 22–65536 字符 base64url。SQL 只检查字段、类型、长度和字符集，不持有密钥，不能验证 GCM tag、明文身份或 AAD。宿主必须先加密、读取后认证解密；不得把明文塞入 ciphertext。
+
+权限失败、撤销或用户降权为 `42501`；绑定不存在或 UUID 不符为 `PT404`；版本冲突为 `PT409`；输入非法为 `22023`；旧 RR 快照或并发插入可返回 `40001`。锁顺序为 grant→credential，写入和撤销串行；grant revoke 同事务删除密文（包括重复撤销），保留授权 tombstone。降权本身拒绝读写但不删除密文；仍可撤销清除。已经读入进程的凭据不会被数据库撤销自动擦除，也不取消已获准业务。
+
+CAS 防止通过此接口用旧版本覆盖新版本，不防御数据库管理员回滚整个数据库；旧 RR 快照在首次插入前可能读到未初始化状态，但不能覆盖后续插入。当前实现密文持久化与版本控制，不包含生产密钥管理、浏览器关联、凭据刷新或刷新并发协调；host 适配仍待接入。

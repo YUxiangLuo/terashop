@@ -3293,6 +3293,7 @@ begin
     raise exception using errcode='PT409', message='grant binding cannot be reused or changed';
   elsif p_action='revoke' then
     if v_grant.id<>p_grant_id then raise exception using errcode='PT404', message='grant not found'; end if;
+    delete from private.mcp_credentials where grant_id=v_grant.id;
     if v_grant.state='active' then
       update private.mcp_grants set state='revoked',version=2,revoked_at=clock_timestamp()
         where id=v_grant.id returning * into v_grant;
@@ -3306,6 +3307,67 @@ begin
   end if;
   return jsonb_build_object('id',v_grant.id,'user_id',v_grant.user_id,'scopes',v_grant.scopes,
     'state',v_grant.state,'version',v_grant.version);
+end;
+$$;
+
+CREATE FUNCTION public.mcp_credential_command(p_action text, p_binding jsonb, p_grant_id uuid,
+    p_user_id uuid, p_expected_revision bigint DEFAULT NULL, p_envelope jsonb DEFAULT NULL)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_grant jsonb;
+  v_credential private.mcp_credentials;
+  v_revision bigint;
+begin
+  if auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='trusted authorization host required';
+  end if;
+  if p_action is null or p_action not in ('read','write') or p_grant_id is null or p_user_id is null then
+    raise exception using errcode='22023', message='invalid credential command';
+  end if;
+  if p_action='read' then
+    if p_expected_revision is not null or p_envelope is not null then
+      raise exception using errcode='22023', message='invalid credential lookup';
+    end if;
+  else
+    if p_expected_revision is null or p_expected_revision<0 or p_expected_revision>=9007199254740991
+        or jsonb_typeof(p_envelope) is distinct from 'object' then
+      raise exception using errcode='22023', message='invalid credential update';
+    end if;
+    if not (p_envelope ?& array['version','keyId','iv','ciphertext'])
+        or (p_envelope-array['version','keyId','iv','ciphertext'])<>'{}'::jsonb
+        or p_envelope->'version' is distinct from '1'::jsonb
+        or jsonb_typeof(p_envelope->'keyId') is distinct from 'string'
+        or (p_envelope->>'keyId') !~ '^[A-Za-z0-9_-]{1,64}$'
+        or jsonb_typeof(p_envelope->'iv') is distinct from 'string'
+        or (p_envelope->>'iv') !~ '^[A-Za-z0-9_-]{16}$'
+        or jsonb_typeof(p_envelope->'ciphertext') is distinct from 'string'
+        or length(p_envelope->>'ciphertext') not between 22 and 65536
+        or (p_envelope->>'ciphertext') !~ '^[A-Za-z0-9_-]+$' then
+      raise exception using errcode='22023', message='invalid credential envelope';
+    end if;
+  end if;
+  -- Same lock order as revoke: grant first, then ciphertext. Resolve also checks
+  -- the full binding and the current non-anonymous admin identity.
+  v_grant := public.mcp_grant_command('resolve',p_binding);
+  if (v_grant->>'id')::uuid<>p_grant_id or (v_grant->>'user_id')::uuid<>p_user_id then
+    raise exception using errcode='PT404', message='grant not found';
+  end if;
+  select * into v_credential from private.mcp_credentials where grant_id=p_grant_id for update;
+  v_revision := coalesce(v_credential.revision,0);
+  if p_action='write' then
+    if v_revision<>p_expected_revision then
+      raise exception using errcode='PT409', message='credential revision conflict';
+    end if;
+    if v_revision=0 then
+      insert into private.mcp_credentials(grant_id,revision,envelope)
+        values(p_grant_id,1,p_envelope) on conflict (grant_id) do nothing returning * into v_credential;
+      if not found then raise exception using errcode='40001', message='retry credential lookup'; end if;
+    else
+      update private.mcp_credentials set revision=v_revision+1,envelope=p_envelope
+        where grant_id=p_grant_id returning * into v_credential;
+    end if;
+  end if;
+  return jsonb_build_object('revision',coalesce(v_credential.revision,0),'envelope',v_credential.envelope);
 end;
 $$;
 
