@@ -430,13 +430,19 @@ Keycloak `26.7.0` 已完成 [独立 Docker 实验](../scripts/mcp-keycloak-compa
 
 ### grant 与 Supabase UUID 的落实边界
 
-服务端 grant 记录生成独立随机 ID，并不可变地绑定已验证的 `(issuer, sub, client_id, resource, project)`、上游 sid/授权纪元及 Supabase Auth user UUID。Keycloak 的 sub 与 Supabase UUID 没有天然对应关系，不能用同名值、邮箱或“均为管理员”推导。账号绑定仍须在可信交互中证明两端身份；查找不得只按 sid 或 sub，撤销按完整 grant 生效。重新授权/切换账号不能仅把旧记录改为 active 或换 UUID，否则旧 bearer 可能继承新授权。相同上游身份元组的恢复暂不自动支持，必须先完成可区分的新上游会话或签名授权纪元设计；可信交互和令牌到 grant 的映射尚未实现。
+服务端 grant 记录生成独立随机 ID，并不可变地绑定已验证的 `(issuer, sub, client_id, resource, project)`、上游 sid/授权纪元及 Supabase Auth user UUID。Keycloak 的 sub 与 Supabase UUID 没有天然对应关系，不能用同名值、邮箱或“均为管理员”推导。账号绑定仍须在可信交互中证明两端身份；查找不得只按 sid 或 sub，撤销按完整 grant 生效。重新授权/切换账号不能仅把旧记录改为 active 或换 UUID，否则旧 bearer 可能继承新授权。相同上游身份元组的恢复暂不自动支持，必须先完成可区分的新上游会话或签名授权纪元设计；可信账号关联交互尚未实现，令牌到现有 grant 的查找见下文在线校验模块。
 
 已实现的下游检查是 [AdminBackend](../mcp/src/backend.ts) 的受信配置 expectedUserId：构造时校验并固定 UUID，每次操作从 Supabase Auth 重查实际用户，在 is_admin、RPC、Edge、Storage 前比较，不匹配返回 IDENTITY_MISMATCH / outcome_unknown=false，不回传任一 UUID。匹配 UUID 后仍执行当前管理员检查；不会因绑定存在就放宽角色。两名真实本地 Supabase 管理员的交叉会话测试和逐调用 mock 测试均覆盖这一点。此字段只能由未来可信 grant 解析器设置，不是工具输入；目前可选仅为兼容单用户 stdio，远程 host 必须强制提供。它不代表 token 验证、双身份关联或凭据代理已完成。
 
 授权元数据现持久化于 PostgreSQL 的 private.mcp_grants，通过 service-only [mcp_grant_command](api.md#mcp-授权记录受信服务内部接口) 创建、解析和撤销，不另建本地文件存储，不向任何 API 角色开放底表。binding 固定六项 issuer/subject/client_id/resource/project/session_id（当前对应已验证上游会话），作为唯一键；UUID 和 scopes 不可变，撤销记录永久保留，不跟随 auth.users 级联删除。正常创建重放返回原 ID；改绑/改权限、复用 revoked binding 拒绝；resolve 锁行且重查管理员，撤销后不再返回有效授权，旧 RR 快照与并发变更冲突时失败。受信 host 必须把输入与固定部署和真实上游身份核对，不能自行伪造新 session_id 来恢复授权；此 RPC 不执行这些协议验证。
 
-存储仅包含授权元数据，无访问/刷新令牌、密码或邮箱。撤销是数据库终态，不恢复、不删除；scope 改变当前须撤销旧授权并建立可区分的新上游会话，暂不原地升级/降级。新连接读取、每个身份维度的隔离、两管理员改绑拒绝、重复撤销、并发创建/撤销以及 RC/RR 旧快照场景由 [集成测试](../tests/mcp-grants.test.ts) 验证。它仍未接入远程 host 或凭据代理，service-role 仅能出现在受信授权存储边界，店铺业务继续使用绑定用户 JWT。下一批先实现令牌验证及完整绑定查找，再接双身份关联和加密凭据；不把提供一个元数据 RPC 当作远程 OAuth 已完成。
+存储仅包含授权元数据，无访问/刷新令牌、密码或邮箱。撤销是数据库终态，不恢复、不删除；scope 改变当前须撤销旧授权并建立可区分的新上游会话，暂不原地升级/降级。新连接读取、每个身份维度的隔离、两管理员改绑拒绝、重复撤销、并发创建/撤销以及 RC/RR 旧快照场景由 [集成测试](../tests/mcp-grants.test.ts) 验证。它仍未接入远程 host 或凭据代理，service-role 仅能出现在受信授权存储边界，店铺业务继续使用绑定用户 JWT；不把提供一个元数据 RPC 当作远程 OAuth 已完成。
+
+在线校验已落实为 [KeycloakGrantAuthorizer](../mcp/src/authorization.ts)。按 [RFC 7662](https://www.rfc-editor.org/rfc/rfc7662) 以固定受信端点的 introspection 响应作为令牌有效性依据，不读取未验证 JWT payload，不跟随 token 中的 issuer/JWKS URL。此适配器限定 Keycloak profile：必须含 active=true、typ=Bearer、精确 issuer、包含当前 resource 的 aud、未过期 exp、非未来 nbf（若提供）、非空 sub/client_id/sid 和 scope。typ 用于拒绝 refresh/ID token，token_type_hint 本身不提供类型保证。身份字符串保持原样，不按邮箱或 azp 猜测 client_id。固定 HTTPS 端点（仅回环可 HTTP）、禁止重定向、10 秒请求超时、无缓存/自动重试；凭据只发往各自固定端点。
+
+通过校验后，以完整六字段 binding 调用 mcp_grant_command(resolve)，仅接受 active/version=1 和合法 UUID/scopes；返回 expectedUserId、grantId 与 ToolAuthorization。初始权限是 token ∩ grant ∩ 部署 scopes；逐调用重新 introspect 和 resolve，固定原 grant/user UUID，并将权限限制在初始集合内，升权须重建上下文。grant 查询结束再次检查过期；故障、非法响应、撤销及身份变化均统一 AUTHORIZATION_DENIED，不暴露原异常。该检查是调用准入，不能撤回已执行业务，也不消除检查后发生撤销的时间窗口。
+
+单测覆盖拒绝、权限交集与上下文固定；固定版本 Keycloak Docker 实验调用实际适配器验证 access token、refresh/伪造 token 拒绝及已有上下文的在线撤销，grant 端为合成 fixture。数据库契约已有独立集成测试，但授权服务→真实 grant→管理员业务后端的联合双用户隔离仍待下一批验证，可信双身份关联和加密凭据管理也未实现。模块尚未接 stdio 或 HTTP，不持久化入站 token，不将入站 token 传给 Supabase；未来宿主必须用独立下游用户会话与 expectedUserId 构造 AdminBackend。Keycloak 仍是候选，不因新增适配器而批准其生产部署。
 
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。

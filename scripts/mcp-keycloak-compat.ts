@@ -5,6 +5,7 @@ import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { chmod, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { KeycloakGrantAuthorizer } from '../mcp/src/authorization';
 
 const image =
   'quay.io/keycloak/keycloak:26.7.0@sha256:0f198be292568439d700cdbfb893e69a6009bb43a94a06a945b1d3d506c76b13';
@@ -281,6 +282,57 @@ try {
   const active = await introspect(first.access_token);
   assert.equal(active.active, true);
   assert.equal(active.aud, resource);
+  // Real introspection with a synthetic grant store: no Supabase credentials or
+  // business calls. The SQL store has separate local integration tests.
+  const fixtureGrant = {
+    id: crypto.randomUUID(),
+    user_id: crypto.randomUUID(),
+    scopes: ['store:read'],
+    state: 'active',
+    version: 1,
+  };
+  let grantReads = 0;
+  const authorizer = new KeycloakGrantAuthorizer(
+    {
+      issuer,
+      introspectionEndpoint: metadata!.introspection_endpoint,
+      introspectionClientId: resource,
+      introspectionClientSecret: secret,
+      resource,
+      project: 'compat-fixture',
+      supabaseUrl: 'https://unused.example',
+      serviceRoleKey: 'synthetic-only',
+      scopes: ['store:read', 'store:write'],
+    },
+    async (url, init) => {
+      if (url === 'https://unused.example/rest/v1/rpc/mcp_grant_command') {
+        grantReads++;
+        const body = JSON.parse(init.body as string);
+        assert.deepEqual(body, {
+          p_action: 'resolve',
+          p_binding: {
+            issuer,
+            subject: firstClaims.sub,
+            client_id: client,
+            resource,
+            project: 'compat-fixture',
+            session_id: firstClaims.sid,
+          },
+        });
+        return Response.json(fixtureGrant);
+      }
+      assert.equal(url, metadata!.introspection_endpoint);
+      return fetch(url, init);
+    },
+  );
+  const authorized = await authorizer.authorize(first.access_token);
+  assert.equal(authorized.expectedUserId, fixtureGrant.user_id);
+  assert.deepEqual(authorized.authorization.scopes, ['store:read']);
+  await assert.rejects(authorizer.authorize(first.refresh_token), /AUTHORIZATION_DENIED/);
+  await assert.rejects(authorizer.authorize('forged-access-token'), /AUTHORIZATION_DENIED/);
+  assert.equal(grantReads, 1);
+  assert.deepEqual(await authorized.authorization.currentScopes(), ['store:read']);
+  console.log('PASS: host introspection profile, full binding, refresh/forged token rejection');
   const badRefresh = await token({
     grant_type: 'refresh_token',
     refresh_token: first.refresh_token,
@@ -288,6 +340,20 @@ try {
   });
   assert.equal(badRefresh.data.error, 'invalid_target');
   console.log('PASS: JWT/JWKS identity, audience and refresh resource binding');
+
+  const hostRevoke = await fetch(metadata.revocation_endpoint, {
+    method: 'POST',
+    body: new URLSearchParams({
+      client_id: client,
+      token: first.refresh_token,
+      token_type_hint: 'refresh_token',
+    }),
+  });
+  assert.equal(hostRevoke.status, 200);
+  await hostRevoke.text();
+  await assert.rejects(authorized.authorization.currentScopes(), /AUTHORIZATION_DENIED/);
+  assert.equal(grantReads, 2); // Revoked upstream token cannot reach even an active local grant.
+  console.log('PASS: existing host context rejects upstream revocation without cached authorization');
 
   // Independent sessions: an invalid request may consume a rotating token.
   const second = await issue();
