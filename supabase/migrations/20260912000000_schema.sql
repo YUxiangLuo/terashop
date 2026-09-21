@@ -1658,6 +1658,7 @@ CREATE INDEX fulfillment_lines_order_item_idx ON commerce.fulfillment_lines USIN
 CREATE INDEX order_adjustments_order_idx ON commerce.order_adjustments USING btree (order_id, id);
 CREATE INDEX order_adjustments_order_item_idx ON commerce.order_adjustments USING btree (order_item_id) WHERE (order_item_id IS NOT NULL);
 CREATE INDEX outbox_events_claim_idx ON commerce.outbox_events USING btree (status, available_at, id) WHERE (status = ANY (ARRAY['pending'::text, 'failed'::text, 'processing'::text]));
+CREATE INDEX outbox_events_diagnostics_idx ON commerce.outbox_events (created_at) WHERE status<>'published';
 CREATE UNIQUE INDEX payment_intents_one_active_per_order_uk ON commerce.payment_intents USING btree (order_id) WHERE (status = ANY (ARRAY['requires_action'::text, 'processing'::text]));
 CREATE INDEX payment_intents_order_idx ON commerce.payment_intents USING btree (order_id, created_at DESC);
 CREATE UNIQUE INDEX payment_intents_provider_reference_uk ON commerce.payment_intents USING btree (provider, provider_reference) WHERE (provider_reference IS NOT NULL);

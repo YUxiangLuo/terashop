@@ -1883,6 +1883,10 @@ export type Database = {
         Args: { definition_id: string }
         Returns: Json
       }
+      get_admin_operations_summary: {
+        Args: { component: string; end_at: string; start_at: string }
+        Returns: Json
+      }
       get_admin_order: { Args: { order_id: string }; Returns: Json }
       get_admin_order_summary: {
         Args: { end_at: string; start_at: string }

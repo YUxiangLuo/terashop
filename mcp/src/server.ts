@@ -918,6 +918,15 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
   );
   rpc(
+    'get_admin_operations_summary',
+    'Read CURRENT unresolved counts for one component, restricted to records CREATED in [start_at,end_at), at most 744 hours/10000 records. Not whole-system health or historical state at end_at; older backlog is excluded. Counts are strings, absent status keys mean zero. ready_count is time/budget eligibility, not guaranteed claimability (locks/workers/provider availability are not checked). Outbox expired leases can overlap ready or exhausted counts; redrive retry_start is respected. Inapplicable metrics are null. No payloads, errors, money totals, automatic recovery or cross-call snapshot. Use safe event/reconciliation lists for details. PT422 requires narrowing the range.',
+    z.strictObject({
+      component: z.enum(['outbox', 'inbox', 'reconciliation']),
+      start_at: z.iso.datetime({ offset: true }),
+      end_at: z.iso.datetime({ offset: true }),
+    }),
+  );
+  rpc(
     'list_admin_reconciliation_issues',
     'List global unresolved provider money movements, including those with no order link. Defaults to unmatched; query action_required separately, reset cursor when changing status. Oldest created_at then UUID ascending, preserve full timestamp cursor. Amount is an exact decimal string in its ORIGINAL currency, not necessarily USD; never sum different currencies or treat these observations as settled ledger money. Safe IDs and has_error only, no raw errors or provider references. No automatic retry, matching or money replay. Empty page is not proof that all provider events were received or that the system is healthy; no cross-page snapshot.',
     z.strictObject({

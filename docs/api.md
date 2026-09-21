@@ -797,3 +797,15 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 DTO 仅含 id/provider_event_id/provider/kind/amount/currency/order_id/payment_intent_id/refund_request_id/reconciliation_status/has_error/created_at。不返回 provider_reference、last_error 或事件载荷。amount 保留渠道原始八位小数的字符串，currency 不一定是 USD，不换算、舍入或跨币种合计；这些观察记录不等于已匹配的账本资金。
 
 无跨页快照，后台处理会改变列表；空结果不证明没有遗漏渠道事件或系统健康。发现 action_required 后走受信运维流程，本工具不自动匹配、不重放资金处理，也不代替 Inbox/Outbox 诊断。
+
+### 分组件区间运维概览
+
+`get_admin_operations_summary(component,start_at,end_at)` 仅 admin/service 可调用，同名 MCP 工具只读。component 为 outbox/inbox/reconciliation；按记录 created_at 的 `[start_at,end_at)` 选取当前未完成记录。范围必须有限、递增且不超过 744 小时，MCP 要求带偏移量的 ISO 时间；非法输入 `22023`，无权限 `42501`。单次最多 10,000 条匹配记录，超限 `PT422`，缩小区间后重查，不返回截断计数。
+
+返回 component/start_at/end_at/observed_at、字符串 unresolved_count、非零状态键组成的 status_counts、oldest_created_at（空集合 null），以及 ready_count/expired_lease_count/retry_exhausted_count。时间判断统一使用该调用的 observed_at，状态使用单次数据库快照；不是 end_at 时的历史状态。
+
+- Outbox：排除 published。ready 必须满足 `attempts-retry_start<25`，并且是 available_at 已到期的 pending/failed，或租约已到期的 processing；expired_lease 为 processing 且租约到期。retry_exhausted 包含 exhausted，以及预算已用完的 failed/过期 processing，未过期 processing 即使已用到第 25 次也不提前认定失败。过期租约可与 ready/exhausted 重叠，不能相加当总数。
+- Inbox：仅 received/failed。ready 为 attempts<25 且 next_attempt_at 到期；retry_exhausted 为 attempts≥25。expired_lease_count=null。
+- Reconciliation：仅 unmatched/action_required；无金额合计，不跨币种相加，三个队列指标均为 null。
+
+ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠道可用性，不承诺立即领取。区间外积压、漏收事件及基础设施健康均不在范围内；零计数不等于系统健康。接口不返回载荷、错误文本或凭据，不执行恢复，不提供跨调用共同快照；详情使用已有安全列表。

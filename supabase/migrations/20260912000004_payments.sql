@@ -2106,4 +2106,50 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.get_admin_operations_summary(component text, start_at timestamptz, end_at timestamptz) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_count bigint; v_status jsonb; v_oldest timestamptz; v_ready bigint; v_expired bigint;
+  v_exhausted bigint; v_observed timestamptz:=statement_timestamp();
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if component is null or component not in ('outbox','inbox','reconciliation')
+    or start_at is null or end_at is null or not isfinite(start_at) or not isfinite(end_at)
+    or end_at<=start_at or end_at-start_at>interval '744 hours' then
+    raise exception using errcode='22023', message='invalid component or range';
+  end if;
+  with candidates as materialized (
+    select e.status,e.created_at,
+      e.attempts-e.retry_start<25 and ((e.status in ('pending','failed') and e.available_at<=v_observed)
+        or (e.status='processing' and e.lease_expires_at<=v_observed)) as ready,
+      e.status='processing' and e.lease_expires_at<=v_observed as expired,
+      e.status='exhausted' or (e.attempts-e.retry_start>=25 and
+        (e.status='failed' or (e.status='processing' and e.lease_expires_at<=v_observed))) as exhausted
+    from commerce.outbox_events e where component='outbox' and e.status<>'published'
+      and e.created_at>=start_at and e.created_at<end_at
+    union all
+    select e.status,e.created_at,e.attempts<25 and e.next_attempt_at<=v_observed,false,e.attempts>=25
+    from commerce.payment_provider_events e where component='inbox' and e.status in ('received','failed')
+      and e.created_at>=start_at and e.created_at<end_at
+    union all
+    select m.reconciliation_status,m.created_at,false,false,false
+    from commerce.provider_money_movements m where component='reconciliation' and m.reconciliation_status<>'matched'
+      and m.created_at>=start_at and m.created_at<end_at
+    limit 10001
+  )
+  select count(*),min(c.created_at),count(*) filter (where c.ready),count(*) filter (where c.expired),
+    count(*) filter (where c.exhausted),
+    (select coalesce(jsonb_object_agg(s.status,s.n::text),'{}'::jsonb)
+      from (select status,count(*) n from candidates group by status) s)
+  into v_count,v_oldest,v_ready,v_expired,v_exhausted,v_status from candidates c;
+  if v_count>10000 then raise exception using errcode='PT422', message='too many unresolved records; narrow range'; end if;
+  return jsonb_build_object('component',component,'start_at',start_at,'end_at',end_at,'observed_at',v_observed,
+    'unresolved_count',v_count::text,'status_counts',v_status,'oldest_created_at',v_oldest,
+    'ready_count',case when component<>'reconciliation' then v_ready::text end,
+    'expired_lease_count',case when component='outbox' then v_expired::text end,
+    'retry_exhausted_count',case when component<>'reconciliation' then v_exhausted::text end);
+end;
+$$;
+
 commit;
