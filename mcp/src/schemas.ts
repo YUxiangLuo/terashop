@@ -124,6 +124,77 @@ const totals = {
 // These are stored JSON snapshots, not new input commands. Keep their contents
 // unchanged; fixed DTO envelopes and relational rows below remain strict.
 const jsonObject = z.record(z.string(), z.json());
+export const orderNoteResult = z.strictObject({ id, admin_note: z.string().nullable() });
+export const orderEventPage = z.strictObject({
+  items: z
+    .array(
+      z.strictObject({
+        id: bigintString,
+        order_id: id,
+        actor_id: id.nullable(),
+        type: z.string(),
+        created_at: timestamp,
+      }),
+    )
+    .max(100),
+  next_cursor: bigintString.nullable(),
+});
+export const zeroValueCancellation = z.strictObject({
+  id,
+  order_id: id,
+  order_item_id: id,
+  quantity: version,
+  restocked_quantity: z.number().int().nonnegative(),
+  created_at: timestamp,
+});
+export const paypalRefundResult = z.strictObject({
+  refund_request_id: id,
+  order_id: id,
+  provider: z.literal('paypal'),
+  provider_status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'CANCELLED']),
+  pending_reconciliation: z.boolean(),
+});
+export const checkoutQuote = z.strictObject({
+  id,
+  status: z.enum(['open', 'converted', 'completed', 'cancelled', 'expired']),
+  is_reserved: z.boolean(),
+  order_id: id.nullable(),
+  currency: z.literal('USD'),
+  ...totals,
+  tax_context: jsonObject,
+  shipping_line: jsonObject.nullable(),
+  shipping_address: jsonObject,
+  shipping_method_id: id.nullable(),
+  shipping_method_name: z.string().nullable(),
+  discount_code: z.string().nullable(),
+  customer_note: z.string().nullable(),
+  promotions: z.array(z.json()),
+  cancel_reason: z.string().nullable(),
+  expires_at: timestamp,
+  created_at: timestamp,
+  updated_at: timestamp,
+  lines: z.array(
+    z.strictObject({
+      id,
+      line_key: z.string(),
+      attributes: z.record(z.string(), z.string()),
+      tax_lines: z.array(z.json()),
+      discount_allocations: z.array(z.json()),
+      variant_id: id,
+      product_id: id,
+      sku: z.string().nullable(),
+      name: z.string(),
+      variant_title: z.string(),
+      options: z.json(),
+      unit_price: money,
+      quantity: version,
+      discount_total: money,
+      total: money,
+      line_total: money,
+      track_inventory: z.boolean(),
+    }),
+  ),
+});
 export const orderResult = adminOrderPage.shape.items.element.extend({
   ...totals,
   tax_context: jsonObject,

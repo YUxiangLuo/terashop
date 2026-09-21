@@ -24,6 +24,142 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('订单辅助工具输出保持精确事件 ID、报价快照和独立取消事实，拒绝额外字段', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const line = {
+    id,
+    line_key: 'key',
+    attributes: { text: 'untrusted' },
+    tax_lines: [],
+    discount_allocations: [],
+    variant_id: id,
+    product_id: id,
+    sku: null,
+    name: 'Item',
+    variant_title: '',
+    options: {},
+    unit_price: 7.25,
+    quantity: 2,
+    discount_total: 1,
+    total: 14.5,
+    line_total: 13.5,
+    track_inventory: false,
+  };
+  const quote = {
+    id,
+    status: 'expired',
+    is_reserved: false,
+    order_id: id,
+    currency: 'USD',
+    subtotal: 14.5,
+    discount_total: 1,
+    shipping_total: 0,
+    tax_total: 0,
+    total: 13.5,
+    tax_context: { status: 'unrecorded' },
+    shipping_line: null,
+    shipping_address: { city: 'untrusted' },
+    shipping_method_id: null,
+    shipping_method_name: null,
+    discount_code: null,
+    customer_note: '',
+    promotions: [{ snapshot: { rule: 'historic' } }],
+    cancel_reason: null,
+    expires_at: at,
+    created_at: at,
+    updated_at: at,
+    lines: [line],
+  };
+  const event = {
+    id: '9007199254740993',
+    order_id: id,
+    actor_id: null,
+    type: 'future_event',
+    created_at: at,
+  };
+  const cancellation = {
+    id,
+    order_id: id,
+    order_item_id: id,
+    quantity: 2,
+    restocked_quantity: 0,
+    created_at: at,
+  };
+  const cases = [
+    [
+      'update_order_admin_note',
+      { order_id: id, changes: { expected_admin_note: null, admin_note: '' } },
+      { id, admin_note: '' },
+      true,
+    ],
+    ['list_admin_order_events', { order_id: id }, { items: [event], next_cursor: event.id }, false],
+    ['get_order_checkout_quote', { order_id: id }, quote, false],
+    [
+      'cancel_zero_value_order_item',
+      { order_id: id, order_item_id: id, quantity: 2, idempotency_key: 'retained' },
+      cancellation,
+      true,
+    ],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      for (const invalid of [{}, { ...expected, token: 'SECRET' }]) {
+        response = invalid;
+        const before = calls.length;
+        const failed = await session.client.callTool({ name, arguments: args });
+        expect(failed.isError).toBe(true);
+        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: 'INVALID_BACKEND_RESPONSE',
+          outcome_unknown: mutation,
+        });
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+        expect(calls.length - before).toBe(3);
+      }
+    }
+    response = { id, admin_note: null };
+    expect(
+      await toolData<typeof response>(session.client, 'update_order_admin_note', {
+        order_id: id,
+        changes: { expected_admin_note: '', admin_note: null },
+      }),
+    ).toEqual(response);
+    for (const [name, args, invalid] of [
+      [
+        'list_admin_order_events',
+        { order_id: id },
+        { items: [{ ...event, id: 9007199254740992 }], next_cursor: null },
+      ],
+      [
+        'list_admin_order_events',
+        { order_id: id },
+        { items: [{ ...event, data: { note: 'SECRET' } }], next_cursor: null },
+      ],
+      [
+        'get_order_checkout_quote',
+        { order_id: id },
+        { ...quote, lines: [{ ...line, location_id: 'SECRET' }] },
+      ],
+      ['get_order_checkout_quote', { order_id: id }, { ...quote, is_reserved: 'false' }],
+      ['get_order_checkout_quote', { order_id: id }, null],
+      ['cancel_zero_value_order_item', cases[3][1], { ...cancellation, restocked_quantity: -1 }],
+    ] as const) {
+      response = invalid;
+      const failed = await session.client.callTool({ name, arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('扩展字段和对象的全部工具校验输出，保留动态值与未定义字段，异常写响应不重试', async () => {
   const id = crypto.randomUUID(),
     at = '2026-09-20T11:12:13.123456+00:00';

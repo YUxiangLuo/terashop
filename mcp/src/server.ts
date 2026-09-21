@@ -7,6 +7,11 @@ import {
   version,
   orderNumber,
   adminOrderPage,
+  orderNoteResult,
+  orderEventPage,
+  zeroValueCancellation,
+  paypalRefundResult,
+  checkoutQuote,
   orderResult,
   adminOrderResult,
   adminOrderDetail,
@@ -110,7 +115,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     execute: (args: A) => Promise<Json>,
     mutation = false,
     idempotent = false,
-    dataSchema: z.ZodType<Json> = z.json(),
+    dataSchema: z.ZodType<Json>,
   ) {
     if (mutation && !options.allowWrites) return;
     server.registerTool(
@@ -157,7 +162,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     schema: z.ZodType<NoInfer<RpcArgs<N>>>,
     mutation = false,
     idempotent = false,
-    dataSchema: z.ZodType<Json> = z.json(),
+    dataSchema: z.ZodType<Json>,
   ) {
     tool(
       name,
@@ -893,6 +898,8 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       }),
     }),
     true,
+    false,
+    orderNoteResult,
   );
   rpc(
     'list_admin_order_events',
@@ -907,6 +914,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
         .optional(),
       type_filter: z.string().min(1).max(200).optional(),
     }),
+    false,
+    false,
+    orderEventPage,
   );
   rpc(
     'get_order_pricing',
@@ -945,7 +955,14 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     false,
     fulfillmentBalance,
   );
-  rpc('get_order_checkout_quote', 'Read the quote associated with an order.', order);
+  rpc(
+    'get_order_checkout_quote',
+    'Read the quote associated with an order.',
+    order,
+    false,
+    false,
+    checkoutQuote,
+  );
   rpc(
     'cancel_order',
     'Cancel only eligible unpaid, unshipped orders. Not a paid-order refund or order edit.',
@@ -960,6 +977,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     z.strictObject({ order_id: id, order_item_id: id, quantity: version, idempotency_key: key, reason }),
     true,
     true,
+    zeroValueCancellation,
   );
   rpc(
     'mark_order_paid',
@@ -988,6 +1006,8 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     paypalRefund,
     (args) => backend.refundPayPal(args),
     true,
+    false,
+    paypalRefundResult,
   );
 
   rpc(

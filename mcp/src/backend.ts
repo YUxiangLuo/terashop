@@ -1,14 +1,6 @@
 import type { Database, Json } from '../../types/database';
 import * as z from 'zod/v4';
-import { paypalRefund } from './schemas';
-
-const paypalRefundResult = z.object({
-  refund_request_id: z.uuid(),
-  order_id: z.uuid(),
-  provider: z.literal('paypal'),
-  provider_status: z.enum(['PENDING', 'COMPLETED', 'FAILED', 'CANCELLED']),
-  pending_reconciliation: z.boolean(),
-});
+import { paypalRefund, paypalRefundResult } from './schemas';
 
 export type Functions = Database['public']['Functions'];
 // Supabase emits Args: never for parameterless RPCs; PostgREST accepts {}.
@@ -127,7 +119,7 @@ export class AdminBackend {
     await this.assertAdmin();
     try {
       const raw = await this.json('/functions/v1/paypal-create-refund', args, true);
-      const parsed = paypalRefundResult.safeParse(raw);
+      const parsed = paypalRefundResult.strip().safeParse(raw);
       if (!parsed.success || parsed.data.order_id.toLowerCase() !== args.order_id.toLowerCase()) {
         throw new BackendError('INVALID_BACKEND_RESPONSE', true);
       }

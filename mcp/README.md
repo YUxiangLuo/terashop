@@ -70,7 +70,8 @@
 | 运维 | `list_admin_outbox_events`、`list_admin_payment_provider_events`、`list_admin_reconciliation_issues`、`get_admin_operations_summary`、`redrive_outbox_event`；全店未对账资金及分组件区间积压概览，仅安全诊断，不开放资金重放或宣称整体健康 |
 | 导出 | `export_admin_orders`；固定字段 JSON 分页，不含客户联系方式，订单号/金额为字符串；不写文件或外发，不保证跨页冻结快照 |
 
-- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。`list_admin_orders`、`get_admin_order`、`get_order_pricing`、`cancel_order`、`mark_order_paid`、`refund_order`、`list_admin_payment_operations`、`get_admin_payment_summary`、`get_order_ledger`、`get_order_fulfillment_balance` 及全部五个退货工具已使用逐字段输出 schema，固定结构和嵌套关系行拒绝未知字段。订单地址、选项、政策与促销等 JSON 快照仍按既有动态内容合同保留；schema 不重算金额或替代数据库业务校验。其他工具的 `outputSchema` 仍约束统一 JSON 信封，后续逐领域收紧。
+- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 99 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
+- 订单备注回执保留 null 与空字符串的区别；事件列表只含安全元数据，ID/游标保留精确 bigint 字符串，不含原始 data。结账报价保留后端计算的过期/预留状态与存储快照，不把它当作当前重新报价；缺失报价仍报错。零对价取消返回独立数量及回库事实，不是退款。PayPal 输出声明复用后端白名单合同，仍先剔除 Edge 额外字段并验证订单关联，pending_reconciliation 不被改写为资金已结算。
 - 全部 Metafield／Metaobject 工具使用逐字段输出 schema，包含定义、值、分页及删除回执。定义字段声明和验证规则拒绝未知字段；value 与 values 内部保留原始动态 JSON，不展开引用。无定义字段保留 definition_id:null；definition_access 是配置，Metaobject 的 is_public 是后端当前可见性计算，均不代表披露批准或前台展示保证。缺失详情返回 null；删除成功只接受 `{id,deleted:true}`，异常写响应标记结果未知，不自动重试。
 - 商品列表/详情/创建/更新及媒体上传使用逐字段输出 schema。列表保留可空价格区间和微秒游标；完整聚合含成本、私有 Metafield 和全部状态子资源，不是公开商品 DTO。嵌套行拒绝未知字段，Metafield value 保留动态 JSON；兼容负排序位置和数据库既有负成本，不放宽写入命令。媒体回执仅含 path/url，上传与关联仍分开，URL 不代表内容安全认证。异常写响应标记结果未知，不自动重试。
 - 评论列表/详情/审核/删除使用逐字段输出 schema。列表不含正文，详情和审核结果保留原始标题/正文作为不可信数据，不含客户联系方式；评分为 1–5 整数，状态仅 pending/approved/rejected。删除成功仅接受 `{id,deleted:true}`；异常审核或删除响应标记结果未知，不自动重试或替换版本。缺失详情仍返回 null，不推断购买验证。
