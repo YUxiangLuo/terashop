@@ -257,6 +257,8 @@ CREATE TRIGGER variant_option_values_catalog_write BEFORE INSERT OR UPDATE OR DE
 CREATE CONSTRAINT TRIGGER variant_option_values_catalog_check AFTER INSERT OR UPDATE OR DELETE ON public.variant_option_values DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
 CREATE TRIGGER product_images_catalog_write BEFORE INSERT OR UPDATE OR DELETE ON public.product_images FOR EACH ROW EXECUTE FUNCTION private.guard_catalog_product();
 CREATE CONSTRAINT TRIGGER product_images_catalog_check AFTER INSERT OR UPDATE OR DELETE ON public.product_images DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_catalog_product();
+CREATE TRIGGER product_images_media_ref AFTER INSERT OR UPDATE OF id,url ON public.product_images FOR EACH ROW EXECUTE FUNCTION private.sync_catalog_media_url_ref();
+CREATE TRIGGER categories_media_ref AFTER INSERT OR UPDATE OF id,image_url ON public.categories FOR EACH ROW EXECUTE FUNCTION private.sync_catalog_media_url_ref();
 CREATE TRIGGER product_reviews_remoderate BEFORE UPDATE ON public.product_reviews FOR EACH ROW EXECUTE FUNCTION public.review_edit_requires_moderation();
 CREATE TRIGGER product_reviews_revision BEFORE INSERT OR UPDATE ON public.product_reviews FOR EACH ROW EXECUTE FUNCTION private.bump_review_revision();
 CREATE TRIGGER product_reviews_updated_at BEFORE UPDATE ON public.product_reviews FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
@@ -398,6 +400,7 @@ REVOKE ALL ON FUNCTION private.valid_line_attributes(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.checkout_line_key(uuid, jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.catalog_product_id(text, jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.guard_catalog_product() FROM PUBLIC;
+REVOKE ALL ON FUNCTION private.sync_catalog_media_url_ref() FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION private.assert_catalog_product() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.guard_category_tree() FROM PUBLIC;
 REVOKE ALL ON FUNCTION private.assert_category_tree() FROM PUBLIC;

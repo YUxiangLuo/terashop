@@ -1769,6 +1769,17 @@ CREATE TABLE commerce.zero_value_cancellations (
 CREATE INDEX zero_value_cancellations_item_idx ON commerce.zero_value_cancellations(order_item_id);
 ALTER TABLE commerce.zero_value_cancellations ENABLE ROW LEVEL SECURITY;
 
+-- Exact URL edges only: do not infer Storage ownership from a URL hostname or
+-- pathname. Absence here is NOT deletion authorization (rich text/JSON remain).
+CREATE TABLE private.catalog_media_url_refs (
+  product_image_id uuid UNIQUE REFERENCES public.product_images(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  category_id uuid UNIQUE REFERENCES public.categories(id) ON DELETE CASCADE ON UPDATE CASCADE,
+  url text NOT NULL,
+  CHECK (num_nonnulls(product_image_id, category_id) = 1)
+);
+ALTER TABLE private.catalog_media_url_refs ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.catalog_media_url_refs FROM PUBLIC, anon, authenticated, service_role;
+
 -- JSON remains the ordered content; these derived edges enforce target lifetime.
 CREATE TABLE private.metafield_metaobject_refs (
   metafield_id uuid NOT NULL REFERENCES public.metafields(id) ON DELETE CASCADE,

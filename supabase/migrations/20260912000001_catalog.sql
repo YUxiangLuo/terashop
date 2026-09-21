@@ -3102,4 +3102,28 @@ begin
 end;
 $$;
 
+-- Source row locks and existing catalog/category revision guards serialize edits.
+-- Deleting a source cascades its edge; transaction rollback restores both.
+CREATE FUNCTION private.sync_catalog_media_url_ref() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare v_row jsonb := to_jsonb(new); v_url text;
+begin
+  if tg_table_name = 'product_images' then
+    insert into private.catalog_media_url_refs(product_image_id,url)
+      values ((v_row->>'id')::uuid,v_row->>'url')
+      on conflict (product_image_id) do update set url=excluded.url;
+  else
+    v_url := v_row->>'image_url';
+    if v_url is null then
+      delete from private.catalog_media_url_refs where category_id=(v_row->>'id')::uuid;
+    else
+      insert into private.catalog_media_url_refs(category_id,url)
+        values ((v_row->>'id')::uuid,v_url)
+        on conflict (category_id) do update set url=excluded.url;
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
 commit;

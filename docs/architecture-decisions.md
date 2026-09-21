@@ -306,3 +306,13 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 每次账本写入以 NOWAIT 锁定并实际更新父订单版本，再检查捕获/退款总额；直接 INSERT 与 pending → succeeded 都不能使用旧 RR 快照超收或超退。
 
 客户、管理员及 service 通过 `get_order_ledger.transactions` 读取安全 DTO，不暴露账本底表或任意 metadata。删除原 `capture_payment_intent.raw` 参数，不再另存渠道 payload 副本；可信事件的 allowlist 字段与 hash 仍保存在 Inbox，真实外部资金仍由 `provider_money_movements` 独立记录并对账。它们分别代表渠道事件、实际资金和本地入账，不是应合并的重复账本。手工收退款不代表线上渠道发生了资金操作。
+
+## ADR-026：媒体采用保守保留与显式引用边界
+
+选择保守策略：旧媒体、以自由 URL 方式使用的媒体不开放物理删除；不能把未发现引用、移除商品图片关联或商品已删除当作清理授权。新受管理媒体须具备明确的生命周期与引用合同后，才能单独开放删除，不提供绕过保护的 force 参数。
+
+第一阶段仅登记显式 URL 字段：`product_images.url` 与非 null 的 `categories.image_url`。`private.catalog_media_url_refs` 保存源记录外键和完整 URL，由源表触发器在同一事务更新，源删除级联清理；外部 URL、query、fragment 和空字符串均原样保留。不根据相似路径/域名推断 Storage 归属，不访问 URL，也不关联到 Storage 内部表。该表启用 RLS，客户端及 service 均不能直接读写或调用同步触发器。现有 RPC、底表写入、商品 revision 和分类编辑令牌语义保持不变。
+
+这是当前字段引用的派生登记，不是完整媒体资产表、历史引用记录或删除许可。富文本、任意 JSON、复制到站外的 URL 无法据此枚举；登记为零也不能证明没有引用。报价/订单目前没有独立图片快照字段，不为媒体清理改写不可变商业快照。本阶段不新增 MCP 工具或 Storage 删除策略。
+
+后续需先为新增受管理媒体设计独立于 Storage 内部实现的保留/删除状态与显式引用方式；关联操作和删除准备必须争用同一持久状态，并覆盖旧快照竞争。与自由 URL 的混用不能静默降低保留要求。通过 Storage API 删除文件，而不是 SQL 删除 storage.objects；准备、执行、确认之间的超时与部分失败需保留可重读的操作身份，禁止自动换 ID 重试。数据库事务与对象文件操作不是一个原子事务，不能依赖 Storage 内部外键/触发器宣称已解决两者的一致性。
