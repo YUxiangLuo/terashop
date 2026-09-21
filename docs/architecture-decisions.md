@@ -528,3 +528,15 @@ Supabase 保持唯一用户目录。授权服务须通过自定义登录交互�
 支持运行时检查为 `bun scripts/mcp-oidc-compat.ts`：Bun 构建共享场景，在 digest 固定的 Node 22 LTS 容器执行，实测 v22.23.2；只挂载临时产物与依赖，非 root、只读文件系统、无外部网络、不发布端口。JWT/opaque 场景均覆盖 discovery、S256、resource、scope、轮换/重放/撤销；opaque 场景进一步用真实 introspection 和实际 MCP authorizer 验证合成批准前拒绝、批准后权限交集、旧上下文撤销，以及新授权不继承旧批准。测试的内存 adapter、自动同意、合成 UUID/批准记录不得用于生产，不宣称真实数据库端到端或并发验收。
 
 后续顺序：① 持久化 provider adapter 与重启恢复，验证 code/refresh 单次消费的并发拒绝及 grant 撤销与写入竞争，不能只实现覆盖写；② 真实 Supabase 登录/同意与本地 grant、加密凭据创建，失败时不得遗留可越权授权；③ Streamable HTTP、metadata/challenge、逐请求身份/权限与请求预算；④ 密钥/代理/日志/限流部署配置、故障恢复及两个真实客户端验收。生产授权服务、持久化 adapter 和 HTTP listener 本批均未实现。
+
+### provider 持久化与并发消费
+
+后续已实现初版 [PostgreSQL adapter](../mcp/src/oidc-adapter.ts)，通过专用连接访问独立授权数据库的 [oidc schema](../mcp/auth/storage.sql)，不放入店铺 SQL 基线或 PostgREST schema。每库固定一个 issuer；运行时不自动执行 DDL，部署须配置非超级用户、最小 DML 权限、TLS 与连接预算。MCP 业务仍使用逐用户 JWT，授权库连接不能用于店铺操作。
+
+存储保留完整 JSON payload、TTL、grant 归属、Session uid / DeviceCode userCode 索引和不可清除的消费状态。find 在单条查询中核对过期与撤销，clockTolerance 须显式与 provider 一致；不修改 payload.exp。所有写操作使用 READ COMMITTED 短事务和同一数据库 advisory lock，避免缺失记录、首次插入、消费和撤销之间的空隙。该选择串行化全库授权写入，暂未进行吞吐验收；没有外部请求在锁内执行。
+
+provider 9.12.2 先 find/check 再 consume，单纯更新 consumed 不能防止两个请求都签发后继令牌。adapter 对已消费记录先提交 grant 家族撤销，再抛 InvalidGrant；失败不能在事务内抛出导致撤销回滚。旧 upsert 保留 consumed，不能更换 grant 或复活销毁记录。Grant.destroy 和任一模型 revokeByGrantId 都永久登记撤销并清除整组 payload，不依赖 Grant 行仍存在；在途签发必须重新检查该标记。已返回的结果不能被撤回，资源服务器仍需在线校验；消费与后继签发不是一个事务，结果未知不得自动重试。
+
+销毁 ID 和撤销标记不自动回收；过期记录查询不可见但 payload 尚未定期清理。授权 payload 含敏感身份/协议状态，现无应用层加密、生产备份与保留期实现；需后续运维设计，不能宣称完成生产秘密管理。
+
+集成测试在可丢弃本地集群创建并删除随机独立数据库，验证新连接读取、索引替换、TTL/容差、两个连接竞争单次消费、撤销先于/后于写入两种有锁屏障的顺序、授权隔离、旧 save 和真实 provider opaque 协议。当前持久化集成在 Bun 执行；Node LTS 容器检查仍使用内存 adapter。下一批需将真实持久化路径带入受支持运行时并验证进程重启、并发 HTTP 兑换，随后串联真实登录同意；目前没有生产服务或 HTTP listener。

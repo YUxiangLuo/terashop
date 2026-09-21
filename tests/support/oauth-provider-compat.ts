@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash, generateKeyPairSync, randomBytes, verify } from 'node:crypto';
-import Provider, { errors } from 'oidc-provider';
+import Provider, { errors, type AdapterConstructor } from 'oidc-provider';
 import { GrantAuthorizer } from '../../mcp/src/authorization';
 
 // Compatibility experiment, NOT an authentication service. The loopback-only
 // interaction automatically approves a synthetic identity; never reuse it as login.
-export async function verifyOAuthProvider(accessTokenFormat: 'jwt' | 'opaque' = 'jwt') {
+export async function verifyOAuthProvider(
+  accessTokenFormat: 'jwt' | 'opaque' = 'jwt',
+  adapter?: AdapterConstructor,
+) {
   const resource = 'https://tera.example/mcp';
   const callback = 'http://127.0.0.1:49199/callback';
   const clientId = 'tera-compatibility';
@@ -58,6 +61,7 @@ export async function verifyOAuthProvider(accessTokenFormat: 'jwt' | 'opaque' = 
   const issuer = `http://127.0.0.1:${address.port}`;
   try {
     provider = new Provider(issuer, {
+      adapter,
       jwks: { keys: [key] },
       cookies: { keys: [randomBytes(32).toString('hex')] },
       renderError: (ctx, output) => {

@@ -1,0 +1,26 @@
+-- Apply explicitly to a dedicated authorization database, never via a public API.
+-- Run as its non-superuser owner; runtime needs DML only, no schema creation.
+create schema oidc;
+revoke all on schema oidc from public;
+
+create table oidc.revoked_grants (
+  id text primary key,
+  revoked_at timestamptz not null default clock_timestamp()
+);
+create table oidc.artifacts (
+  model text not null,
+  id text not null,
+  payload jsonb,
+  expires_at timestamptz,
+  grant_id text,
+  uid text,
+  user_code text,
+  consumed bigint,
+  destroyed boolean not null default false,
+  primary key (model, id),
+  check (destroyed = (payload is null))
+);
+create index on oidc.artifacts (grant_id);
+create unique index on oidc.artifacts (uid) where model = 'Session' and not destroyed;
+create unique index on oidc.artifacts (user_code) where model = 'DeviceCode' and not destroyed;
+revoke all on all tables in schema oidc from public;

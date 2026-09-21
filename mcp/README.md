@@ -6,7 +6,7 @@
 
 最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。当前优先串联登录授权、逐用户凭据刷新、Streamable HTTP 和真实客户端验收；大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器只用于登录和授权，不依赖 Admin SPA 执行业务。
 
-远程授权方案已选定：独立 Node.js LTS 容器运行 `oidc-provider 9.12.2`，MCP 与安装、构建、测试工具仍使用 Bun。Supabase 保持唯一用户目录；授权服务须从真实 Supabase 登录取得 UUID，不建立第二套账号或按邮箱推断身份。采用 opaque access token 与在线 introspection；当前只完成受支持运行时的协议验证和 MCP 校验 profile，尚无生产授权服务、持久化 provider adapter 或远程监听器。
+远程授权方案已选定：独立 Node.js LTS 容器运行 `oidc-provider 9.12.2`，MCP 与安装、构建、测试工具仍使用 Bun。Supabase 保持唯一用户目录；授权服务须从真实 Supabase 登录取得 UUID，不建立第二套账号或按邮箱推断身份。采用 opaque access token 与在线 introspection；已完成受支持运行时的协议验证、MCP 校验 profile 和初版 PostgreSQL provider adapter，尚无生产授权服务或远程监听器。
 
 ## 运行与凭据
 
@@ -208,7 +208,13 @@ grant 元数据已通过私有 PostgreSQL 表和 service-only `mcp_grant_command
 
 `GrantAuthorizer` 增加显式 `tokenProfile: 'oidc-provider'`，要求 active、Bearer、AccessToken 类型、精确 issuer/单一 resource、未过期时间、UUID sub、client_id 和 provider grant_id；本地批准的 user_id 必须等于 sub。数据库 binding.session_id 在此 profile 保存 provider grant_id（授权纪元），不使用 SSO sid，且不等于本地 grant UUID。真实 introspection 与合成批准存储的联合测试验证无批准拒绝、refresh token 拒绝、轮换保留绑定、撤销阻断旧上下文，以及新授权不能继承旧批准。profile 由可信配置决定，不从 token 选择；省略仍保留历史 Keycloak 行为，`KeycloakGrantAuthorizer` 为兼容别名。已有凭据读写/刷新共用此校验，但尚未完成 OIDC 与真实数据库、登录同意的完整联合验收。
 
-下一步实现 provider 持久化 adapter，验证单次消费及撤销的并发安全，再接真实 Supabase 登录/同意、本地授权与凭据保存、Streamable HTTP、生产配置及客户端验收。上述 Docker 命令仅是 opt-in 协议检查，不创建或部署授权服务。详见 ADR-027。
+provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立授权库 [storage.sql](auth/storage.sql)，使用固定版本 postgres 驱动，不经过 PostgREST、不添加店铺业务表或 MCP 工具。每个数据库仅服务一个 issuer；宿主负责连接、TLS、最小权限及池生命周期，DDL 必须显式应用，不由请求自动建表。完整 provider payload 持久化，Session uid / DeviceCode userCode 索引随更新/删除维护；过期查询拒绝，clockTolerance 须与 provider 配置一致。
+
+所有写入在短事务内使用同一数据库 advisory lock，跨连接/进程串行化；事务内不调用外部服务。consume 只允许一次，竞争失败提交整组 grant 撤销后返回 invalid_grant；旧 save 不能清除 consumed、改换 grant 或复活已销毁 ID。Grant.destroy / revokeByGrantId 保留永久撤销标记并清除该组 payload，在途 upsert 不能重新创建其令牌。销毁记录也保留 ID；没有自动清理或容量治理，不能手工删标记来“恢复”。这不是消费与全部后继签发的单事务，崩溃后可能需重新授权，不自动重试。
+
+`bun run test:current tests/mcp-oidc-storage.test.ts` 在已验证的可丢弃本地集群中新建随机独立数据库，结束关闭连接并删除该库；覆盖连接重建、过期/索引、双连接消费、撤销前后两种写入竞争和真实 provider opaque 协议。该集成测试使用 Bun；已有 Node Docker 命令仍使用内存 adapter，尚未完成持久化路径的 Node 容器、多进程重启和 HTTP 并发兑换验收。数据库 payload 含敏感授权信息，尚无应用层加密、清理和生产备份方案，不得把本地验证当成部署许可。
+
+下一步验证持久化路径的受支持运行时与进程恢复，再接真实 Supabase 登录/同意、本地授权与凭据保存、Streamable HTTP、生产配置及客户端验收。现有 Docker 命令仅是 opt-in 协议检查，不创建或部署授权服务。详见 ADR-027。
 
 ```bash
 bun run typecheck
