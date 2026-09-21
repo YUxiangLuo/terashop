@@ -24,6 +24,126 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('促销输出保留规则和独立分页，目标恰好一个引用，拒绝额外字段和异常写响应', async () => {
+  const id = crypto.randomUUID(),
+    other = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const promotion = {
+    id,
+    revision: 2,
+    name: 'Promotion',
+    code: null,
+    type: 'buy_x_get_y',
+    params: { buy: 2, get: 1 },
+    priority: -3,
+    stackable: false,
+    apply_scope: 'selected',
+    get_scope: 'same_as_apply',
+    usage_limit: null,
+    used_count: 0,
+    per_customer_limit: 1,
+    starts_at: null,
+    ends_at: 'infinity',
+    is_active: false,
+    created_at: at,
+    updated_at: at,
+  };
+  const target = {
+    id,
+    promotion_id: other,
+    role: 'get',
+    product_id: null,
+    category_id: other,
+    variant_id: null,
+  };
+  const redemption = { id, promotion_id: other, customer_id: id, order_id: null, created_at: at };
+  const cases = [
+    ['get_admin_promotion', { promotion_id: id }, promotion, false],
+    ['list_admin_promotions', {}, { items: [promotion], next_cursor: id }, false],
+    [
+      'create_promotion',
+      { promotion_id: id, changes: { name: 'Promotion', type: 'buy_x_get_y', params: { buy: 2, get: 1 } } },
+      promotion,
+      true,
+    ],
+    ['update_promotion', { promotion_id: id, expected_revision: 1, changes: {} }, promotion, true],
+    ['list_admin_promotion_targets', { promotion_id: other }, { items: [target], next_cursor: id }, false],
+    [
+      'list_admin_discount_redemptions',
+      { promotion_id: other },
+      { items: [redemption], next_cursor: null },
+      false,
+    ],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      for (const invalid of [{ ...expected, secret: 'SECRET' }, {}]) {
+        response = invalid;
+        const before = calls.length;
+        const failed = await session.client.callTool({ name, arguments: args });
+        expect(failed.isError).toBe(true);
+        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: 'INVALID_BACKEND_RESPONSE',
+          outcome_unknown: mutation,
+        });
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+        expect(calls.length - before).toBe(3);
+      }
+    }
+    response = null;
+    expect(await toolData(session.client, 'get_admin_promotion', { promotion_id: id })).toBeNull();
+    for (const refs of [
+      { product_id: id, category_id: null, variant_id: null },
+      { product_id: null, category_id: null, variant_id: id },
+    ]) {
+      const expected = { items: [{ ...target, ...refs }], next_cursor: null };
+      response = expected;
+      expect(
+        await toolData<typeof expected>(session.client, 'list_admin_promotion_targets', {
+          promotion_id: other,
+        }),
+      ).toEqual(expected);
+    }
+    for (const invalid of [
+      { ...target, category_id: null },
+      { ...target, product_id: id },
+      { ...target, role: 'all' },
+      { ...target, secret: 'SECRET' },
+    ]) {
+      response = { items: [invalid], next_cursor: null };
+      const failed = await session.client.callTool({
+        name: 'list_admin_promotion_targets',
+        arguments: { promotion_id: other },
+      });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+    for (const [name, args, invalid] of [
+      ['get_admin_promotion', { promotion_id: id }, { ...promotion, params: [] }],
+      ['get_admin_promotion', { promotion_id: id }, { ...promotion, used_count: '0' }],
+      ['get_admin_promotion', { promotion_id: id }, { ...promotion, type: 'custom' }],
+      [
+        'list_admin_discount_redemptions',
+        { promotion_id: other },
+        { items: [{ ...redemption, email: 'SECRET' }], next_cursor: null },
+      ],
+    ] as const) {
+      response = invalid;
+      const failed = await session.client.callTool({ name, arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('分类、配送和税率输出保留配置边界，拒绝字段漂移且写失败不重试', async () => {
   const id = crypto.randomUUID(),
     at = '2026-09-20T11:12:13.123456+00:00';

@@ -670,6 +670,64 @@ export const promotionType = z.enum([
   'buy_x_get_y',
   'free_shipping',
 ]);
+export const promotionResult = z.strictObject({
+  id,
+  revision: version,
+  name: z.string(),
+  code: z.string().nullable(),
+  type: promotionType,
+  params: jsonObject,
+  priority: z.number().int().min(-2147483648).max(2147483647),
+  stackable: z.boolean(),
+  apply_scope: z.enum(['all', 'selected']),
+  get_scope: z.enum(['same_as_apply', 'selected']),
+  usage_limit: quantity.positive().nullable(),
+  used_count: quantity,
+  per_customer_limit: quantity.positive(),
+  starts_at: diagnosticTimestamp.nullable(),
+  ends_at: diagnosticTimestamp.nullable(),
+  is_active: z.boolean(),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+export const promotionPage = z.strictObject({
+  items: z.array(promotionResult).max(100),
+  next_cursor: id.nullable(),
+});
+export const promotionTargetPage = z.strictObject({
+  items: z
+    .array(
+      z
+        .strictObject({
+          id,
+          promotion_id: id,
+          role: z.enum(['apply', 'get']),
+          product_id: id.nullable(),
+          category_id: id.nullable(),
+          variant_id: id.nullable(),
+        })
+        .refine(
+          (t) => [t.product_id, t.category_id, t.variant_id].filter((v) => v !== null).length === 1,
+          'Exactly one target reference is required',
+        ),
+    )
+    .max(100),
+  next_cursor: id.nullable(),
+});
+export const discountRedemptionPage = z.strictObject({
+  items: z
+    .array(
+      z.strictObject({
+        id,
+        promotion_id: id,
+        customer_id: id,
+        order_id: id.nullable(),
+        created_at: timestamp,
+      }),
+    )
+    .max(100),
+  next_cursor: id.nullable(),
+});
 export const promotionChanges = z.strictObject({
   name: z.string().optional(),
   code: z.string().nullable().optional(),
