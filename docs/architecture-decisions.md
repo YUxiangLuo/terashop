@@ -476,6 +476,14 @@ grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保
 
 凭据 RPC 的写入、刷新领取/完成和已初始化读取均强制检查绑定会话仍存在且属于用户；未初始化读取仍返回 revision=0。会话删除后拒绝返回密文和完成刷新，但仍允许撤销清除。测试覆盖真实 JWT 篡改、service/普通客户拒绝、未绑定写入和会话删除后全部凭据动作拒绝；联合实验改用四个独立会话，并验证同用户会话替换拒绝。它仍不证明 refresh token 配对、完整 Auth 超时策略或用户同意，不能据此启用真实刷新。
 
+### 受信宿主取得同次登录的凭据对
+
+[createDownstreamLogin](../mcp/src/login.ts) 是内部 PKCE 兑换原语，不是 HTTP 回调或 MCP 工具。宿主生成 32 字节随机 verifier，仅公开 S256 challenge；verifier 保留在单个内存对象中，五分钟过期。exchange 只接受授权码，向固定 Supabase HTTPS origin（本地回环可 HTTP）的 `/auth/v1/token?grant_type=pkce` 发送 `{auth_code,code_verifier}`，禁止重定向和自动重试。取同一受信响应中的 access/refresh token 及 expires_at，再用 access token 在线检查非匿名管理员、精确用户 UUID 和真实 session。成功仅向内部宿主返回 `{userId,sessionId,credentials}`，不得把这些凭据交给浏览器或 MCP 客户端。
+
+exchange 在首次 await 前消耗本地尝试，并发调用、非法输入、结果未知或后续身份检查失败都不允许重试；失败统一 LOGIN_EXCHANGE_UNCONFIRMED，不泄漏部分 token。失败可能已在 Auth 创建会话，不宣称已回滚或自动登出。尝试和凭据不持久化，进程重启只能重新登录；这不解决多进程回调路由。尚无浏览器 transaction/state/CSRF 绑定、邮件发送入口、上游身份关联、用户同意或 grant 创建；以后必须将此对象绑定到固定的可信浏览器事务，不能把任意客户端的 code 交给任意尝试。
+
+版本依据：Supabase Auth `v2.196.0` 的 [PKCE handler](https://github.com/supabase/auth/blob/v2.196.0/internal/api/token.go#L214-L288) 验证 verifier，成功兑换后在事务中删除 flow state；不能据此假设并发兑换天然串行，宿主仍禁止重复请求。[OTP](https://github.com/supabase/auth/blob/v2.196.0/internal/api/otp.go#L17-L47) 接受 code_challenge/code_challenge_method；邮件 GET verify 在 PKCE 模式重定向为 code，而 POST verify 直接签发 token，不能混用。新增本地测试经真实 SMTP 邮件及 GET 验证链接取得 code，验证错误 verifier 拒绝、原尝试成功、新 session 身份与本地重复兑换拒绝；未启用真实远程登录。
+
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
 3. **受保护 HTTP transport。** 接 metadata/challenge、SDK transport 和逐请求 context；验证错误 issuer/audience、过期 token、缺失 scope、匿名/普通客户、scope 降级及直接调用隐藏工具全部拒绝。

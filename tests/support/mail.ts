@@ -11,7 +11,7 @@ export async function authMessages(email: string): Promise<Array<{ ID: string }>
   return list.messages.filter(row => row.To.some(to => to.Address.toLowerCase() === email.toLowerCase()));
 }
 
-export async function authMail(email: string, type: 'signup' | 'email_change' | 'recovery',
+export async function authMail(email: string, type: 'signup' | 'email_change' | 'recovery' | 'magiclink',
   excludeIds: string[] = []): Promise<URL> {
   const base = process.env.MAILPIT_URL;
   const api = process.env.API_URL;
