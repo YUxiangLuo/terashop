@@ -24,6 +24,155 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('媒体回执只含路径与 URL，异常输出标记结果未知且不重复上传', async () => {
+  const { backend } = fakeBackend(() => Response.json({}));
+  const args = {
+    product_id: crypto.randomUUID(),
+    media_id: crypto.randomUUID(),
+    content_type: 'image/png',
+    data_base64: 'AA==',
+  };
+  const path = `products/${args.product_id}/${args.media_id}.png`;
+  const expected = { path, url: `${config.url}/storage/v1/object/public/catalog-media/${path}` };
+  let response: typeof expected | { path: string } | { path: string; url: string; token: string } = expected;
+  let uploads = 0;
+  backend.uploadProductMedia = async () => {
+    uploads++;
+    return response;
+  };
+  const session = await mcpSession(backend, true);
+  try {
+    expect(await toolData<typeof expected>(session.client, 'upload_product_media', args)).toEqual(expected);
+    for (const invalid of [{ path }, { ...expected, url: 'not a URL' }, { ...expected, token: 'SECRET' }]) {
+      response = invalid;
+      const before = uploads;
+      const failed = await session.client.callTool({ name: 'upload_product_media', arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+        code: 'INVALID_BACKEND_RESPONSE',
+        outcome_unknown: true,
+      });
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+      expect(uploads - before).toBe(1);
+    }
+  } finally {
+    await session.close();
+  }
+});
+
+test('商品输出保留完整聚合和列表边界，嵌套异常写响应不泄漏或重试', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const summary = {
+    id,
+    slug: 'test',
+    name: '',
+    status: 'archived',
+    revision: 2,
+    updated_at: at,
+    currency: 'USD',
+  };
+  const fields = [
+    {
+      namespace: 'private',
+      key: 'note',
+      type: 'json',
+      value: { instruction: 'untrusted', nested: [null, 3] },
+    },
+  ];
+  const variant = {
+    id,
+    sku: null,
+    barcode: null,
+    price: 13.75,
+    compare_at_price: null,
+    cost: -2.5,
+    position: -2147483648,
+    in_stock: false,
+    is_active: false,
+    track_inventory: true,
+    option_value_ids: [id],
+    metafields: fields,
+  };
+  const detail = {
+    ...summary,
+    created_at: at,
+    description: '',
+    vendor: '',
+    product_type: '',
+    tags: [],
+    seo_title: null,
+    seo_description: '',
+    metafields: fields,
+    variants: [variant],
+    options: [{ id, name: 'Size', position: -1, values: [{ id, value: 'Small', position: -2 }] }],
+    images: [{ id, url: 'legacy-image', alt: '', position: -3, variant_id: null }],
+    categories: [{ id, slug: 'category', name: 'Category' }],
+  };
+  const row = { ...summary, price_from: null, price_to: null, variant_count: 0, primary_image: null };
+  const page = { items: [row], next_cursor: { updated_at: at, id } };
+  const cases = [
+    ['list_admin_products', {}, page, false],
+    ['get_admin_product', { product_id: id }, detail, false],
+    [
+      'create_product',
+      { product_id: id, changes: { product: { slug: 'test', name: 'Test' } } },
+      detail,
+      true,
+    ],
+    ['update_product', { product_id: id, expected_revision: 1, changes: {} }, detail, true],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      const invalids =
+        name === 'list_admin_products'
+          ? [
+              { ...page, items: [{ ...row, description: 'SECRET' }] },
+              { ...page, items: [{ ...row, variant_count: -1 }] },
+            ]
+          : [
+              { ...detail, variants: [{ ...variant, token: 'SECRET' }] },
+              { ...detail, variants: [{ ...variant, price: -1 }] },
+              {
+                ...detail,
+                options: [{ ...detail.options[0], values: [{ id, value: 'Small', position: 2147483648 }] }],
+              },
+              { ...detail, images: [{ ...detail.images[0], token: 'SECRET' }] },
+              { ...detail, metafields: [{ ...fields[0], token: 'SECRET' }] },
+              { ...detail, categories: [{ ...detail.categories[0], token: 'SECRET' }] },
+              { ...detail, revision: Number.MAX_SAFE_INTEGER + 1 },
+              { ...detail, status: 'published' },
+            ];
+      for (const invalid of [{}, { ...expected, token: 'SECRET' }, ...invalids]) {
+        response = invalid;
+        const before = calls.length;
+        const failed = await session.client.callTool({ name, arguments: args });
+        expect(failed.isError).toBe(true);
+        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: 'INVALID_BACKEND_RESPONSE',
+          outcome_unknown: mutation,
+        });
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+        expect(calls.length - before).toBe(3);
+      }
+    }
+    response = null;
+    expect(await toolData(session.client, 'get_admin_product', { product_id: id })).toBeNull();
+    response = {
+      ...page,
+      items: [{ ...row, price_from: 0, price_to: 19.25, variant_count: 2, primary_image: '' }],
+    };
+    expect(await toolData<typeof response>(session.client, 'list_admin_products', {})).toEqual(response);
+  } finally {
+    await session.close();
+  }
+});
+
 test('评论输出区分列表正文与删除回执，拒绝额外字段且写结果未知不重试', async () => {
   const id = crypto.randomUUID(),
     at = '2026-09-20T11:12:13.123456+00:00';
@@ -1487,7 +1636,9 @@ test('MCP 保留大整数游标/微秒时间戳且用户 JWT 透传，不暴露�
   const { backend, calls } = fakeBackend(async (request) => {
     const args = await request.json();
     return Response.json(
-      request.url.endsWith('/list_admin_outbox_events') ? { items: [], next_after_id: args.after_id } : args,
+      request.url.endsWith('/list_admin_outbox_events')
+        ? { items: [], next_after_id: args.after_id }
+        : { items: [], next_cursor: args.after_cursor },
     );
   });
   const session = await mcpSession(backend);
@@ -1499,10 +1650,10 @@ test('MCP 保留大整数游标/微秒时间戳且用户 JWT 透传，不暴露�
     ).toEqual({ items: [], next_after_id: '9007199254740993' });
     const cursor = { updated_at: '2026-09-20T11:12:13.123456+00:00', id: crypto.randomUUID() };
     expect(
-      await toolData<{ after_cursor: typeof cursor }>(session.client, 'list_admin_products', {
+      await toolData<{ items: []; next_cursor: typeof cursor }>(session.client, 'list_admin_products', {
         after_cursor: cursor,
       }),
-    ).toEqual({ after_cursor: cursor });
+    ).toEqual({ items: [], next_cursor: cursor });
     expect(calls).toHaveLength(6);
     expect(calls.every((call) => call.headers.get('authorization') === 'Bearer private-session')).toBe(true);
     expect(

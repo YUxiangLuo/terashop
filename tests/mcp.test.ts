@@ -96,6 +96,36 @@ test('MCP 商品创建/读取/修改，版本冲突不覆盖，未知 UUID 返�
   });
 });
 
+test('MCP 商品列表保留无变体草稿的空价格区间', async () => {
+  const id = crypto.randomUUID();
+  const created = await toolData<{ revision: number; updated_at: string }>(session.client, 'create_product', {
+    product_id: id,
+    changes: { product: { slug: id, name: id } },
+  });
+  cleanup.defer(() => archiveProduct(id));
+  const expected = {
+    items: [
+      {
+        id,
+        slug: id,
+        name: id,
+        status: 'draft',
+        revision: created.revision,
+        updated_at: created.updated_at,
+        currency: 'USD',
+        price_from: null,
+        price_to: null,
+        variant_count: 0,
+        primary_image: null,
+      },
+    ],
+    next_cursor: null,
+  };
+  expect(await toolData<typeof expected>(session.client, 'list_admin_products', { search: id })).toEqual(
+    expected,
+  );
+});
+
 test('MCP 库存幂等重试只调整一次，异参同键拒绝', async () => {
   const product = await stockedProduct(admin, { onHand: 11, cleanup });
   const args = { variant_id: product.variantId, delta: -4, idempotency_key: crypto.randomUUID() };

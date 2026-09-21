@@ -818,6 +818,82 @@ export const itemQuantities = z
   .min(1)
   .max(100);
 const position = z.number().int().min(-2147483648).max(2147483647);
+const productSummary = z.strictObject({
+  id,
+  slug: z.string(),
+  name: z.string(),
+  status: z.enum(['draft', 'active', 'archived']),
+  revision: version,
+  updated_at: timestamp,
+  currency: z.literal('USD'),
+});
+export const adminProductPage = z.strictObject({
+  items: z
+    .array(
+      productSummary.extend({
+        price_from: money.nullable(),
+        price_to: money.nullable(),
+        variant_count: quantity,
+        primary_image: z.string().nullable(),
+      }),
+    )
+    .max(100),
+  next_cursor: z.strictObject({ updated_at: timestamp, id }).nullable(),
+});
+const catalogMetafields = z.array(
+  z.strictObject({
+    namespace: z.string(),
+    key: z.string(),
+    type: z.string(),
+    value: z.json(),
+  }),
+);
+export const adminProduct = productSummary.extend({
+  created_at: timestamp,
+  description: z.string(),
+  vendor: z.string(),
+  product_type: z.string(),
+  tags: z.array(z.string()),
+  seo_title: z.string().nullable(),
+  seo_description: z.string().nullable(),
+  metafields: catalogMetafields,
+  variants: z.array(
+    z.strictObject({
+      id,
+      sku: z.string().nullable(),
+      barcode: z.string().nullable(),
+      price: money,
+      compare_at_price: money.nullable(),
+      // The stored cost column permits negative values; output is not a write command.
+      cost: z.number().nullable(),
+      position,
+      in_stock: z.boolean(),
+      is_active: z.boolean(),
+      track_inventory: z.boolean(),
+      option_value_ids: z.array(id),
+      metafields: catalogMetafields,
+    }),
+  ),
+  options: z.array(
+    z.strictObject({
+      id,
+      name: z.string(),
+      position,
+      values: z.array(z.strictObject({ id, value: z.string(), position })),
+    }),
+  ),
+  images: z.array(
+    z.strictObject({
+      id,
+      url: z.string(),
+      alt: z.string(),
+      position,
+      variant_id: id.nullable(),
+    }),
+  ),
+  categories: z.array(z.strictObject({ id, slug: z.string(), name: z.string() })),
+});
+export const productMediaResult = z.strictObject({ path: z.string().min(1), url: z.url() });
 export const metafieldType = z.enum([
   'text',
   'rich_text',

@@ -49,6 +49,9 @@ import {
   reviewResult,
   reviewPage,
   reviewDeletion,
+  adminProduct,
+  adminProductPage,
+  productMediaResult,
   orderReturns,
   returnAuthorization,
   returnReceipt,
@@ -164,6 +167,8 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     uploadProductMedia,
     (args) => backend.uploadProductMedia(args),
     true,
+    false,
+    productMediaResult,
   );
 
   rpc(
@@ -233,11 +238,17 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       search,
       after_cursor: z.strictObject({ updated_at: z.string().min(1), id }).optional(),
     }),
+    false,
+    false,
+    adminProductPage,
   );
   rpc(
     'get_admin_product',
     'Read product details including revision, costs and private metafields. Missing products return null.',
     z.strictObject({ product_id: id }),
+    false,
+    false,
+    adminProduct.nullable(),
   );
   rpc(
     'create_product',
@@ -249,12 +260,16 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       }),
     }),
     true,
+    false,
+    adminProduct,
   );
   rpc(
     'update_product',
     'Atomic product PATCH. Omitted fields are preserved. Empty resource arrays do not delete; category_ids and variant option IDs replace associations. Reread on revision conflict.',
     z.strictObject({ product_id: id, expected_revision: version, changes: productChanges }),
     true,
+    false,
+    adminProduct,
   );
 
   rpc(
