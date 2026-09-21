@@ -24,6 +24,158 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('履约、库存和仓库输出逐字段校验，保留负可用量与精确流水 ID，写失败不重试', async () => {
+  const id = crypto.randomUUID(),
+    other = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const location = {
+    id,
+    code: 'WH',
+    name: 'Warehouse',
+    address: null,
+    is_default: false,
+    is_active: false,
+    revision: 2,
+    created_at: at,
+  };
+  const level = { variant_id: id, location_id: other, on_hand: 2, reservation_revision: 3 };
+  const availability = { variant_id: id, location_id: other, on_hand: 2, reserved: 5, available: -3 };
+  const movement = {
+    id: '9007199254740993',
+    variant_id: id,
+    location_id: other,
+    delta: -3,
+    on_hand_after: 2,
+    reason: 'transfer_out',
+    order_id: null,
+    actor_id: null,
+    note: null,
+    transfer_id: id,
+    created_at: at,
+  };
+  const transfer = {
+    id,
+    variant_id: id,
+    from_location_id: id,
+    to_location_id: other,
+    quantity: 3,
+    from_on_hand_after: 2,
+    to_on_hand_after: 7,
+    out_movement_id: '9007199254740993',
+    in_movement_id: '9007199254740994',
+    actor_id: null,
+    note: null,
+    created_at: at,
+  };
+  const fulfillment = {
+    id,
+    order_id: other,
+    version: 2,
+    status: 'cancelled',
+    carrier: '',
+    tracking_number: '',
+    tracking_url: null,
+    shipped_at: at,
+    delivered_at: null,
+    created_at: at,
+  };
+  const cases = [
+    ['get_inventory_availability', { variant_id: id }, availability, false],
+    ['get_admin_location', { location_id: id }, location, false],
+    ['list_admin_locations', {}, { items: [location], next_cursor: other }, false],
+    ['list_admin_inventory_movements', {}, { items: [movement], next_cursor: movement.id }, false],
+    ['get_inventory_transfer', { transfer_id: id }, transfer, false],
+    [
+      'transfer_inventory',
+      {
+        variant_id: id,
+        from_location_id: id,
+        to_location_id: other,
+        quantity: 3,
+        idempotency_key: 'retained',
+      },
+      transfer,
+      true,
+    ],
+    ['create_location', { location_id: id, changes: { code: 'WH', name: 'Warehouse' } }, location, true],
+    [
+      'update_location',
+      { location_id: id, expected_revision: 1, changes: { name: 'Warehouse' } },
+      location,
+      true,
+    ],
+    [
+      'set_default_location',
+      { location_id: id, expected_revision: 1 },
+      { ...location, is_active: true, is_default: true },
+      true,
+    ],
+    ['adjust_inventory', { variant_id: id, delta: -3, idempotency_key: 'retained' }, level, true],
+    [
+      'create_fulfillment',
+      { order_id: other, items: [{ order_item_id: id, quantity: 1 }], idempotency_key: 'retained' },
+      fulfillment,
+      true,
+    ],
+    [
+      'update_fulfillment',
+      {
+        fulfillment_id: id,
+        expected_version: 1,
+        changes: { status: 'cancelled' },
+        idempotency_key: 'retained',
+      },
+      fulfillment,
+      true,
+    ],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      for (const invalid of [{ ...expected, request_hash: 'SECRET' }, {}]) {
+        response = invalid;
+        const before = calls.length;
+        const failed = await session.client.callTool({ name, arguments: args });
+        expect(failed.isError).toBe(true);
+        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: 'INVALID_BACKEND_RESPONSE',
+          outcome_unknown: mutation,
+        });
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+        expect(calls.length - before).toBe(3);
+      }
+    }
+    for (const [name, args] of [cases[1], cases[4]]) {
+      response = null;
+      expect(await toolData(session.client, name, args)).toBeNull();
+    }
+    for (const [name, args, invalid] of [
+      ['list_admin_locations', {}, { items: [{ ...location, secret: 'SECRET' }], next_cursor: null }],
+      [
+        'list_admin_inventory_movements',
+        {},
+        { items: [{ ...movement, id: 9007199254740992 }], next_cursor: null },
+      ],
+      ['get_inventory_transfer', { transfer_id: id }, { ...transfer, in_movement_id: '9223372036854775808' }],
+      ['get_inventory_availability', { variant_id: id }, { ...availability, reserved: '5' }],
+      ['adjust_inventory', cases[9][1], { ...level, reservation_revision: 9007199254740992 }],
+      ['update_fulfillment', cases[11][1], { ...fulfillment, version: 9007199254740992 }],
+    ] as const) {
+      response = invalid;
+      const failed = await session.client.callTool({ name, arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('退货嵌套合同保留收货与处置，拒绝审计字段泄漏；所有新合同写失败不重试', async () => {
   const id = crypto.randomUUID(),
     at = '2026-09-20T11:12:13.123456+00:00';

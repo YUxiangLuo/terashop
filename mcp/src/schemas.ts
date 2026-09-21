@@ -151,6 +151,65 @@ export const adminOrderDetail = adminOrderResult
   .nullable();
 
 const quantity = z.number().int().nonnegative();
+export const fulfillmentResult = adminOrderDetail.unwrap().shape.fulfillments.element.omit({ lines: true });
+export const inventoryLevel = z.strictObject({
+  variant_id: id,
+  location_id: id,
+  on_hand: quantity,
+  reservation_revision: quantity,
+});
+export const inventoryAvailability = inventoryLevel.omit({ reservation_revision: true }).extend({
+  reserved: quantity,
+  available: z.number().int(),
+});
+export const adminLocation = z.strictObject({
+  id,
+  code: z.string(),
+  name: z.string(),
+  address: z.json(),
+  is_default: z.boolean(),
+  is_active: z.boolean(),
+  revision: version,
+  created_at: timestamp,
+});
+export const adminLocationPage = z.strictObject({
+  items: z.array(adminLocation).max(100),
+  next_cursor: id.nullable(),
+});
+export const inventoryMovementPage = z.strictObject({
+  items: z
+    .array(
+      z.strictObject({
+        id: bigintString,
+        variant_id: id,
+        location_id: id,
+        delta: z.number().int(),
+        on_hand_after: z.number().int(),
+        reason: z.enum(['order', 'cancel', 'restock', 'adjust', 'return', 'transfer_out', 'transfer_in']),
+        order_id: id.nullable(),
+        actor_id: id.nullable(),
+        note: z.string().nullable(),
+        transfer_id: id.nullable(),
+        created_at: timestamp,
+      }),
+    )
+    .max(100),
+  next_cursor: bigintString.nullable(),
+});
+export const inventoryTransfer = z.strictObject({
+  id,
+  variant_id: id,
+  from_location_id: id,
+  to_location_id: id,
+  quantity: quantity.positive(),
+  from_on_hand_after: quantity,
+  to_on_hand_after: quantity,
+  out_movement_id: bigintString,
+  in_movement_id: bigintString,
+  actor_id: id.nullable(),
+  note: z.string().nullable(),
+  created_at: timestamp,
+});
 const transactionStatus = z.enum(['pending', 'succeeded', 'failed', 'cancelled']);
 export const orderLedger = z.strictObject({
   order: adminOrderPage.shape.items.element

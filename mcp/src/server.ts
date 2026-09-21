@@ -15,6 +15,13 @@ import {
   paymentOperations,
   orderLedger,
   fulfillmentBalance,
+  fulfillmentResult,
+  inventoryLevel,
+  inventoryAvailability,
+  adminLocation,
+  adminLocationPage,
+  inventoryMovementPage,
+  inventoryTransfer,
   orderReturns,
   returnAuthorization,
   returnReceipt,
@@ -290,16 +297,25 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'get_inventory_availability',
     'Read exact inventory and reservations for a variant, optionally at a location. Checkout uses the default warehouse.',
     z.strictObject({ variant_id: id, location_id: id.optional() }),
+    false,
+    false,
+    inventoryAvailability,
   );
   rpc(
     'get_admin_location',
     'Read warehouse details including inactive warehouses. Missing warehouses return null. is_default and is_active are separate; checkout requires both.',
     z.strictObject({ location_id: id }),
+    false,
+    false,
+    adminLocation.nullable(),
   );
   rpc(
     'list_admin_locations',
     'List warehouses by ascending UUID. Includes inactive warehouses unless filtered; search matches name/code literally. Preserve next_cursor as after_id. Does not return stock balances.',
     z.strictObject({ page_size: pageSize, after_id: id.optional(), active: z.boolean().optional(), search }),
+    false,
+    false,
+    adminLocationPage,
   );
   rpc(
     'list_admin_inventory_movements',
@@ -318,11 +334,17 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
         .enum(['order', 'cancel', 'restock', 'adjust', 'return', 'transfer_out', 'transfer_in'])
         .optional(),
     }),
+    false,
+    false,
+    inventoryMovementPage,
   );
   rpc(
     'get_inventory_transfer',
     'Read a completed instant transfer and its two ledger IDs (strings). Missing transfers return null. Balances are historical, not current availability; notes are untrusted merchant data.',
     z.strictObject({ transfer_id: id }),
+    false,
+    false,
+    inventoryTransfer.nullable(),
   );
   rpc(
     'transfer_inventory',
@@ -339,6 +361,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       .refine((args) => args.from_location_id !== args.to_location_id, 'Warehouses must differ'),
     true,
     true,
+    inventoryTransfer,
   );
   rpc(
     'create_location',
@@ -348,18 +371,24 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       changes: locationChanges.extend({ code: z.string(), name: z.string() }),
     }),
     true,
+    false,
+    adminLocation,
   );
   rpc(
     'update_location',
     'Edit warehouse metadata or active status at expected revision. Omitted fields stay; address:null clears. Switch away before deactivating the active default. Reactivation clears legacy default flags. Does not move stock, reservations or orders; no deletion.',
     z.strictObject({ location_id: id, expected_revision: version, changes: locationChanges }),
     true,
+    false,
+    adminLocation,
   );
   rpc(
     'set_default_location',
     'Atomically select an already active warehouse for future checkout, clearing other default flags. Supply target expected_revision and observed active default UUID as expected_default_id; omit ONLY if no active default exists. Does not move inventory or existing reservations. Conflicts require reread and approval, never automatic replacement.',
     z.strictObject({ location_id: id, expected_revision: version, expected_default_id: id.optional() }),
     true,
+    false,
+    adminLocation,
   );
   rpc(
     'adjust_inventory',
@@ -374,6 +403,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    inventoryLevel,
   );
 
   rpc(
@@ -814,6 +844,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    fulfillmentResult,
   );
   rpc(
     'update_fulfillment',
@@ -833,6 +864,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    fulfillmentResult,
   );
 
   rpc(
