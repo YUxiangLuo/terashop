@@ -7,6 +7,8 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "2.0.0",
     "@types/bun": "1.4.0",
+    "@types/oidc-provider": "9.12.1",
+    "oidc-provider": "9.12.2",
     "supabase": "2.117.0",
     "typescript": "7.0.2"
   },

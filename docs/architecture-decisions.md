@@ -355,7 +355,7 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 授权记录绑定 `(issuer, subject, client_id, resource, project, grant_id)` 与一个 Supabase Auth user UUID；不是 customer UUID，不能按 email、显示名、同名 sub 或客户端参数自动关联。建立关联须同时证明授权服务身份和 Supabase 登录身份，并展示客户端、店铺、账号及批准权限。登录/同意发生在浏览器可信页面，不使用收集密码、access token 或 refresh token 的 MCP 工具。账号切换创建新关联，不静默改绑现有授权。
 
-授权服务产品/库尚未选定；下一批先验证候选的 resource、PKCE、撤销和下游用户映射，不能自行拼接 OAuth 协议上线。优先评估项目已有 Supabase Auth 的 OAuth Server，但不能只把配置改为 enabled：官方文档中默认 OAuth aud 为 authenticated，OIDC scopes 不约束数据库；Custom Access Token Hook 可以定制 aud，但不自动完成本代理需要的独立下游会话、MCP 业务 scope 或完整 RFC 8707 支持。候选不满足时再选择成熟独立授权服务，不假设仓库已经存在 token-exchange API。
+授权服务产品/库尚未选定；已核对现有 Supabase Auth 并增加独立库的本地兼容性实验，结果见下文，不能自行拼接 OAuth 协议上线。Supabase 官方文档中默认 OAuth aud 为 authenticated，OIDC scopes 不约束数据库；Custom Access Token Hook 可以定制 aud，但不自动完成本代理需要的独立下游会话、MCP 业务 scope 或完整 RFC 8707 支持。不假设仓库已经存在 token-exchange API。
 
 ### 最小权限必须在调用时执行
 
@@ -397,7 +397,21 @@ HTTP bearer 只出现在 Authorization header，不在 query/cookie；浏览器�
 
 已落地的 [permissions.ts](../mcp/src/permissions.ts) 为 112 个工具逐个声明 scopes，注册遇到未分类工具立即失败。可选 `ToolAuthorization` 只能由受信宿主构造：初始 scopes 过滤注册，每次调用通过 `currentScopes()` 重新取得有效权限，缺权限或回调失败均在访问后端前拒绝，`outcome_unknown=false`，不泄漏回调异常。宿主将来负责验证令牌、身份绑定并求 token/grant/部署权限交集；该接口本身不完成这些工作。当前 stdio 不传此接口，保留原有管理员检查和写开关。工具发现是初始化快照，降权后旧工具调用会拒绝，但尚不动态更新 tools/list；升权、降权后的列表和 HTTP 会话重建由后续 transport 批次完成。作用域测试的会话隔离不代表逐用户凭据隔离已验收。
 
-1. **授权兼容性与工具权限清单。** 在本地验证候选授权服务的实际 resource/aud、PKCE、issuer、刷新/撤销合同；建立覆盖所有工具的 scope 清单与拒绝未知工具测试。外部服务账号、生产配置与部署需另行授权。
+独立库实验：固定 [oidc-provider v9.12.2](https://github.com/panva/node-oidc-provider/tree/v9.12.2) 为开发依赖，[可重复测试](../tests/unit/oauth-provider.test.ts) 仅绑定随机回环端口，使用一次性签名密钥、内存 adapter、固定虚构身份和自动同意，退出关闭监听，不连接 Supabase 或真实账户。这是协议候选验证，不是可以部署的认证服务。
+
+| 已执行的 Bun 实验 | 结果与边界 |
+| --- | --- |
+| Discovery、JWKS、Code + S256 | issuer 正确，公开 JWKS 不含私钥；缺失 PKCE、plain、错误 verifier 和未注册 redirect URI 均拒绝 |
+| RFC 8707 与业务 scope | 表单 token 请求签发 ES256 JWT，aud 精确等于 MCP resource，scope 仅为批准的 store:read；错误 resource 拒绝，刷新不能升级到 store:write。业务 scopes 配在 resource server，不混入全局 OIDC scopes |
+| 授权身份 | token 含 sub、client_id 与从服务端 Grant 取得的 grant_id；客户端传入伪造 grant_id 不覆盖该 claim。尚未验证多用户、下游 UUID 绑定或浏览器登录 |
+| 刷新轮换与重放 | 显式开启 rotateRefreshToken；轮换保留 grant_id，旧 token 重放撤销 grant，后继 refresh token 也被拒绝。顺序重放实验不证明持久 adapter 的并发原子性 |
+| RFC 7009 | 显式开启 revocation 与 revokeGrantPolicy；撤销 refresh token 删除 grant 并禁止刷新，但已签发 JWT 仍能通过签名验证，MCP 必须在线检查授权记录 |
+
+额外观察：该配置在错误 resource 的刷新请求中先消耗 refresh token，再返回 invalid_target；重试旧 token 返回 invalid_grant 并撤销 grant。回归保留这一行为，不能假设所有 4xx 都没有改变刷新状态。恢复必须重读/重新授权，不自动重放。顺序与 [刷新实现](https://github.com/panva/node-oidc-provider/blob/v9.12.2/lib/actions/grants/refresh_token.js) 的消耗、轮换及 resource 校验顺序相符。
+
+**暂不批准生产选型。** 此版本启动时明确警告 Bun 为 unsupported runtime，官方目标是 Node.js LTS；本地 Bun 1.4.2 实验通过不等于支持承诺。默认内存 adapter 也不可用于生产。下一批优先评估独立部署、官方支持运行时的授权服务，避免把不受支持的嵌入式运行时作为前提；同时复用上述协议验收标准。最终方案仍须补真实登录/同意、持久化及原子 consume/revoke、两管理员隔离、并发刷新、重启恢复、密钥轮换、Supabase 凭据代理和真实 MCP 客户端验收。当前不开放远程 MCP。
+
+1. **授权兼容性与工具权限清单。** 清单已完成；独立候选协议实验已完成上述部分，运行时及生产存储选型仍未解决。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
 3. **受保护 HTTP transport。** 接 metadata/challenge、SDK transport 和逐请求 context；验证错误 issuer/audience、过期 token、缺失 scope、匿名/普通客户、scope 降级及直接调用隐藏工具全部拒绝。
 4. **并发与部署验收。** 交叉复用 session/event ID、重连、进程重启、并发 refresh、授权服务不可用、执行前撤销、执行中撤销及不确定写结果均须测试；两个真实客户端完成授权、升级 scope、断开授权和恢复流程后，才声明远程可用。
