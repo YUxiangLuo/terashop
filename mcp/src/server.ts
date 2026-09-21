@@ -33,6 +33,9 @@ import {
   providerEventPage,
   reconciliationPage,
   operationsSummary,
+  orderSummary,
+  orderExport,
+  shopSettings,
   orderReturns,
   returnAuthorization,
   returnReceipt,
@@ -154,6 +157,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'get_admin_shop_settings',
     'Read the single shop presentation settings and revision. Currency is fixed USD. Name and timezone are stored configuration, not currently consumed by storefront rendering. Does not expose credentials, Auth configuration or public shop metafields.',
     z.strictObject({}),
+    false,
+    false,
+    shopSettings,
   );
   rpc(
     'get_admin_payment_summary',
@@ -167,6 +173,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     'get_admin_order_summary',
     'Summarize orders created in [start_at,end_at), including cancelled, unpaid and zero-value orders. Returns original order totals (including tax/shipping, not reduced by refunds) and CURRENT order/financial/fulfillment status counts, not historical status at end_at. Not revenue, cash or profit; use payment summary separately. Counts and amounts are strings; absent status keys mean zero. Explicit ISO timestamps with offsets, at most 744 hours and 10000 orders; PT422 requires a narrower range, never truncated totals. No customer data, arbitrary grouping or shared snapshot across calls. Shop timezone is not applied.',
     z.strictObject({ start_at: z.iso.datetime({ offset: true }), end_at: z.iso.datetime({ offset: true }) }),
+    false,
+    false,
+    orderSummary,
   );
   rpc(
     'export_admin_orders',
@@ -177,6 +186,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       page_size: pageSize,
       after_id: id.optional(),
     }),
+    false,
+    false,
+    orderExport,
   );
   rpc(
     'update_shop_settings',
@@ -194,6 +206,8 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       }),
     }),
     true,
+    false,
+    shopSettings,
   );
 
   rpc(

@@ -24,6 +24,97 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('订单统计、导出和店铺设置输出保持精确合同，拒绝个人信息及畸形写结果', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const range = { start_at: at, end_at: '2026-09-21T00:00:00Z' };
+  const settings = { name: 'Shop', timezone: 'Asia/Shanghai', currency: 'USD', revision: 2, updated_at: at };
+  const summary = {
+    ...range,
+    currency: 'USD',
+    time_basis: 'orders.created_at',
+    order_count: '3',
+    order_total_amount: '10.25',
+    status_counts: { open: '2', cancelled: '1' },
+    financial_status_counts: { pending: '1', paid: '1', voided: '1' },
+    fulfillment_status_counts: { unfulfilled: '3' },
+  };
+  const item = {
+    id,
+    order_number: '9007199254740993',
+    status: 'cancelled',
+    financial_status: 'voided',
+    fulfillment_status: 'unfulfilled',
+    currency: 'USD',
+    subtotal: '10.00',
+    discount_total: '1.25',
+    shipping_total: '0.50',
+    tax_total: '1.00',
+    total: '10.25',
+    created_at: at,
+    updated_at: at,
+  };
+  const exported = { ...range, items: [item], next_cursor: id };
+  const cases = [
+    ['get_admin_shop_settings', {}, settings, false],
+    ['update_shop_settings', { expected_revision: 1, changes: { name: 'Shop' } }, settings, true],
+    ['get_admin_order_summary', range, summary, false],
+    ['export_admin_orders', range, exported, false],
+  ] as const;
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, args, expected, mutation] of cases) {
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
+      for (const invalid of [{ ...expected, secret: 'SECRET' }, {}]) {
+        response = invalid;
+        const before = calls.length;
+        const failed = await session.client.callTool({ name, arguments: args });
+        expect(failed.isError).toBe(true);
+        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+          code: 'INVALID_BACKEND_RESPONSE',
+          outcome_unknown: mutation,
+        });
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+        expect(calls.length - before).toBe(3);
+      }
+    }
+    for (const [name, args, invalid] of [
+      ['export_admin_orders', range, { ...exported, items: [{ ...item, email: 'SECRET' }] }],
+      ['export_admin_orders', range, { ...exported, items: [{ ...item, order_number: 9007199254740992 }] }],
+      ['export_admin_orders', range, { ...exported, items: [{ ...item, total: 10.25 }] }],
+      ['get_admin_order_summary', range, { ...summary, status_counts: { refunded: '1' } }],
+      ['get_admin_order_summary', range, { ...summary, order_count: 3 }],
+      ['get_admin_order_summary', range, { ...summary, time_basis: 'payment_transactions.created_at' }],
+      ['get_admin_shop_settings', {}, { ...settings, revision: '2' }],
+      ['get_admin_shop_settings', {}, { ...settings, currency: 'EUR' }],
+    ] as const) {
+      response = invalid;
+      const failed = await session.client.callTool({ name, arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+    response = {
+      ...summary,
+      order_count: '0',
+      order_total_amount: '0.00',
+      status_counts: {},
+      financial_status_counts: {},
+      fulfillment_status_counts: {},
+    };
+    expect(await toolData<typeof response>(session.client, 'get_admin_order_summary', range)).toEqual(
+      response,
+    );
+    response = { ...range, items: [], next_cursor: null };
+    expect(await toolData<typeof response>(session.client, 'export_admin_orders', range)).toEqual(response);
+  } finally {
+    await session.close();
+  }
+});
+
 test('运维输出保留精确诊断数据，拒绝嵌套秘密、错误组件指标和畸形重投结果', async () => {
   const id = crypto.randomUUID(),
     at = '2026-09-20T11:12:13.123456+00:00';

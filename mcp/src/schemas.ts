@@ -563,6 +563,55 @@ export const reconciliationPage = diagnosticPage.extend({
     .max(100),
 });
 const countString = z.string().regex(/^(0|[1-9][0-9]*)$/);
+export const orderSummary = z.strictObject({
+  start_at: timestamp,
+  end_at: timestamp,
+  currency: z.literal('USD'),
+  time_basis: z.literal('orders.created_at'),
+  order_count: countString,
+  order_total_amount: decimalAmount,
+  status_counts: z.strictObject({
+    open: countString.optional(),
+    completed: countString.optional(),
+    cancelled: countString.optional(),
+  }),
+  financial_status_counts: z.strictObject({
+    pending: countString.optional(),
+    paid: countString.optional(),
+    partially_refunded: countString.optional(),
+    refunded: countString.optional(),
+    voided: countString.optional(),
+  }),
+  fulfillment_status_counts: z.strictObject({
+    unfulfilled: countString.optional(),
+    partially_fulfilled: countString.optional(),
+    fulfilled: countString.optional(),
+  }),
+});
+export const orderExport = z.strictObject({
+  start_at: timestamp,
+  end_at: timestamp,
+  items: z
+    .array(
+      adminOrderPage.shape.items.element.omit({ customer_id: true, email: true }).extend({
+        subtotal: decimalAmount,
+        discount_total: decimalAmount,
+        shipping_total: decimalAmount,
+        tax_total: decimalAmount,
+        total: decimalAmount,
+        updated_at: timestamp,
+      }),
+    )
+    .max(100),
+  next_cursor: id.nullable(),
+});
+export const shopSettings = z.strictObject({
+  name: z.string(),
+  timezone: z.string(),
+  currency: z.literal('USD'),
+  revision: version,
+  updated_at: timestamp,
+});
 const operationsBase = z.strictObject({
   start_at: timestamp,
   end_at: timestamp,
