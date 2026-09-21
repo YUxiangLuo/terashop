@@ -1,5 +1,13 @@
 import * as z from 'zod/v4';
 import type { AdminScope, ToolAuthorization } from './permissions';
+import { AdminBackend } from './backend';
+import type { createCredentialCipher, DownstreamCredentials } from './credentials';
+
+type CredentialCipher = Awaited<ReturnType<typeof createCredentialCipher>>;
+const storedCredentials = z.union([
+  z.strictObject({ revision: z.literal(0), envelope: z.null() }),
+  z.strictObject({ revision: z.number().int().positive(), envelope: z.record(z.string(), z.unknown()) }),
+]);
 
 const scope = z.enum(['store:read', 'store:write', 'store:payments', 'store:access', 'store:privacy']);
 const text = z.string().refine((value) => value.trim().length > 0);
@@ -88,6 +96,18 @@ export class KeycloakGrantAuthorizer {
     return response.json();
   }
 
+  private rpc(name: 'mcp_grant_command' | 'mcp_credential_command', body: Record<string, unknown>) {
+    return this.json(`${this.config.supabaseUrl}/rest/v1/rpc/${name}`, {
+      method: 'POST',
+      headers: {
+        apikey: this.config.serviceRoleKey,
+        Authorization: `Bearer ${this.config.serviceRoleKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
   private async resolve(token: string) {
     if (!token || token.length > 16384 || /\s/.test(token)) throw new Error('Invalid token');
     const c = this.config;
@@ -119,24 +139,119 @@ export class KeycloakGrantAuthorizer {
       session_id: verified.sid,
     };
     const approved = grant.parse(
-      await this.json(`${c.supabaseUrl}/rest/v1/rpc/mcp_grant_command`, {
-        method: 'POST',
-        headers: {
-          apikey: c.serviceRoleKey,
-          Authorization: `Bearer ${c.serviceRoleKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ p_action: 'resolve', p_binding: binding }),
-      }),
+      await this.rpc('mcp_grant_command', { p_action: 'resolve', p_binding: binding }),
     );
     // Expiry can pass while the grant lookup is in flight.
     if (verified.exp <= Math.floor(Date.now() / 1000)) throw new Error('Expired token');
     const tokenScopes = verified.scope.split(' ');
     return {
+      binding,
+      tokenExpiresAt: verified.exp,
       grantId: approved.id,
       expectedUserId: approved.user_id,
       scopes: c.scopes.filter((s) => approved.scopes.includes(s) && tokenScopes.includes(s)),
     };
+  }
+
+  // Trusted-host API, never an MCP tool. No credential cache or automatic retry.
+  async readCredentials(token: string, cipher: CredentialCipher) {
+    try {
+      const current = await this.resolve(token);
+      const stored = storedCredentials.parse(
+        await this.rpc('mcp_credential_command', {
+          p_action: 'read',
+          p_binding: current.binding,
+          p_grant_id: current.grantId,
+          p_user_id: current.expectedUserId,
+        }),
+      );
+      const credentials =
+        stored.envelope === null
+          ? null
+          : await cipher.open(
+              {
+                project: this.config.project,
+                grantId: current.grantId,
+                userId: current.expectedUserId,
+                revision: stored.revision,
+              },
+              stored.envelope,
+            );
+      if (current.tokenExpiresAt <= Math.floor(Date.now() / 1000)) throw new Error('Expired token');
+      return {
+        grantId: current.grantId,
+        expectedUserId: current.expectedUserId,
+        revision: stored.revision,
+        credentials,
+      };
+    } catch {
+      throw new Error('CREDENTIAL_READ_FAILED');
+    }
+  }
+
+  // The future trusted linking flow must prove ownership/consent and supply a
+  // matched access/refresh pair. Auth verifies the access token, not that pair.
+  async writeCredentials(
+    token: string,
+    cipher: CredentialCipher,
+    input: {
+      expectedRevision: number;
+      credentials: DownstreamCredentials;
+      anonKey: string;
+    },
+  ): Promise<{ revision: number }> {
+    try {
+      const expected = z
+        .number()
+        .int()
+        .min(0)
+        .max(Number.MAX_SAFE_INTEGER - 1)
+        .parse(input.expectedRevision);
+      const credentials = { ...input.credentials };
+      const anonKey = input.anonKey;
+      const current = await this.resolve(token);
+      const envelope = await cipher.seal(
+        {
+          project: this.config.project,
+          grantId: current.grantId,
+          userId: current.expectedUserId,
+          revision: expected + 1,
+        },
+        credentials,
+      );
+      await new AdminBackend(
+        {
+          url: this.config.supabaseUrl,
+          anonKey,
+          accessToken: credentials.accessToken,
+          expectedUserId: current.expectedUserId,
+        },
+        this.request,
+      ).assertAdmin();
+      if (current.tokenExpiresAt <= Math.floor(Date.now() / 1000)) throw new Error('Expired token');
+      const stored = storedCredentials.parse(
+        await this.rpc('mcp_credential_command', {
+          p_action: 'write',
+          p_binding: current.binding,
+          p_grant_id: current.grantId,
+          p_user_id: current.expectedUserId,
+          p_expected_revision: expected,
+          p_envelope: envelope,
+        }),
+      );
+      if (
+        stored.revision !== expected + 1 ||
+        stored.envelope === null ||
+        Object.keys(stored.envelope).length !== 4 ||
+        Object.entries(envelope).some(([key, value]) => stored.envelope?.[key] !== value)
+      )
+        throw new Error('Invalid write response');
+      // A timeout or invalid response may follow a committed write. Always reread
+      // after failure; never blindly repeat a refresh or credential write.
+      return { revision: stored.revision };
+    } catch {
+      throw new Error('CREDENTIAL_WRITE_UNCONFIRMED');
+    }
   }
 
   async authorize(token: string): Promise<{

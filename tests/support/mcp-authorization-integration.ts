@@ -40,7 +40,7 @@ export async function verifyLocalAuthorization(
   const authorizer = new KeycloakGrantAuthorizer(config);
   const calls: string[][] = [];
   try {
-    // Ephemeral test key and in-memory envelopes only: no credential persistence.
+    // Ephemeral test key; temporary credential rows are deleted with their grants.
     const cipher = await createCredentialCipher(
       new Map([['fixture', crypto.getRandomValues(new Uint8Array(32))]]),
       'fixture',
@@ -120,26 +120,35 @@ export async function verifyLocalAuthorization(
       const paths: string[] = [];
       calls.push(paths);
       const owner = users[Math.floor(i / 2)];
-      const credentialContext = {
-        project,
-        grantId: context.grantId,
-        userId: context.expectedUserId,
-        revision: 1,
+      const credentials = {
+        accessToken: owner.token,
+        refreshToken: owner.refreshToken,
+        expiresAt: owner.expiresAt,
       };
-      const sealed = JSON.parse(
-        JSON.stringify(
-          await cipher.seal(credentialContext, {
-            accessToken: owner.token,
-            refreshToken: owner.refreshToken,
-            expiresAt: owner.expiresAt,
-          }),
-        ),
-      );
+      const input = { expectedRevision: 0, credentials, anonKey: local.ANON_KEY };
       await assert.rejects(
-        cipher.open({ ...credentialContext, userId: users[1 - Math.floor(i / 2)].id }, sealed),
-        /CREDENTIAL_DECRYPTION_FAILED/,
+        authorizer.writeCredentials(tokens[i], cipher, {
+          ...input,
+          credentials: { ...credentials, accessToken: users[1 - Math.floor(i / 2)].token },
+        }),
+        /CREDENTIAL_WRITE_UNCONFIRMED/,
       );
-      const restored = await cipher.open(credentialContext, sealed);
+      assert.equal((await authorizer.readCredentials(tokens[i], cipher)).revision, 0);
+      assert.deepEqual(await authorizer.writeCredentials(tokens[i], cipher, input), { revision: 1 });
+      await assert.rejects(
+        authorizer.writeCredentials(tokens[i], cipher, input),
+        /CREDENTIAL_WRITE_UNCONFIRMED/,
+      );
+      assert.deepEqual(
+        await authorizer.writeCredentials(tokens[i], cipher, { ...input, expectedRevision: 1 }),
+        { revision: 2 },
+      );
+      const loaded = await new KeycloakGrantAuthorizer(config).readCredentials(tokens[i], cipher);
+      assert.equal(loaded.revision, 2);
+      assert.equal(loaded.grantId, context.grantId);
+      assert.equal(loaded.expectedUserId, context.expectedUserId);
+      assert(loaded.credentials, 'Persisted credentials must be available to a new host instance');
+      const restored = loaded.credentials;
       const backend = new AdminBackend(
         {
           url: local.API_URL,
@@ -235,7 +244,7 @@ export async function verifyLocalAuthorization(
       'PASS: real grant/MCP/backend identities, four isolated grants, crossed admin session rejection',
     );
     console.log(
-      'PASS: bound credential envelopes restore real downstream sessions and reject another user context',
+      'PASS: persisted credential adapter validates downstream identity, enforces CAS and restores sessions in a new host',
     );
 
     await request('/rest/v1/rpc/mcp_grant_command', {
@@ -245,6 +254,10 @@ export async function verifyLocalAuthorization(
     });
     await denied(0);
     await assert.rejects(new KeycloakGrantAuthorizer(config).authorize(tokens[0]), /AUTHORIZATION_DENIED/);
+    await assert.rejects(authorizer.readCredentials(tokens[0], cipher), /CREDENTIAL_READ_FAILED/);
+    const [erased] =
+      await db`select count(*)::int as count from private.mcp_credentials where grant_id=${grants[0].id}::uuid`;
+    assert.equal(erased.count, 0);
     for (const i of [1, 2, 3]) await read(i);
     await db`update public.profiles set role='customer' where id=${users[0].id}::uuid`;
     await denied(1);
@@ -253,6 +266,7 @@ export async function verifyLocalAuthorization(
     await read(1);
     await revokeSecond();
     await denied(1);
+    await assert.rejects(authorizer.readCredentials(tokens[1], cipher), /CREDENTIAL_READ_FAILED/);
     for (const i of [2, 3]) await read(i);
     console.log(
       'PASS: local grant revocation, role demotion and upstream revocation stop MCP calls without affecting user B',

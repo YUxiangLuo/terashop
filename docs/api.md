@@ -877,4 +877,6 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 
 权限失败、撤销或用户降权为 `42501`；绑定不存在或 UUID 不符为 `PT404`；版本冲突为 `PT409`；输入非法为 `22023`；旧 RR 快照或并发插入可返回 `40001`。锁顺序为 grant→credential，写入和撤销串行；grant revoke 同事务删除密文（包括重复撤销），保留授权 tombstone。降权本身拒绝读写但不删除密文；仍可撤销清除。已经读入进程的凭据不会被数据库撤销自动擦除，也不取消已获准业务。
 
-CAS 防止通过此接口用旧版本覆盖新版本，不防御数据库管理员回滚整个数据库；旧 RR 快照在首次插入前可能读到未初始化状态，但不能覆盖后续插入。当前实现密文持久化与版本控制，不包含生产密钥管理、浏览器关联、凭据刷新或刷新并发协调；host 适配仍待接入。
+CAS 防止通过此接口用旧版本覆盖新版本，不防御数据库管理员回滚整个数据库；旧 RR 快照在首次插入前可能读到未初始化状态，但不能覆盖后续插入。当前实现密文持久化与版本控制，不包含生产密钥管理、浏览器关联、凭据刷新或刷新并发协调。
+
+宿主侧 [KeycloakGrantAuthorizer](../mcp/src/authorization.ts) 提供 `readCredentials(token,cipher)` 和 `writeCredentials(token,cipher,{expectedRevision,credentials,anonKey})`，每次在线校验上游 token/grant，并从已验证结果构造完整绑定，不接收调用方指定 grant/user。read 返回 `{grantId,expectedUserId,revision,credentials}`，未初始化时 credentials=null；失败只抛 CREDENTIAL_READ_FAILED，不返回部分明文。write 先加密并在线验证下游 access token 对应绑定管理员，再 CAS 保存；核对返回的版本和密文，成功只返回 `{revision}`，任何失败均为 CREDENTIAL_WRITE_UNCONFIRMED，必须先重读确认，不自动重试。refresh token 配对和用户同意仍由未来可信关联流程证明；不可将这些方法作为客户端获取或替换下游 token 的 HTTP/MCP 接口。读取凭据不是业务授权，后续业务仍须使用 ToolAuthorization 和绑定 expectedUserId 的 AdminBackend。

@@ -460,7 +460,11 @@ Keycloak `26.7.0` 已完成 [独立 Docker 实验](../scripts/mcp-keycloak-compa
 
 后续存储层现已实现为 private.mcp_credentials 和 service-only [mcp_credential_command](api.md#mcp-下游凭据密文受信服务内部接口)，不增加 MCP 工具。底表对所有 API 角色封闭；read/write 均先锁定并 resolve 完整 grant，再核对固定 grant/user UUID，重查当前管理员，随后锁定凭据行。写入以 expected revision 比较交换，从未初始化 0 单调递增；密文必须预先用下一 revision 加密。旧版本写入（包括原请求重放）拒绝，不自动刷新或重试。SQL 只检查 envelope 结构，密钥在库外、tag/明文归属仍由 host 验证；恶意受信 host 或数据库管理员不在此防护范围内。
 
-grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保留授权 tombstone。降权仅禁止读写，撤销仍可清除；不擦除进程已读出的 token，不撤回已执行调用。独立数据库测试覆盖服务权限、输入和身份拒绝、重连读取并解密、CAS 重放、首写竞争、旧 RR 快照以及撤销先于写入的竞争；并发插入与旧快照可能返回 40001。旧 RR 在首次插入前可以看到未初始化状态，但不能覆盖已插入数据。下一批接 host 存储适配和真实授权链路的持久化联合验收，再推进可信关联与刷新协调；本批仍未开放远程服务。
+grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保留授权 tombstone。降权仅禁止读写，撤销仍可清除；不擦除进程已读出的 token，不撤回已执行调用。独立数据库测试覆盖服务权限、输入和身份拒绝、重连读取并解密、CAS 重放、首写竞争、旧 RR 快照以及撤销先于写入的竞争；并发插入与旧快照可能返回 40001。旧 RR 在首次插入前可以看到未初始化状态，但不能覆盖已插入数据。
+
+宿主适配现由 KeycloakGrantAuthorizer 的 readCredentials/writeCredentials 直接复用在线 resolve 实现，不让调用方提供 grant/user/binding，也不暴露任意 service-role RPC。每次读取重新校验 token/grant，以固定项目和数据库 revision 认证解密，返回前再次检查上游过期；未初始化返回 null，任何错误只抛 CREDENTIAL_READ_FAILED。写入先按 expectedRevision+1 加密，再经 AdminBackend.assertAdmin 在线核对下游 access token 的 UUID 和角色，最后 CAS 保存并核对响应版本和密文。成功仅返回 revision；所有失败保守标记 CREDENTIAL_WRITE_UNCONFIRMED，必须先重读，不自动重试或刷新。存储后的本地/上游撤销仍通过在线校验拒绝，操作之间的撤销窗口和进程中已持有凭据的边界不变。
+
+联合实验改为使用真实凭据表：两名临时管理员、四组 grant，错误管理员 access token 写入拒绝且 revision 仍为 0；首次写入、旧版本拒绝及下一版本更新后，新宿主实例从数据库读取解密并执行 MCP，撤销本地 grant 删除密文，上游撤销阻止读取。临时密钥只在内存，测试结束清理凭据行；这是新对象读取，不是生产进程重启/密钥恢复验收。单测另覆盖已提交但响应丢失、错误响应、旧 revision 密文和读取期间过期。host 方法只供受信内部流程，返回的下游凭据不可交给 MCP/HTTP 客户端；业务仍需 ToolAuthorization 和 expectedUserId 校验。access token 检查不验证 refresh token 配对或同意，可信账号关联、刷新协调及生产密钥管理仍待实现，远程服务仍未开放。
 
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
