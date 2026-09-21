@@ -894,10 +894,12 @@ export const addressChanges = z.strictObject({
   postal_code: z.string().nullable().optional(),
 });
 // Bound inline protocol payloads independently of Storage's 5 MiB limit.
-export const uploadProductMedia = z.strictObject({
+export const productMediaIdentity = z.strictObject({
   product_id: id,
   media_id: id,
   content_type: z.enum(['image/jpeg', 'image/png', 'image/webp']),
+});
+export const uploadProductMedia = productMediaIdentity.extend({
   data_base64: z
     .string()
     .min(4)
@@ -989,6 +991,11 @@ export const adminProduct = productSummary.extend({
   categories: z.array(z.strictObject({ id, slug: z.string(), name: z.string() })),
 });
 export const productMediaResult = z.strictObject({ path: z.string().min(1), url: z.url() });
+export const productMediaInspection = productMediaResult.extend({
+  content_type: productMediaIdentity.shape.content_type,
+  byte_size: z.number().int().min(1).max(5242880),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+});
 export const metafieldType = z.enum([
   'text',
   'rich_text',

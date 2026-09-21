@@ -75,6 +75,21 @@ test('MCP uploads an immutable public object, rejects overwrite, and attaches th
   expect(saved.images).toContainEqual(expect.objectContaining({ id: imageId, url: publicUrl }));
   expect(await checked(rpc('get_admin_product', { product_id: productId }, admin.token)))
     .toMatchObject({ images: [{ id: imageId, url: publicUrl }] });
+
+  const readonly = await mcpSession(new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }));
+  cleanup.defer(() => readonly.close());
+  const identity = { product_id: productId, media_id: imageId, content_type: 'image/png' };
+  const expected = {
+    path: key, url: publicUrl, content_type: 'image/png', byte_size: png.byteLength,
+    sha256: Buffer.from(await crypto.subtle.digest('SHA-256', png)).toString('hex'),
+  };
+  expect(await toolData<typeof expected>(readonly.client, 'inspect_product_media', identity)).toEqual(expected);
+  // Objects survive deletion of the product; recovery must not depend on its existence.
+  await checked(api(`/rest/v1/products?id=eq.${productId}`, { service: true, method: 'DELETE' }));
+  expect(await toolData<typeof expected>(readonly.client, 'inspect_product_media', identity)).toEqual(expected);
+  expect((await readonly.client.callTool({ name: 'inspect_product_media', arguments: {
+    ...identity, media_id: crypto.randomUUID(),
+  } })).isError).toBe(true);
 });
 
 test('bucket has the durable public 5 MiB JPEG/PNG/WebP configuration', async () => {

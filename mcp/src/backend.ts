@@ -1,6 +1,7 @@
 import type { Database, Json } from '../../types/database';
+import { createHash } from 'node:crypto';
 import * as z from 'zod/v4';
-import { paypalRefund, paypalRefundResult } from './schemas';
+import { paypalRefund, paypalRefundResult, productMediaIdentity } from './schemas';
 
 export type Functions = Database['public']['Functions'];
 // Supabase emits Args: never for parameterless RPCs; PostgREST accepts {}.
@@ -128,6 +129,45 @@ export class AdminBackend {
     } catch (error) {
       // Even a 4xx can follow creation/dispatch of the durable refund request.
       throw new BackendError(error instanceof BackendError ? error.code : 'BACKEND_UNAVAILABLE', true);
+    }
+  }
+
+  async inspectProductMedia(args: z.infer<typeof productMediaIdentity>): Promise<Json> {
+    await this.assertAdmin();
+    // No product-existence requirement: an upload can outlive its product.
+    const extension = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[args.content_type];
+    const path = `products/${args.product_id.toLowerCase()}/${args.media_id.toLowerCase()}.${extension}`;
+    const url = `${this.url}/storage/v1/object/public/catalog-media/${path}`;
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const response = await this.request(url, {
+        method: 'GET',
+        cache: 'no-store',
+        redirect: 'error',
+        signal: AbortSignal.timeout(15_000),
+      });
+      reader = response.body?.getReader();
+      // Do not parse Storage error bodies or reflect arbitrary headers.
+      if (response.status !== 200) throw new BackendError(`HTTP_${response.status}`);
+      if (!reader || response.headers.get('content-type')?.split(';')[0].trim() !== args.content_type) {
+        throw new BackendError('INVALID_BACKEND_RESPONSE');
+      }
+      const hash = createHash('sha256');
+      let byteSize = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        byteSize += value.byteLength;
+        if (byteSize > 5242880) throw new BackendError('MEDIA_TOO_LARGE');
+        hash.update(value);
+      }
+      if (byteSize === 0) throw new BackendError('INVALID_BACKEND_RESPONSE');
+      return { path, url, content_type: args.content_type, byte_size: byteSize, sha256: hash.digest('hex') };
+    } catch (error) {
+      throw error instanceof BackendError ? error : new BackendError('BACKEND_UNAVAILABLE');
+    } finally {
+      await reader?.cancel().catch(() => {});
+      reader?.releaseLock();
     }
   }
 

@@ -1800,8 +1800,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(49);
-    expect(writeTools.length).toBe(102);
+    expect(readTools.length).toBe(50);
+    expect(writeTools.length).toBe(103);
     expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
@@ -2471,6 +2471,139 @@ test('拒绝非 TLS 远程端点和带凭据/路径的 URL；拒绝匿名或 ser
     });
     await expect(backend.assertAdmin()).rejects.toThrow('ADMIN_REQUIRED');
     expect(calls).toBe(1);
+  }
+});
+
+test('媒体核验读取固定公开位置并计算实际字节摘要，严格输入且不要求商品存在', async () => {
+  const args = {
+    product_id: crypto.randomUUID().toUpperCase(),
+    media_id: crypto.randomUUID(),
+    content_type: 'image/png',
+  };
+  const { backend, calls } = fakeBackend(
+    () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('a'));
+            controller.enqueue(new TextEncoder().encode('bc'));
+            controller.close();
+          },
+        }),
+        { headers: { 'content-type': 'image/png', 'content-length': '999', 'x-secret': 'SECRET' } },
+      ),
+  );
+  const session = await mcpSession(backend);
+  try {
+    const path = `products/${args.product_id.toLowerCase()}/${args.media_id}.png`;
+    const expected = {
+      path,
+      url: `${config.url}/storage/v1/object/public/catalog-media/${path}`,
+      content_type: 'image/png',
+      byte_size: 3,
+      sha256: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    };
+    expect(await toolData<typeof expected>(session.client, 'inspect_product_media', args)).toEqual(expected);
+    expect(calls).toHaveLength(3);
+    expect(calls[2].method).toBe('GET');
+    expect(calls[2].redirect).toBe('error');
+    expect(calls[2].cache).toBe('no-store');
+    expect(calls[2].headers.has('authorization')).toBe(false);
+    for (const extra of [
+      { url: 'https://example.test' },
+      { bucket: 'other' },
+      { media_id: '../secret' },
+      { content_type: 'image/svg+xml' },
+    ]) {
+      expect(
+        (await session.client.callTool({ name: 'inspect_product_media', arguments: { ...args, ...extra } }))
+          .isError,
+      ).toBe(true);
+      expect(calls).toHaveLength(3);
+    }
+  } finally {
+    await session.close();
+  }
+});
+
+test('媒体核验流式限制 5 MiB，拒绝错误响应和权限，取消超限流且不重试', async () => {
+  const args = {
+    product_id: crypto.randomUUID(),
+    media_id: crypto.randomUUID(),
+    content_type: 'image/png' as const,
+  };
+  for (const size of [5242880, 5242881]) {
+    let cancelled = false;
+    const { backend, calls } = fakeBackend(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(size - 1));
+              controller.enqueue(new Uint8Array(1));
+              if (size === 5242880) controller.close();
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { 'content-type': 'image/png', 'content-length': '1' } },
+        ),
+    );
+    if (size === 5242880) expect(await backend.inspectProductMedia(args)).toMatchObject({ byte_size: size });
+    else {
+      await expect(backend.inspectProductMedia(args)).rejects.toThrow('MEDIA_TOO_LARGE');
+      expect(cancelled).toBe(true);
+    }
+    expect(calls).toHaveLength(3);
+  }
+  for (const [response, code, admin] of [
+    [() => new Response('SECRET', { status: 404 }), 'HTTP_404', true],
+    [
+      () => new Response('SECRET', { status: 302, headers: { location: 'https://evil.test' } }),
+      'HTTP_302',
+      true,
+    ],
+    [
+      () => new Response('SECRET', { headers: { 'content-type': 'text/html' } }),
+      'INVALID_BACKEND_RESPONSE',
+      true,
+    ],
+    [() => new Response('', { headers: { 'content-type': 'image/png' } }), 'INVALID_BACKEND_RESPONSE', true],
+    [
+      () =>
+        new Response(
+          new ReadableStream({
+            start(c) {
+              c.error(new Error('SECRET'));
+            },
+          }),
+          { headers: { 'content-type': 'image/png' } },
+        ),
+      'BACKEND_UNAVAILABLE',
+      true,
+    ],
+    [
+      () => {
+        throw new Error('SECRET');
+      },
+      'BACKEND_UNAVAILABLE',
+      true,
+    ],
+    [() => new Response('SECRET'), 'ADMIN_REQUIRED', false],
+  ] as const) {
+    const { backend, calls } = fakeBackend(response, admin);
+    const session = await mcpSession(backend);
+    try {
+      const result = await session.client.callTool({ name: 'inspect_product_media', arguments: args });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain(code);
+      expect(JSON.stringify(result)).not.toContain('SECRET');
+      expect(JSON.parse((result.content as Array<{ text: string }>)[0].text).outcome_unknown).toBe(false);
+      expect(calls).toHaveLength(admin ? 3 : 2);
+    } finally {
+      await session.close();
+    }
   }
 });
 

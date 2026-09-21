@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，102 个显式工具（49 个只读、53 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，103 个显式工具（50 个只读、53 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -42,12 +42,12 @@
 
 ## 工具与行为合同
 
-数据库工具与对应受控 RPC 同名，媒体上传调用 Storage API；**只有显式注册的工具可调用**。参数使用严格 schema，拒绝未知字段；RPC 输入类型与 [生成类型](../types/database.ts) 编译校验。详细业务语义见 [API 合同](../docs/api.md)。
+数据库工具与对应受控 RPC 同名，媒体上传及核验调用 Storage API；**只有显式注册的工具可调用**。参数使用严格 schema，拒绝未知字段；RPC 输入类型与 [生成类型](../types/database.ts) 编译校验。详细业务语义见 [API 合同](../docs/api.md)。
 
 | 领域 | 本阶段已注册工具 |
 | --- | --- |
 | 商品 | `list_admin_products`、`get_admin_product`、`create_product`、`update_product`；覆盖变体、规格、图片 URL、分类关联、商品/变体 metafield 的原子编辑 |
-| 媒体 | `upload_product_media`；上传不可覆盖的公开对象，随后单独保存商品图片关联；不提供对象删除 |
+| 媒体 | `upload_product_media`、`inspect_product_media`；上传不可覆盖的公开对象，按原标识核验字节数和 SHA-256，随后单独保存商品图片关联；不提供对象删除 |
 | 分类 | `list_admin_categories`、`get_admin_category`、`create_category`、`update_category`；支持平铺分页/组树、移动、排序、停用；更新须原样传回 updated_at |
 | 客户 | `list_admin_customers`、`get_admin_customer`、`create_customer`、`update_customer`、`anonymize_customer` |
 | 地址 | `create_customer_address`、`update_customer_address`、`delete_customer_address`、`set_default_address`；读取使用客户详情；编辑/删除使用地址自身 updated_at，返回最新客户详情 |
@@ -71,7 +71,7 @@
 | 运维 | `list_admin_outbox_events`、`list_admin_payment_provider_events`、`list_admin_reconciliation_issues`、`get_admin_operations_summary`、`redrive_outbox_event`；全店未对账资金及分组件区间积压概览，仅安全诊断，不开放资金重放或宣称整体健康 |
 | 导出 | `export_admin_orders`；固定字段 JSON 分页，不含客户联系方式，订单号/金额为字符串；不写文件或外发，不保证跨页冻结快照 |
 
-- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 102 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
+- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 103 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
 - 管理员报价详情额外返回 customer_id、stored_status，缺失返回 null；列表/详情的 status 是有效状态（open/converted 到期即 expired），筛选同样按有效状态。is_reserved 不是库存数量或支付成功证明。读取不触发 Worker、取消或续期，客户 UUID 不等于 Auth UUID；完整合同见 [管理员报价查询](../docs/api.md#管理员报价查询)。
 - 订单备注回执保留 null 与空字符串的区别；事件列表只含安全元数据，ID/游标保留精确 bigint 字符串，不含原始 data。结账报价保留后端计算的过期/预留状态与存储快照，不把它当作当前重新报价；缺失报价仍报错。零对价取消返回独立数量及回库事实，不是退款。PayPal 输出声明复用后端白名单合同，仍先剔除 Edge 额外字段并验证订单关联，pending_reconciliation 不被改写为资金已结算。
 - 全部 Metafield／Metaobject 工具使用逐字段输出 schema，包含定义、值、分页及删除回执。定义字段声明和验证规则拒绝未知字段；value 与 values 内部保留原始动态 JSON，不展开引用。无定义字段保留 definition_id:null；definition_access 是配置，Metaobject 的 is_public 是后端当前可见性计算，均不代表披露批准或前台展示保证。缺失详情返回 null；删除成功只接受 `{id,deleted:true}`，异常写响应标记结果未知，不自动重试。
@@ -100,7 +100,9 @@
 
 结果为 `{data:{path,url}}`。路径固定为 `products/<小写 product_id>/<小写 media_id>.<jpg|png|webp>`，bucket 固定 `catalog-media`。对象**立即公开**，商品即使仍为 draft 也不保密；禁止上传个人资料或秘密。每次调用检查管理员会话，Storage 另行执行 admin INSERT RLS；始终 `x-upsert:false`，不允许覆盖或删除。
 
-上传不修改商品 revision 或图片列表。成功后重新读取商品，再用 `update_product` 保存图片 URL；两步不是跨 Storage/数据库事务，关联失败会留下未关联对象。结果未知时用原始路径拼接 `<TERA_SUPABASE_URL>/storage/v1/object/public/catalog-media/<path>`，由宿主读取并核对原始字节；404 不证明在途上传已经失败。重复上传不是幂等成功，不自动重试或换 UUID。移除商品图片关联不删除对象。
+上传不修改商品 revision 或图片列表。成功后重新读取商品，再用 `update_product` 保存图片 URL；两步不是跨 Storage/数据库事务，关联失败会留下未关联对象。结果未知时调用下方核验工具，与宿主保留的原始字节数和 SHA-256 比较；读取失败不证明在途上传已经失败。重复上传不是幂等成功，不自动重试或换 UUID。移除商品图片关联不删除对象。
+
+`inspect_product_media(product_id, media_id, content_type)` 是只读工具，返回 `{path,url,content_type,byte_size,sha256}`。使用同一固定路径合同，每次验证管理员，不要求商品仍存在；可核验遗留对象，但不能枚举对象或读取旧 seed 的非 UUID 文件名。仅请求配置的 Supabase origin 下的公开对象，不向公开下载发送会话凭据，不跟随重定向。流式读取最多 **5 MiB**，按实际字节累计长度并计算摘要，不信任 Content-Length；不返回原始字节、任意响应头或 Storage 错误正文。非 200、MIME 不匹配、空内容、超限及网络/流中断均报错，不返回部分摘要。MIME 校验不是图片解码或内容安全扫描；摘要只证明本次读取内容，不承诺绕过所有 CDN 缓存，也不证明商品关联、完整引用范围或可安全删除。
 
 对象删除仍被数据库策略禁止：当前自由 URL 与扩展字段引用没有统一的媒体引用登记和并发删除保护。不能靠 MCP 先查询引用再删除来保证安全；清理与大文件传输是后续能力。
 

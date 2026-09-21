@@ -59,6 +59,8 @@ import {
   adminProduct,
   adminProductPage,
   productMediaResult,
+  productMediaIdentity,
+  productMediaInspection,
   metafieldDefinitionResult,
   metafieldDefinitionPage,
   metafieldResult,
@@ -178,8 +180,17 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
   }
 
   tool(
+    'inspect_product_media',
+    'Read the original public media object using product_id, media_id and content_type. Returns observed byte_size and SHA-256 (max 5 MiB), not image bytes. Compare with the original upload bytes after an uncertain upload; errors or absence do not prove an in-flight upload failed. Does not require the product to still exist. No arbitrary URL/path/bucket, no product attachment or reference/deletion-safety claim, no image safety scan. Never automatically retry uploads or allocate replacement IDs.',
+    productMediaIdentity,
+    (args) => backend.inspectProductMedia(args),
+    false,
+    false,
+    productMediaInspection,
+  );
+  tool(
     'upload_product_media',
-    'Upload PUBLIC immutable JPEG/PNG/WebP bytes (canonical base64, max 1 MiB) for an existing product. Retain media_id and content_type. Never upload private data. No URL fetching or local file access. Does not attach the image: use update_product separately. No overwrite/delete. On uncertain outcome inspect the original public URL and compare bytes before retrying; never silently allocate another ID.',
+    'Upload PUBLIC immutable JPEG/PNG/WebP bytes (canonical base64, max 1 MiB) for an existing product. Retain media_id and content_type. Never upload private data. No URL fetching or local file access. Does not attach the image: use update_product separately. No overwrite/delete. On uncertain outcome use inspect_product_media and compare byte_size and SHA-256 with the original bytes before considering retry; never silently allocate another ID.',
     uploadProductMedia,
     (args) => backend.uploadProductMedia(args),
     true,
