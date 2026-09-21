@@ -152,6 +152,7 @@ test('订单辅助工具输出保持精确事件 ID、报价快照和独立取�
       cancellation,
       true,
     ],
+    ['cancel_checkout_quote', { quote_id: id }, quote, true],
   ] as const;
   let response: unknown;
   const { backend, calls } = fakeBackend(() => Response.json(response));
@@ -172,6 +173,18 @@ test('订单辅助工具输出保持精确事件 ID、报价快照和独立取�
         expect(JSON.stringify(failed)).not.toContain('SECRET');
         expect(calls.length - before).toBe(3);
       }
+    }
+    for (const reason of [null, 'x'.repeat(501), '😀'.repeat(501)]) {
+      const before = calls.length;
+      expect(
+        (
+          await session.client.callTool({
+            name: 'cancel_checkout_quote',
+            arguments: { quote_id: id, reason },
+          })
+        ).isError,
+      ).toBe(true);
+      expect(calls.length).toBe(before);
     }
     response = { id, admin_note: null };
     expect(
@@ -1788,7 +1801,13 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
     expect(readTools.length).toBe(49);
-    expect(writeTools.length).toBe(101);
+    expect(writeTools.length).toBe(102);
+    expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    });
     expect(writeTools.find((t) => t.name === 'refund_paypal')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,

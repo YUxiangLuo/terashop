@@ -6,7 +6,7 @@ import { stockedProduct } from './support/catalog';
 import { Cleanup } from './support/cleanup';
 import { testDatabase } from './database-concurrency';
 import { withRollback } from '../scripts/lib/transactions';
-import { fixtureOrder } from './payment-fixtures';
+import { fixtureOrder, fixtureIntent, settleIntent } from './payment-fixtures';
 
 const db = testDatabase(),
   cleanup = new Cleanup();
@@ -188,7 +188,150 @@ test('有效过期在精确边界切换，不等待 Worker，也不修改存储�
         await sql`select distinct status from commerce.checkout_quotes where customer_id=${customer}::uuid`
       ).map((x: { status: string }) => x.status),
     ).toEqual(['open']);
+    await sql`update commerce.checkout_quotes set status='expired',cancel_reason='worker expiry' where id=${ids[1]}::uuid`;
+    await sql`set local role authenticated`;
+    const expired = (await sql`select public.cancel_checkout_quote(${ids[1]}::uuid,'replacement') dto`)[0]
+      .dto;
+    expect(expired).toMatchObject({ status: 'expired', cancel_reason: 'worker expiry', is_reserved: false });
+    // A time-expired quote still stored open is cancelled, not a terminal-state replay.
+    const cancelled = (await sql`select public.cancel_checkout_quote(${ids[0]}::uuid) dto`)[0].dto;
+    expect(cancelled).toMatchObject({
+      status: 'cancelled',
+      cancel_reason: 'checkout cancelled',
+      is_reserved: false,
+    });
   });
+});
+
+test('MCP 取消 open/converted 报价仅释放预占，重复取消保留原原因，写开关与身份不旁路', async () => {
+  const p = await stockedProduct(admin, { price: 8.25, onHand: 9, cleanup });
+  const write = await mcpSession(
+    new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }),
+    true,
+  );
+  const customer = await mcpSession(
+    new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: buyer.token }),
+    true,
+  );
+  try {
+    for (const converted of [false, true]) {
+      const q = await checked<{ id: string }>(
+        rpc(
+          'create_checkout_quote',
+          {
+            items: [{ variant_id: p.variantId, quantity: 2 }],
+            address: TEST_ADDRESS,
+            idempotency_key: crypto.randomUUID(),
+          },
+          buyer.token,
+        ),
+      );
+      cleanup.defer(() => checked(rpc('cancel_checkout_quote', { quote_id: q.id }, admin.token)));
+      const args = { quote_id: q.id, reason: converted ? '😀'.repeat(500) : '' };
+      await expect(
+        session.client.callTool({ name: 'cancel_checkout_quote', arguments: args }),
+      ).rejects.toThrow('Tool cancel_checkout_quote not found');
+      const denied = await customer.client.callTool({ name: 'cancel_checkout_quote', arguments: args });
+      expect(denied.isError).toBe(true);
+      expect(JSON.stringify(denied)).toContain('ADMIN_REQUIRED');
+      const stranger = await signup();
+      expect((await rpc('cancel_checkout_quote', args, stranger.token)).status).toBeGreaterThanOrEqual(400);
+      expect(
+        await toolData(session.client, 'get_inventory_availability', { variant_id: p.variantId }),
+      ).toMatchObject({ on_hand: 9, reserved: 2, available: 7 });
+      // Convert AFTER the operator has seen an unconverted quote: cancellation still includes the order.
+      expect(await toolData(session.client, 'get_admin_checkout_quote', { quote_id: q.id })).toMatchObject({
+        order_id: null,
+      });
+      const order = converted
+        ? await checked<{ id: string }>(rpc('create_order_from_quote', { quote_id: q.id }, buyer.token))
+        : null;
+      const result = await toolData<Record<string, unknown>>(write.client, 'cancel_checkout_quote', args);
+      expect(result).toMatchObject({
+        id: q.id,
+        status: 'cancelled',
+        is_reserved: false,
+        cancel_reason: args.reason,
+        order_id: order?.id ?? null,
+      });
+      expect(result).not.toHaveProperty('customer_id');
+      expect(result).not.toHaveProperty('stored_status');
+      expect(
+        await toolData<typeof result>(write.client, 'cancel_checkout_quote', {
+          ...args,
+          reason: 'replacement',
+        }),
+      ).toEqual(result);
+      expect(
+        await toolData(session.client, 'get_inventory_availability', { variant_id: p.variantId }),
+      ).toMatchObject({ on_hand: 9, reserved: 0, available: 9 });
+      if (order) {
+        expect(await toolData(session.client, 'get_admin_order', { order_id: order.id })).toMatchObject({
+          status: 'cancelled',
+        });
+        expect(await toolData(session.client, 'get_order_ledger', { order_id: order.id })).toMatchObject({
+          transactions: [],
+        });
+      }
+    }
+    expect(
+      (
+        await write.client.callTool({
+          name: 'cancel_checkout_quote',
+          arguments: { quote_id: crypto.randomUUID() },
+        })
+      ).isError,
+    ).toBe(true);
+  } finally {
+    await customer.close();
+    await write.close();
+  }
+});
+
+test('MCP 取消与 Capture 准备竞争，未知 Capture 及完成后不允许取消', async () => {
+  const p = await stockedProduct(admin, { price: 7.25, onHand: 9, cleanup });
+  const write = await mcpSession(
+    new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }),
+    true,
+  );
+  try {
+    for (const race of [false, true]) {
+      const order = await fixtureOrder(p, buyer);
+      const intent = await fixtureIntent(order, buyer);
+      const prepare = () =>
+        rpc(
+          'prepare_paypal_capture',
+          { payment_intent_id: intent.id, actor_id: buyer.userId },
+          undefined,
+          true,
+        );
+      const cancel = () =>
+        write.client.callTool({ name: 'cancel_checkout_quote', arguments: { quote_id: order.quoteId } });
+      const [prepared, cancelled] = race
+        ? await Promise.all([prepare(), cancel()])
+        : [await prepare(), await cancel()];
+      expect(Number(prepared.status === 200) + Number(!cancelled.isError)).toBe(1);
+      if (prepared.status === 200) {
+        expect(cancelled.isError).toBe(true);
+        expect(
+          await toolData(session.client, 'get_admin_checkout_quote', { quote_id: order.quoteId }),
+        ).toMatchObject({ stored_status: 'converted', is_reserved: true });
+        // The durable dispatch marker remains even without a provider response.
+        expect((await cancel()).isError).toBe(true);
+        await settleIntent(intent);
+        expect((await cancel()).isError).toBe(true);
+        expect(
+          await toolData(session.client, 'get_admin_checkout_quote', { quote_id: order.quoteId }),
+        ).toMatchObject({ stored_status: 'completed', is_reserved: false });
+      } else {
+        expect(await toolData(session.client, 'get_admin_order', { order_id: order.id })).toMatchObject({
+          status: 'cancelled',
+        });
+      }
+    }
+  } finally {
+    await write.close();
+  }
 });
 
 test('RPC 自身拒绝匿名和客户；无效筛选不能退化为全店读取', async () => {

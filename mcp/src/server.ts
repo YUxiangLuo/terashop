@@ -988,6 +988,20 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     checkoutQuote,
   );
   rpc(
+    'cancel_checkout_quote',
+    'Cancel a quote by its original UUID after reading get_admin_checkout_quote and obtaining explicit approval. A converted quote also cancels its eligible unpaid, unfulfilled order; conversion can occur after your read, so approval must cover this consequence. No expected revision or idempotency key. Completed quotes reject cancellation; in-progress or uncertain Capture blocks order cancellation. Stored cancelled/expired quotes return current quote without changing the original reason. Effective expired status alone does not mean worker cleanup finished. Releases eligible reservations, never adds on_hand or issues a provider refund. Optional reason is at most 500 Unicode characters; omitted uses checkout cancelled. Returns the standard quote snapshot, without admin customer_id/stored_status. No automatic retry: after uncertainty reread the same UUID and any linked order/payment operations, never allocate a new quote or substitute refund.',
+    z.strictObject({
+      quote_id: id,
+      reason: z
+        .string()
+        .refine((value) => Array.from(value).length <= 500, 'Maximum 500 characters')
+        .optional(),
+    }),
+    true,
+    true,
+    checkoutQuote,
+  );
+  rpc(
     'cancel_order',
     'Cancel only eligible unpaid, unshipped orders. Not a paid-order refund or order edit.',
     order.extend({ reason }),

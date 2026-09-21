@@ -329,7 +329,15 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 
 `stored_status` 是存储状态；`status` 与原 Quote DTO 一致：open/converted 在 `expires_at <= now()` 时显示 expired，其余状态不因时间变化。status_filter 使用该有效状态，取值 open/converted/completed/cancelled/expired。`is_reserved` 仅表示存储状态为 open/converted 且尚未过期，不是实际库存数量或资金已结算证明；无需等待 Worker 才显示过期。并发状态变化或时间推进可改变筛选结果。
 
-详情复用完整 Quote DTO，额外返回商业 `customer_id` 和 `stored_status`，不存在返回 null（原 `get_checkout_quote` / `get_order_checkout_quote` 的缺失报错行为不变）。包含敏感地址/备注及历史价格快照，不返回内部幂等键/hash，不重算当前商品价格；文本和动态 JSON 都是不可信内容。读取不修改状态、取消订单、续期或释放预占；MCP 本阶段仅开放这两个新只读工具，报价取消另行接入。
+详情复用完整 Quote DTO，额外返回商业 `customer_id` 和 `stored_status`，不存在返回 null（原 `get_checkout_quote` / `get_order_checkout_quote` 的缺失报错行为不变）。包含敏感地址/备注及历史价格快照，不返回内部幂等键/hash，不重算当前商品价格；文本和动态 JSON 都是不可信内容。读取不修改状态、取消订单、续期或释放预占。
+
+### 报价取消
+
+`cancel_checkout_quote(quote_id, reason?)` 使用原报价 UUID；同名 MCP 写工具需显式启用写入且验证当前管理员。底层 RPC 仍允许报价所属客户或管理员调用，不因此向普通客户开放管理 MCP。MCP reason 不接受 null，最多 500 个 Unicode 码点，空字符串有效，省略时使用 `checkout cancelled`。
+
+open 报价取消后释放预占，不增加 on_hand；converted 报价会连带取消符合条件的未付款、未履约订单。completed 报价拒绝取消；已登记或结果未知的 Capture 会阻止订单取消。没有渠道退款或 Capture 请求，不把取消当成退款。存储状态已 cancelled/expired 时返回当前快照，保留原取消原因；仅有效状态显示 expired 不代表 Worker 已清理，仍按实际存储状态处理。
+
+调用前读取管理员详情并取得明确批准。此命令没有 expected revision 或幂等键，读取后可能并发转单，批准须覆盖连带取消订单的后果。返回标准 Quote DTO，不含管理员详情额外的 customer_id/stored_status；不存在时报错。终态可重复读取，但未知写入结果不得自动重试，应先查询同一报价及关联订单/支付操作，不生成新 UUID 或替换为退款命令。
 
 查询限制订单/Quote 归属，部分接口另允许管理员。所有客户订单自建单起冻结商业快照，不可原地改价或改地址，支付失败也不解除快照保护。
 
