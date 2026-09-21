@@ -24,6 +24,152 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('运维输出保留精确诊断数据，拒绝嵌套秘密、错误组件指标和畸形重投结果', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-20T11:12:13.123456+00:00';
+  const outbox = {
+    id: '9007199254740993',
+    event_id: id,
+    aggregate_type: 'order',
+    aggregate_id: id,
+    event_type: 'order.created',
+    status: 'failed',
+    attempts: 26,
+    retry_start: 25,
+    available_at: at,
+    lease_expires_at: null,
+    published_at: null,
+    created_at: at,
+    has_error: true,
+    last_redrive: { attempts: 25, worker_id: 'admin', reason: 'approved retry', created_at: at },
+  };
+  const inbox = {
+    id,
+    provider: 'paypal',
+    provider_event_id: 'provider-event',
+    source: 'api_response',
+    event_type: 'capture',
+    status: 'failed',
+    livemode: false,
+    resource_type: null,
+    resource_id: null,
+    attempts: 25,
+    automatic_retry_exhausted: true,
+    next_attempt_at: at,
+    processed_at: null,
+    occurred_at: at,
+    created_at: at,
+    has_error: true,
+  };
+  const issue = {
+    id,
+    provider_event_id: id,
+    provider: 'paypal',
+    kind: 'refund',
+    amount: '12.12345678',
+    currency: 'JPY',
+    order_id: null,
+    payment_intent_id: null,
+    refund_request_id: null,
+    reconciliation_status: 'unmatched',
+    has_error: true,
+    created_at: at,
+  };
+  const base = {
+    start_at: at,
+    end_at: '2026-09-21T00:00:00Z',
+    observed_at: at,
+    unresolved_count: '3',
+    oldest_created_at: at,
+  };
+  const summaries = [
+    {
+      ...base,
+      component: 'outbox',
+      status_counts: { failed: '2', processing: '1' },
+      ready_count: '2',
+      expired_lease_count: '1',
+      retry_exhausted_count: '1',
+    },
+    {
+      ...base,
+      component: 'inbox',
+      status_counts: { received: '1', failed: '2' },
+      ready_count: '1',
+      expired_lease_count: null,
+      retry_exhausted_count: '2',
+    },
+    {
+      ...base,
+      component: 'reconciliation',
+      status_counts: { unmatched: '3' },
+      ready_count: null,
+      expired_lease_count: null,
+      retry_exhausted_count: null,
+    },
+  ];
+  let response: unknown;
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend, true);
+  try {
+    for (const [name, row, cursor] of [
+      ['list_admin_outbox_events', outbox, { next_after_id: outbox.id }],
+      ['list_admin_payment_provider_events', inbox, { next_cursor: { created_at: at, id } }],
+      ['list_admin_reconciliation_issues', issue, { next_cursor: null }],
+    ] as const) {
+      const expected = { items: [row], ...cursor };
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, name)).toEqual(expected);
+      for (const field of ['payload', 'last_error', 'lease_token']) {
+        response = { ...expected, items: [{ ...row, [field]: 'SECRET' }] };
+        const failed = await session.client.callTool({ name, arguments: {} });
+        expect(failed.isError).toBe(true);
+        expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+        expect(JSON.stringify(failed)).not.toContain('SECRET');
+      }
+    }
+    for (const expected of summaries) {
+      const args = { component: expected.component, start_at: base.start_at, end_at: base.end_at };
+      response = expected;
+      expect(await toolData<typeof expected>(session.client, 'get_admin_operations_summary', args)).toEqual(
+        expected,
+      );
+      response = { ...expected, status_counts: { published: '1' } };
+      expect(
+        (await session.client.callTool({ name: 'get_admin_operations_summary', arguments: args })).isError,
+      ).toBe(true);
+    }
+    response = { ...summaries[2], ready_count: '0' };
+    expect(
+      (
+        await session.client.callTool({
+          name: 'get_admin_operations_summary',
+          arguments: { component: 'reconciliation', start_at: base.start_at, end_at: base.end_at },
+        })
+      ).isError,
+    ).toBe(true);
+    const args = { event_id: id, expected_attempt: 25, reason: 'approved' };
+    for (const expected of [false, true]) {
+      response = expected;
+      expect(await toolData<boolean>(session.client, 'redrive_outbox_event', args)).toBe(expected);
+    }
+    for (const invalid of ['false', null, { result: true, secret: 'SECRET' }]) {
+      response = invalid;
+      const before = calls.length;
+      const failed = await session.client.callTool({ name: 'redrive_outbox_event', arguments: args });
+      expect(failed.isError).toBe(true);
+      expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+        code: 'INVALID_BACKEND_RESPONSE',
+        outcome_unknown: true,
+      });
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+      expect(calls.length - before).toBe(3);
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('用户输出区分 profile 和商业客户身份，拒绝 Auth 秘密且异常写入不重试', async () => {
   const id = crypto.randomUUID(),
     customer = crypto.randomUUID(),
@@ -914,14 +1060,19 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
 });
 
 test('MCP 保留大整数游标/微秒时间戳且用户 JWT 透传，不暴露凭据', async () => {
-  const { backend, calls } = fakeBackend(async (request) => Response.json(await request.json()));
+  const { backend, calls } = fakeBackend(async (request) => {
+    const args = await request.json();
+    return Response.json(
+      request.url.endsWith('/list_admin_outbox_events') ? { items: [], next_after_id: args.after_id } : args,
+    );
+  });
   const session = await mcpSession(backend);
   try {
     expect(
-      await toolData<{ after_id: string }>(session.client, 'list_admin_outbox_events', {
+      await toolData<{ items: []; next_after_id: string }>(session.client, 'list_admin_outbox_events', {
         after_id: '9007199254740993',
       }),
-    ).toEqual({ after_id: '9007199254740993' });
+    ).toEqual({ items: [], next_after_id: '9007199254740993' });
     const cursor = { updated_at: '2026-09-20T11:12:13.123456+00:00', id: crypto.randomUUID() };
     expect(
       await toolData<{ after_cursor: typeof cursor }>(session.client, 'list_admin_products', {

@@ -492,6 +492,115 @@ export const paymentOperations = z.discriminatedUnion('kind', [
   paymentPage.extend({ kind: z.literal('refund_request'), items: z.array(refundRequest).max(100) }),
   paymentPage.extend({ kind: z.literal('money_movement'), items: z.array(moneyMovement).max(100) }),
 ]);
+const diagnosticTimestamp = z.union([timestamp, z.enum(['infinity', '-infinity'])]);
+export const outboxPage = z.strictObject({
+  items: z
+    .array(
+      z.strictObject({
+        id: bigintString,
+        event_id: id,
+        aggregate_type: z.string(),
+        aggregate_id: id,
+        event_type: z.string(),
+        status: z.enum(['pending', 'processing', 'published', 'failed', 'exhausted']),
+        attempts: quantity,
+        retry_start: quantity,
+        available_at: diagnosticTimestamp,
+        lease_expires_at: diagnosticTimestamp.nullable(),
+        published_at: timestamp.nullable(),
+        created_at: timestamp,
+        has_error: z.boolean(),
+        last_redrive: z
+          .strictObject({
+            attempts: quantity,
+            worker_id: z.string(),
+            reason: z.string(),
+            created_at: timestamp,
+          })
+          .nullable(),
+      }),
+    )
+    .max(100),
+  next_after_id: bigintString.nullable(),
+});
+const diagnosticPage = z.strictObject({
+  next_cursor: z.strictObject({ created_at: timestamp, id }).nullable(),
+});
+export const providerEventPage = diagnosticPage.extend({
+  items: z
+    .array(
+      z.strictObject({
+        id,
+        provider: z.literal('paypal'),
+        provider_event_id: z.string(),
+        source: z.enum(['webhook', 'api_response']),
+        event_type: z.string(),
+        status: z.enum(['received', 'processed', 'ignored', 'failed']),
+        livemode: z.boolean(),
+        resource_type: z
+          .enum(['payment_intent', 'payment_transaction', 'refund_request', 'provider_money_movement'])
+          .nullable(),
+        resource_id: id.nullable(),
+        attempts: quantity,
+        automatic_retry_exhausted: z.boolean(),
+        next_attempt_at: diagnosticTimestamp,
+        processed_at: timestamp.nullable(),
+        occurred_at: timestamp,
+        created_at: timestamp,
+        has_error: z.boolean(),
+      }),
+    )
+    .max(100),
+});
+export const reconciliationPage = diagnosticPage.extend({
+  items: z
+    .array(
+      moneyMovement.omit({ payment_transaction_id: true, matched_at: true }).extend({
+        order_id: id.nullable(),
+        reconciliation_status: z.enum(['unmatched', 'action_required']),
+      }),
+    )
+    .max(100),
+});
+const countString = z.string().regex(/^(0|[1-9][0-9]*)$/);
+const operationsBase = z.strictObject({
+  start_at: timestamp,
+  end_at: timestamp,
+  observed_at: timestamp,
+  unresolved_count: countString,
+  oldest_created_at: timestamp.nullable(),
+});
+export const operationsSummary = z.discriminatedUnion('component', [
+  operationsBase.extend({
+    component: z.literal('outbox'),
+    status_counts: z.strictObject({
+      pending: countString.optional(),
+      processing: countString.optional(),
+      failed: countString.optional(),
+      exhausted: countString.optional(),
+    }),
+    ready_count: countString,
+    expired_lease_count: countString,
+    retry_exhausted_count: countString,
+  }),
+  operationsBase.extend({
+    component: z.literal('inbox'),
+    status_counts: z.strictObject({ received: countString.optional(), failed: countString.optional() }),
+    ready_count: countString,
+    expired_lease_count: z.null(),
+    retry_exhausted_count: countString,
+  }),
+  operationsBase.extend({
+    component: z.literal('reconciliation'),
+    status_counts: z.strictObject({
+      unmatched: countString.optional(),
+      action_required: countString.optional(),
+    }),
+    ready_count: z.null(),
+    expired_lease_count: z.null(),
+    retry_exhausted_count: z.null(),
+  }),
+]);
 // Preserve key identity across clients. PostgreSQL owns btrim and character
 // length validation; JS trim/UTF-16 length have different semantics.
 export const key = z

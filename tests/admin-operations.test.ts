@@ -1,19 +1,23 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { checked, command, makeAdmin, rpc, signup, type TestUser } from './helpers';
+import { API, ANON_KEY, checked, makeAdmin, rpc, signup, type TestUser } from './helpers';
+import { AdminBackend } from '../mcp/src/backend';
+import { mcpSession, toolData } from './support/mcp';
 import type { Database } from '../types/database';
 import { heldTransactionRace, testDatabase } from './database-concurrency';
 
 const database = testDatabase();
 let admin: TestUser, other: TestUser, customer: TestUser;
+let session: Awaited<ReturnType<typeof mcpSession>>;
 beforeAll(async () => {
   admin = await signup(); other = await signup(); customer = await signup();
   await makeAdmin(admin.userId); await makeAdmin(other.userId);
+  session = await mcpSession(new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }), true);
 });
-afterAll(() => database.close());
+afterAll(async () => { try { await session?.close(); } finally { await database.close(); } });
 type Page = { items: ({ id: string } & Record<string, unknown>)[]; next_after_id?: string | null; next_cursor?: object | null };
 const outbox = (args: Database['public']['Functions']['list_admin_outbox_events']['Args']) =>
-  checked<Page>(command('list_admin_outbox_events', args, admin.token));
-const inbox = (args: object) => checked<Page>(rpc('list_admin_payment_provider_events', args, admin.token));
+  toolData<Page>(session.client, 'list_admin_outbox_events', args);
+const inbox = (args: Record<string, unknown>) => toolData<Page>(session.client, 'list_admin_payment_provider_events', args);
 
 test('Outbox 按状态和归属分页，不泄露 payload、原始错误、操作键或租约凭据', async () => {
   const aggregate = crypto.randomUUID(), ids: string[] = [];

@@ -29,6 +29,10 @@ import {
   profileResult,
   adminUser,
   adminUserPage,
+  outboxPage,
+  providerEventPage,
+  reconciliationPage,
+  operationsSummary,
   orderReturns,
   returnAuthorization,
   returnReceipt,
@@ -1037,6 +1041,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
         .max(19)
         .optional(),
     }),
+    false,
+    false,
+    outboxPage,
   );
   rpc(
     'list_admin_payment_provider_events',
@@ -1047,6 +1054,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       resource_id: id.optional(),
       after_cursor: createdCursor,
     }),
+    false,
+    false,
+    providerEventPage,
   );
   rpc(
     'get_admin_operations_summary',
@@ -1056,6 +1066,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       start_at: z.iso.datetime({ offset: true }),
       end_at: z.iso.datetime({ offset: true }),
     }),
+    false,
+    false,
+    operationsSummary,
   );
   rpc(
     'list_admin_reconciliation_issues',
@@ -1065,6 +1078,9 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
       status_filter: z.enum(['unmatched', 'action_required']).optional(),
       after_cursor: createdCursor,
     }),
+    false,
+    false,
+    reconciliationPage,
   );
   rpc(
     'redrive_outbox_event',
@@ -1076,6 +1092,7 @@ export function createAdminServer(backend: AdminBackend, options: { allowWrites?
     }),
     true,
     true,
+    z.boolean(),
   );
   rpc(
     'get_admin_category',
