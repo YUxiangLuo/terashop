@@ -71,6 +71,7 @@
 | 导出 | `export_admin_orders`；固定字段 JSON 分页，不含客户联系方式，订单号/金额为字符串；不写文件或外发，不保证跨页冻结快照 |
 
 - 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。`list_admin_orders`、`get_admin_order`、`get_order_pricing`、`cancel_order`、`mark_order_paid`、`refund_order`、`list_admin_payment_operations`、`get_admin_payment_summary`、`get_order_ledger`、`get_order_fulfillment_balance` 及全部五个退货工具已使用逐字段输出 schema，固定结构和嵌套关系行拒绝未知字段。订单地址、选项、政策与促销等 JSON 快照仍按既有动态内容合同保留；schema 不重算金额或替代数据库业务校验。其他工具的 `outputSchema` 仍约束统一 JSON 信封，后续逐领域收紧。
+- 评论列表/详情/审核/删除使用逐字段输出 schema。列表不含正文，详情和审核结果保留原始标题/正文作为不可信数据，不含客户联系方式；评分为 1–5 整数，状态仅 pending/approved/rejected。删除成功仅接受 `{id,deleted:true}`；异常审核或删除响应标记结果未知，不自动重试或替换版本。缺失详情仍返回 null，不推断购买验证。
 - 促销详情/列表/创建/更新、目标列表和优惠使用记录使用逐字段输出 schema。params 保留既有 JSON 对象，不在 MCP 重写优惠规则；保留负优先级、可空代码/限额/排期与无限排期。目标必须恰好关联一个商品、分类或变体；使用记录允许 order_id 为 null，但不扩张为客户联系资料或完整销售账本。输出校验不改变目标替换、用量释放和版本冲突语义。
 - 分类、配送方式和税率的详情/列表/创建/更新使用逐字段输出 schema，缺失详情仍为 null。保留负排序位置、微秒编辑令牌、空国家数组（不限国家）、免邮门槛 null/0 的区别，以及 0–1 税率和 * 回退规则。输出兼容表中既有的负免邮门槛，不放宽写入命令；校验不重算运费或税，不修改历史订单。
 - 订单统计、订单导出及店铺设置读写使用逐字段输出 schema。统计保留字符串计数、两位金额与三类独立状态计数（缺少的状态表示零）；导出保留精确订单号和金额字符串，拒绝混入客户联系资料。店铺设置仅返回名称、时区、USD、revision 和 updated_at，不暴露配置秘密。校验不重算统计、不改变时区或收入语义；设置写入的异常响应仍表示结果未知。

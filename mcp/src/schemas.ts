@@ -35,6 +35,23 @@ export const adminOrderPage = z.strictObject({
 });
 
 const timestamp = z.iso.datetime({ offset: true });
+export const reviewResult = z.strictObject({
+  id,
+  revision: version,
+  product_id: id,
+  customer_id: id,
+  rating: z.number().int().min(1).max(5),
+  title: z.string(),
+  body: z.string(),
+  status: z.enum(['pending', 'approved', 'rejected']),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+export const reviewPage = z.strictObject({
+  items: z.array(reviewResult.omit({ body: true })).max(100),
+  next_cursor: id.nullable(),
+});
+export const reviewDeletion = z.strictObject({ id, deleted: z.literal(true) });
 export const profileResult = z.strictObject({
   id,
   email: z.string(),
