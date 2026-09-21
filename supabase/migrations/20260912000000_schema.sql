@@ -50,6 +50,23 @@ CREATE TABLE private.managed_media (
 ALTER TABLE private.managed_media ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.managed_media FROM PUBLIC, anon, authenticated, service_role;
 
+-- Trusted authorization metadata only: no access/refresh tokens. Keep revoked
+-- bindings forever so an old upstream session cannot acquire a new identity.
+CREATE TABLE private.mcp_grants (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  binding jsonb NOT NULL UNIQUE CHECK (jsonb_typeof(binding)='object' AND octet_length(binding::text)<=1800),
+  user_id uuid NOT NULL,
+  scopes text[] NOT NULL,
+  state text NOT NULL DEFAULT 'active' CHECK (state IN ('active','revoked')),
+  version integer NOT NULL DEFAULT 1,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  revoked_at timestamptz,
+  CHECK ((state='active' AND version=1 AND revoked_at IS NULL)
+      OR (state='revoked' AND version=2 AND revoked_at IS NOT NULL))
+);
+ALTER TABLE private.mcp_grants ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.mcp_grants FROM PUBLIC, anon, authenticated, service_role;
+
 -- Constraint helpers
 
 CREATE FUNCTION private.valid_country_codes(p_countries text[]) RETURNS boolean

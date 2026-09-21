@@ -172,7 +172,9 @@ P0 验证基于媒体发现提交 `e4a409d` 的代码：`bun run test` 重建可
 
 独立服务实验：`bun scripts/mcp-keycloak-compat.ts`（需要 Docker，首次下载固定版本及 digest 的 Keycloak 26.7.0 镜像）。只创建临时容器/realm，监听随机回环端口，结束删除容器和临时配置；不操作现有 Supabase。已验证 S256、Code/Refresh resource 绑定、scope 不升级、轮换重放、撤销与在线 introspection，以及两用户/两客户端的顺序隔离场景：同一用户跨客户端共享 sid，但权限分离，针对一组的撤销不影响另外三组。resource-indicators 仍是实验性 feature，sid 不等于本项目 grant_id；真实同意、并发、持久化及双身份关联尚未实现，不直接用于生产。脚本不包含在默认单测中。
 
-下游身份保护：受信 host 可为 AdminBackend 提供 expectedUserId，每次调用核对 Supabase Auth 返回的 UUID，即使实际会话也是管理员，身份不符仍在业务访问前拒绝。已用两名本地管理员验证；绑定值不是工具输入，stdio 保持原行为。下一批实现服务端 grant 的持久状态及撤销/重授权边界，不能按邮箱自动关联，也不能让旧 token 继承重新绑定的账号。完整约束见 ADR-027；当前没有远程 host、凭据代理或 HTTP 认证。
+下游身份保护：受信 host 可为 AdminBackend 提供 expectedUserId，每次调用核对 Supabase Auth 返回的 UUID，即使实际会话也是管理员，身份不符仍在业务访问前拒绝。已用两名本地管理员验证；绑定值不是工具输入，stdio 保持原行为。
+
+grant 元数据已通过私有 PostgreSQL 表和 service-only `mcp_grant_command` 持久化，提供不可变批准、在线解析和终态撤销。完整身份元组唯一，已撤销记录不删除、不恢复；不同管理员、不同权限不能覆盖同一上游会话的批准，禁止通过重新创建让旧 token 继承新账号。底表不向 API 角色开放，不保存凭据，不增加 MCP 工具，店铺业务仍使用原用户 JWT。运行 `bun run test:current tests/mcp-grants.test.ts` 验证权限、重放、隔离、持久化和撤销竞争。下一批实现令牌验证及完整绑定查找，再接可信账号关联和加密凭据；当前没有远程 host、凭据代理或 HTTP 认证。详见 [内部 API 合同](../docs/api.md#mcp-授权记录受信服务内部接口) 和 ADR-027。
 
 独立授权候选实验：`bun test tests/unit/oauth-provider.test.ts`。固定开发依赖 `oidc-provider 9.12.2`，只在回环随机端口验证 Code/S256、resource/aud、业务 scopes、刷新轮换和 grant 撤销，不连接真实账号或 Supabase。已验证错误 resource 的刷新可能消耗旧 token、重试导致 grant 撤销；JWT 签名仍有效不代表 grant 仍有效。库明确警告 Bun 不受官方支持，内存 adapter 和自动同意仅用于实验；尚未选定生产授权服务。下一批优先核对独立部署的受支持方案，再推进持久化和逐用户凭据代理，不将该 fixture 改成远程登录入口。详见 ADR-027 的实验记录。
 

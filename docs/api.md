@@ -850,3 +850,19 @@ DTO 仅含 id/provider_event_id/provider/kind/amount/currency/order_id/payment_i
 - Reconciliation：仅 unmatched/action_required；无金额合计，不跨币种相加，三个队列指标均为 null。
 
 ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠道可用性，不承诺立即领取。区间外积压、漏收事件及基础设施健康均不在范围内；零计数不等于系统健康。接口不返回载荷、错误文本或凭据，不执行恢复，不提供跨调用共同快照；详情使用已有安全列表。
+
+## MCP 授权记录（受信服务内部接口）
+
+`mcp_grant_command(p_action,p_binding,p_user_id?,p_scopes?,p_grant_id?)` **仅 service_role** 可执行，不注册为 MCP 工具，也不允许管理员 JWT 直接调用。它只保存授权元数据；不是 OAuth 验证器或凭据代理。未来授权 host 必须先验证上游令牌、在线会话和双方账号绑定，再调用此 RPC；service-role 仅用于授权元数据，不可用于执行店铺业务。
+
+`p_binding` 必须恰好含 `issuer/subject/client_id/resource/project/session_id` 六个非空字符串，总 JSONB 文本 UTF-8 长度不超过 1800 字节，额外字段（包括 token）拒绝。值按原样精确匹配；host 从已验证身份和固定部署配置构造，不能接受工具参数指定 issuer/project/用户。`session_id` 当前使用已验证的上游会话标识；同一完整 binding 的重新授权或改绑暂不支持，不能靠随机生成 session_id 绕过。
+
+| action | 额外输入与合同 |
+| --- | --- |
+| `create` | 必须传当前非匿名管理员的 Supabase Auth UUID `p_user_id` 和非 null 的 `p_scopes` 数组，不传 grant ID；scope 仅接受五个 store:* 权限，最多 5 项，排序去重后保存。ID 由数据库生成；相同 binding、用户与批准权限的重放返回原记录，不修改身份或权限 |
+| `resolve` | 只传 binding；返回 active 且绑定用户当前仍为非匿名管理员的记录。每次锁定记录读取，不使用应用内缓存作为撤销依据 |
+| `revoke` | 必须同时传完整 binding 与 `p_grant_id`，不传用户/scopes；active → revoked，version 1 → 2。重复撤销保持 version 和撤销时间，不要求绑定用户仍是管理员 |
+
+返回 `{id,user_id,scopes,state,version}`，仅供受信 host 使用。不存在或撤销身份不匹配为 `PT404`；创建内容冲突、尝试改绑/改 scopes、复用 revoked binding 为 `PT409`；无权限、resolve 已撤销或用户已降权/删除为 `42501`；非法输入为 `22023`。并发插入或旧 Repeatable Read 快照冲突可能为 `40001`，调用方重读，不自动重新授权。resolve 与 revoke 通过行锁串行；不保证撤销取消已获准、正在执行的业务调用。
+
+`private.mcp_grants` 不向任何 API 角色开放直接读写，不保存 access/refresh token、密码或邮箱；撤销记录不删除。用户 UUID 无级联删除关系，防止删除账户同时丢失阻止旧绑定复用的记录。当前仅实现不可变批准及终态撤销，不支持 scope 原地升级/降级、恢复、批量撤销或凭据保存。SQL 仍为可重建开发基线，不是已有部署的升级脚本。

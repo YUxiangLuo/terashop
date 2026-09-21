@@ -3238,4 +3238,75 @@ begin
 end;
 $$;
 
+-- The future trusted host proves both identities and verifies the upstream
+-- token/session before invoking this service-only store. This is NOT OAuth.
+CREATE FUNCTION public.mcp_grant_command(p_action text, p_binding jsonb,
+    p_user_id uuid DEFAULT NULL, p_scopes text[] DEFAULT NULL, p_grant_id uuid DEFAULT NULL)
+    RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
+declare
+  v_grant private.mcp_grants;
+  v_scopes text[];
+  v_keys text[] := array['issuer','subject','client_id','resource','project','session_id'];
+begin
+  if auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='trusted authorization host required';
+  end if;
+  if p_action is null or p_action not in ('create','resolve','revoke') then
+    raise exception using errcode='22023', message='invalid grant action';
+  end if;
+  if jsonb_typeof(p_binding) is distinct from 'object' then
+    raise exception using errcode='22023', message='invalid grant binding';
+  end if;
+  if not (p_binding ?& v_keys) or (p_binding-v_keys)<>'{}'::jsonb
+      or octet_length(p_binding::text)>1800
+      or exists (select 1 from jsonb_each(p_binding) e
+        where jsonb_typeof(e.value)<>'string' or btrim(e.value #>> '{}')='') then
+    raise exception using errcode='22023', message='invalid grant binding';
+  end if;
+  if p_action='create' then
+    if p_user_id is null or p_grant_id is not null or p_scopes is null
+        or cardinality(p_scopes)>5 or array_position(p_scopes,null) is not null
+        or not (p_scopes <@ array['store:read','store:write','store:payments','store:access','store:privacy']) then
+      raise exception using errcode='22023', message='invalid grant approval';
+    end if;
+    if not exists (select 1 from public.profiles p join auth.users u on u.id=p.id
+        where p.id=p_user_id and p.role='admin' and not coalesce(u.is_anonymous,true)) then
+      raise exception using errcode='42501', message='admin identity required';
+    end if;
+    select coalesce(array_agg(distinct s order by s),'{}'::text[]) into v_scopes from unnest(p_scopes) s;
+    insert into private.mcp_grants(binding,user_id,scopes) values (p_binding,p_user_id,v_scopes)
+      on conflict (binding) do nothing;
+  elsif p_user_id is not null or p_scopes is not null
+      or (p_action='resolve' and p_grant_id is not null)
+      or (p_action='revoke' and p_grant_id is null) then
+    raise exception using errcode='22023', message='invalid grant lookup';
+  end if;
+
+  -- Lock even resolution: a stale RR snapshot must fail rather than authorize
+  -- against a row revoked after that snapshot. Admission is not business rollback.
+  select * into v_grant from private.mcp_grants where binding=p_binding for update;
+  if not found then
+    if p_action='create' then raise exception using errcode='40001', message='retry grant creation'; end if;
+    raise exception using errcode='PT404', message='grant not found';
+  end if;
+  if p_action='create' and (v_grant.user_id<>p_user_id or v_grant.scopes<>v_scopes or v_grant.state<>'active') then
+    raise exception using errcode='PT409', message='grant binding cannot be reused or changed';
+  elsif p_action='revoke' then
+    if v_grant.id<>p_grant_id then raise exception using errcode='PT404', message='grant not found'; end if;
+    if v_grant.state='active' then
+      update private.mcp_grants set state='revoked',version=2,revoked_at=clock_timestamp()
+        where id=v_grant.id returning * into v_grant;
+    end if;
+  elsif p_action='resolve' then
+    if v_grant.state<>'active' or not exists (
+        select 1 from public.profiles p join auth.users u on u.id=p.id
+        where p.id=v_grant.user_id and p.role='admin' and not coalesce(u.is_anonymous,true)) then
+      raise exception using errcode='42501', message='grant is not authorized';
+    end if;
+  end if;
+  return jsonb_build_object('id',v_grant.id,'user_id',v_grant.user_id,'scopes',v_grant.scopes,
+    'state',v_grant.state,'version',v_grant.version);
+end;
+$$;
+
 commit;

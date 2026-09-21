@@ -2232,6 +2232,16 @@ export type Database = {
         }
         Returns: Json
       }
+      mcp_grant_command: {
+        Args: {
+          p_action: string
+          p_binding: Json
+          p_grant_id?: string
+          p_scopes?: string[]
+          p_user_id?: string
+        }
+        Returns: Json
+      }
       moderate_review: {
         Args: { expected_revision?: number; review_id: string; status: string }
         Returns: {
