@@ -321,6 +321,16 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 | `get_order_fulfillment_balance` | `order_id`；每行订购/履约/取消/退款预留/可履约数量，及订单级 `payment_hold` |
 | `update_order_address` | 遗留入口；当前客户订单均有 Quote 快照，拒绝原地改址，须取消后重新结账 |
 
+### 管理员报价查询
+
+`list_admin_checkout_quotes(page_size=20, after_id?, customer_id_filter?, status_filter?, has_order?)` 与 `get_admin_checkout_quote(quote_id)` 独立验证 admin/service，普通客户即使查询自己的报价也不能调用；客户仍使用上面的归属接口。
+
+列表按 UUID 升序分页，page_size 为 1–100，返回 `{items,next_cursor}`，末页游标为 null。客户 UUID、是否关联订单、状态筛选按 AND 组合；更换筛选须重置游标。摘要只含 `id/customer_id/order_id/stored_status/status/is_reserved/currency/total/expires_at/created_at/updated_at`，不含地址、备注、优惠码、商品行、内部 hash 或幂等键。空页不证明客户不存在，不提供精确总数或跨页快照。
+
+`stored_status` 是存储状态；`status` 与原 Quote DTO 一致：open/converted 在 `expires_at <= now()` 时显示 expired，其余状态不因时间变化。status_filter 使用该有效状态，取值 open/converted/completed/cancelled/expired。`is_reserved` 仅表示存储状态为 open/converted 且尚未过期，不是实际库存数量或资金已结算证明；无需等待 Worker 才显示过期。并发状态变化或时间推进可改变筛选结果。
+
+详情复用完整 Quote DTO，额外返回商业 `customer_id` 和 `stored_status`，不存在返回 null（原 `get_checkout_quote` / `get_order_checkout_quote` 的缺失报错行为不变）。包含敏感地址/备注及历史价格快照，不返回内部幂等键/hash，不重算当前商品价格；文本和动态 JSON 都是不可信内容。读取不修改状态、取消订单、续期或释放预占；MCP 本阶段仅开放这两个新只读工具，报价取消另行接入。
+
 查询限制订单/Quote 归属，部分接口另允许管理员。所有客户订单自建单起冻结商业快照，不可原地改价或改地址，支付失败也不解除快照保护。
 
 零对价取消允许订单本人/admin/service 调用，只接受 open、已结算订单中 `line_total=0` 且税额为零的商品行；数量不能占用已履约或退款请求预留部分。订单范围内同键同参数返回原取消事实 DTO（`id/order_id/order_item_id/quantity/restocked_quantity/created_at`），异参拒绝；reason 最多 2000 字符。依据原始扣库事实回库，不创建零金额 capture/refund。零总额订单全部商品取消后状态为 cancelled，financial_status 保持 paid；混合履约/取消覆盖全部商品时正常完成。

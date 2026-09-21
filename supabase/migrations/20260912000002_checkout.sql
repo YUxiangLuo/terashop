@@ -2186,6 +2186,52 @@ begin
 end;
 $$;
 
+CREATE FUNCTION public.get_admin_checkout_quote(quote_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  return (select private.checkout_quote_json(q) || jsonb_build_object(
+    'customer_id',q.customer_id,'stored_status',q.status)
+    from commerce.checkout_quotes q where q.id=quote_id);
+end;
+$$;
+
+CREATE FUNCTION public.list_admin_checkout_quotes(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
+    customer_id_filter uuid DEFAULT NULL, status_filter text DEFAULT NULL, has_order boolean DEFAULT NULL) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_items jsonb; v_next uuid;
+begin
+  if not public.is_admin() and auth.role() is distinct from 'service_role' then
+    raise exception using errcode='42501', message='admin only';
+  end if;
+  if page_size is null or page_size not between 1 and 100
+    or status_filter not in ('open','converted','completed','cancelled','expired') then
+    raise exception using errcode='22023', message='invalid checkout quote filters';
+  end if;
+  with candidates as materialized (
+    select q.id,q.customer_id,q.order_id,q.status as stored_status,
+      case when q.status in ('open','converted') and q.expires_at<=now() then 'expired' else q.status end as status,
+      q.status in ('open','converted') and q.expires_at>now() as is_reserved,
+      q.currency,q.total,q.expires_at,q.created_at,q.updated_at
+    from commerce.checkout_quotes q
+    where (after_id is null or q.id>after_id)
+      and (customer_id_filter is null or q.customer_id=customer_id_filter)
+      and (has_order is null or (q.order_id is not null)=has_order)
+      and (status_filter is null or
+        (case when q.status in ('open','converted') and q.expires_at<=now() then 'expired' else q.status end)=status_filter)
+    order by q.id limit page_size+1
+  ), page as materialized (select * from candidates order by id limit page_size)
+  select coalesce(jsonb_agg(jsonb_build_object('id',p.id,'customer_id',p.customer_id,'order_id',p.order_id,
+    'stored_status',p.stored_status,'status',p.status,'is_reserved',p.is_reserved,'currency',p.currency,
+    'total',p.total,'expires_at',p.expires_at,'created_at',p.created_at,'updated_at',p.updated_at) order by p.id),'[]'::jsonb),
+    case when (select count(*) from candidates)>page_size then (select id from page order by id desc limit 1) end
+  into v_items,v_next from page p;
+  return jsonb_build_object('items',v_items,'next_cursor',v_next);
+end;
+$$;
+
 CREATE FUNCTION public.get_inventory_availability(variant_id uuid, location_id uuid DEFAULT NULL::uuid) RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER
     SET search_path TO ''

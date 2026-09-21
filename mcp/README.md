@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，99 个显式工具（47 个只读、52 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**当前为可运行的 stdio MCP，101 个显式工具（49 个只读、52 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
 ## 运行与凭据
 
@@ -60,6 +60,7 @@
 | 扩展对象 | `list_admin_metaobject_definitions`、`get_admin_metaobject_definition`、`list_admin_metaobjects`、`get_admin_metaobject`、`create_metaobject_definition`、`update_metaobject_definition`、`create_metaobject`、`update_metaobject`、`delete_metaobject`、`delete_metaobject_definition`；定义默认私有、条目命令默认草稿，版本化编辑/发布/撤回/删除；引用中条目和非空定义不可删，不自动解除引用或级联 |
 | 订单 | `list_admin_orders`、`get_admin_order`、`update_order_admin_note`、`list_admin_order_events`、`get_order_pricing`、`get_order_checkout_quote`、`get_order_ledger`、`get_order_fulfillment_balance`、`cancel_order`、`cancel_zero_value_order_item`；备注按旧值比较后替换，不追踪历史；事件仅安全元数据，不含任意载荷 |
 | 手工资金 | `mark_order_paid`、`refund_order`；仅记账，不调用真实支付渠道 |
+| 报价运营 | `list_admin_checkout_quotes`、`get_admin_checkout_quote`；含未转单报价，客户/有效状态/是否关联订单筛选，UUID 分页；摘要不含地址/备注，详情含敏感历史快照。只读，不续期或取消 |
 | 渠道资金 | `list_admin_payment_operations` 查询脱敏渠道操作；`refund_paypal` 通过现有 Edge 发起真实退款，要求显式范围与批准、保留原幂等键、不自动重试；服务端决定 sandbox/live，不能用手工退款代替 |
 | 履约 | `create_fulfillment`、`update_fulfillment` |
 | 退货 | `get_order_returns`、`create_return`、`receive_return`、`dispose_return_receipt`、`close_return` |
@@ -70,7 +71,8 @@
 | 运维 | `list_admin_outbox_events`、`list_admin_payment_provider_events`、`list_admin_reconciliation_issues`、`get_admin_operations_summary`、`redrive_outbox_event`；全店未对账资金及分组件区间积压概览，仅安全诊断，不开放资金重放或宣称整体健康 |
 | 导出 | `export_admin_orders`；固定字段 JSON 分页，不含客户联系方式，订单号/金额为字符串；不写文件或外发，不保证跨页冻结快照 |
 
-- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 99 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
+- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 101 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
+- 管理员报价详情额外返回 customer_id、stored_status，缺失返回 null；列表/详情的 status 是有效状态（open/converted 到期即 expired），筛选同样按有效状态。is_reserved 不是库存数量或支付成功证明。读取不触发 Worker、取消或续期，客户 UUID 不等于 Auth UUID；完整合同见 [管理员报价查询](../docs/api.md#管理员报价查询)。
 - 订单备注回执保留 null 与空字符串的区别；事件列表只含安全元数据，ID/游标保留精确 bigint 字符串，不含原始 data。结账报价保留后端计算的过期/预留状态与存储快照，不把它当作当前重新报价；缺失报价仍报错。零对价取消返回独立数量及回库事实，不是退款。PayPal 输出声明复用后端白名单合同，仍先剔除 Edge 额外字段并验证订单关联，pending_reconciliation 不被改写为资金已结算。
 - 全部 Metafield／Metaobject 工具使用逐字段输出 schema，包含定义、值、分页及删除回执。定义字段声明和验证规则拒绝未知字段；value 与 values 内部保留原始动态 JSON，不展开引用。无定义字段保留 definition_id:null；definition_access 是配置，Metaobject 的 is_public 是后端当前可见性计算，均不代表披露批准或前台展示保证。缺失详情返回 null；删除成功只接受 `{id,deleted:true}`，异常写响应标记结果未知，不自动重试。
 - 商品列表/详情/创建/更新及媒体上传使用逐字段输出 schema。列表保留可空价格区间和微秒游标；完整聚合含成本、私有 Metafield 和全部状态子资源，不是公开商品 DTO。嵌套行拒绝未知字段，Metafield value 保留动态 JSON；兼容负排序位置和数据库既有负成本，不放宽写入命令。媒体回执仅含 path/url，上传与关联仍分开，URL 不代表内容安全认证。异常写响应标记结果未知，不自动重试。
@@ -124,11 +126,11 @@ Worker 的 claim/complete、Inbox ingest/retry、原始渠道资金处理始终�
 
 ### 2026-09-21 覆盖核对与下一阶段
 
-核对来源是六个 SQL 基线中的 public 函数、执行授权、实际函数体、Edge/Storage 边界及 MCP 注册，不以 SPA 页面或函数名作为唯一判断。当前 99 个工具均有显式输出合同；本轮未发现管理员专用业务 RPC 漏接。**这不等于完整 Admin 或生产就绪**：共享客户/管理员入口、底表能力、尚无命令的业务和远程认证仍须分别判断。
+核对来源是六个 SQL 基线中的 public 函数、执行授权、实际函数体、Edge/Storage 边界及 MCP 注册，不以 SPA 页面或函数名作为唯一判断。核对时的 99 个工具均有显式输出合同，未发现管理员专用业务 RPC 漏接；后续新增报价只读工具见上方覆盖表。**这不等于完整 Admin 或生产就绪**：共享客户/管理员入口、底表能力、尚无命令的业务和远程认证仍须分别判断。
 
 | 未注册入口或能力 | 核对结果 |
 | --- | --- |
-| `get_checkout_quote`、`cancel_checkout_quote` | [现有 SQL](../supabase/migrations/20260912000002_checkout.sql) 允许当前客户或管理员操作。MCP 的 `get_order_checkout_quote` 只覆盖已关联订单的报价；未转单报价缺少管理员发现/查询与取消入口。取消 converted 报价会调用订单取消，completed 报价拒绝取消，不能描述成仅释放库存 |
+| `get_checkout_quote`、`cancel_checkout_quote` | [现有 SQL](../supabase/migrations/20260912000002_checkout.sql) 允许当前客户或管理员操作。核对后已增加独立管理员报价分页/详情，覆盖未转单报价；取消尚未接入 MCP。取消 converted 报价会调用订单取消，completed 报价拒绝取消，不能描述成仅释放库存 |
 | `update_order_address` | 遗留接口，不是可直接接入的通用 Order Edit；[当前合同](../docs/api.md) 与 [回归](../tests/inventory-reservations.test.ts) 要求正常 Quote 转单的地址快照不可原地修改，未付款改址走取消并重新结账 |
 | `get_payment_operations` | 旧聚合包含渠道引用与特权诊断，不能直接暴露给 agent。现有脱敏支付操作、Inbox/对账查询与账本是刻意划分的管理入口，不追求原始字段对等 |
 | Cart、客户订单、报价创建/转单、Storefront 读取 | 客户身份与公开目录接口，不是管理员代客操作 API；不因为 authenticated 有执行权限就加入 MCP |
@@ -136,9 +138,9 @@ Worker 的 claim/complete、Inbox ingest/retry、原始渠道资金处理始终�
 | Worker、渠道绑定/捕获/事件入箱与恢复 | [执行授权](../supabase/migrations/20260912000005_security.sql) 和 [部署合同](../supabase/functions/README.md) 保持受信服务边界；不通过 MCP 暴露 service-role 身份 |
 | 媒体删除、大文件、快照文件导出、设置消费端 | 仍是实际缺口，不能通过复用任意 URL、文件路径或多次无事务写入冒充已实现 |
 
-建议后续按以下可独立验收的批次推进；本节是规划，不代表已注册新工具：
+建议后续按以下可独立验收的批次推进；除明确标注已接入的部分外，其余仍为规划：
 
-1. **补齐报价运营，先读后写。** 先增加管理员有界分页/详情命令，摘要不含地址、备注或任意报价载荷；明确客户 UUID、状态、过期与预留的区别。再接入显式取消，保留原 UUID，不把取消当作退款，也不代发 Capture。测试覆盖未转单、converted、completed、过期、陌生客户权限、重复取消及与支付竞争，继续使用数据库的锁与资金保护，不另建取消状态机。
+1. **补齐报价运营，先读后写。** 管理员有界分页/详情已接入，摘要不含地址、备注或任意报价载荷；明确客户 UUID、状态、过期与预留的区别。下一步接入显式取消，保留原 UUID，不把取消当作退款，也不代发 Capture。取消测试应覆盖未转单、converted、completed、过期、陌生客户权限、重复取消及与支付竞争，继续使用数据库的锁与资金保护，不另建取消状态机。
 2. **媒体生命周期。** 先确定受管理媒体身份及引用范围，再实现引用登记、关联/解除与并发删除保护；必须处理自由 URL、扩展 JSON 和历史快照不能完整枚举的问题，无法证明可删的对象保守保留。大文件传输应使用受限上传流程，不开放任意 URL 抓取或本地文件读取。对象存储删除与数据库不是一个事务，需独立恢复合同。
 3. **独立扩展的收尾。** Metafield 定义删除须单独确定已有值的规则（拒绝还是转为无定义私有值），不能隐式级联；设置消费端属于 Storefront 工作，不是 MCP 再加一层写接口。快照导出需要不可变批次、敏感数据边界与有时限的文件访问，现有分页 JSON 不承诺跨页冻结。
 4. **远程 MCP 身份设计与实现。** 先落实上面的用户身份映射、scope/撤销合同，再实现 HTTP transport、限流、日志脱敏和多会话隔离。必须验证错误 audience、过期/撤销令牌、管理员降级、跨用户会话复用及 SDK 客户端兼容；不能把当前进程级管理员 JWT 共享给网络用户。保持现有 SDK v2，不以更换 SDK 代替认证设计。
@@ -171,6 +173,7 @@ bun run test:current tests/admin-metaobject-entries.test.ts
 bun run test:current tests/admin-metaobject-delete.test.ts
 bun run test:current tests/admin-reviews.test.ts
 bun run test:current tests/admin-order-operations.test.ts
+bun run test:current tests/admin-checkout-quotes.test.ts
 bun run test:current tests/admin-payment-operations.test.ts
 bun run test:current tests/paypal-endpoints.test.ts
 bun run test:current tests/admin-users.test.ts

@@ -24,6 +24,57 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   return { backend, calls };
 }
 
+test('管理员报价列表拒绝私有字段泄漏和错误状态；非法输入不调用后端', async () => {
+  const id = crypto.randomUUID(),
+    at = '2026-09-21T00:00:00.123456Z';
+  const row = {
+    id,
+    customer_id: id,
+    order_id: null,
+    stored_status: 'open',
+    status: 'expired',
+    is_reserved: false,
+    currency: 'USD',
+    total: 12.35,
+    expires_at: at,
+    created_at: at,
+    updated_at: at,
+  };
+  let response: unknown = { items: [row], next_cursor: id };
+  const { backend, calls } = fakeBackend(() => Response.json(response));
+  const session = await mcpSession(backend);
+  try {
+    expect(await toolData<typeof response>(session.client, 'list_admin_checkout_quotes')).toEqual(response);
+    for (const invalid of [
+      { ...row, customer_note: 'SECRET' },
+      { ...row, stored_status: 'paid' },
+      { ...row, is_reserved: 'false' },
+    ]) {
+      response = { items: [invalid], next_cursor: null };
+      const failed = await session.client.callTool({ name: 'list_admin_checkout_quotes', arguments: {} });
+      expect(failed.isError).toBe(true);
+      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
+      expect(JSON.stringify(failed)).not.toContain('SECRET');
+    }
+    response = null;
+    expect(await toolData(session.client, 'get_admin_checkout_quote', { quote_id: id })).toBeNull();
+    for (const args of [
+      { page_size: 101 },
+      { status_filter: 'paid' },
+      { has_order: 'false' },
+      { actor_id: id },
+    ]) {
+      const before = calls.length;
+      expect(
+        (await session.client.callTool({ name: 'list_admin_checkout_quotes', arguments: args })).isError,
+      ).toBe(true);
+      expect(calls.length).toBe(before);
+    }
+  } finally {
+    await session.close();
+  }
+});
+
 test('订单辅助工具输出保持精确事件 ID、报价快照和独立取消事实，拒绝额外字段', async () => {
   const id = crypto.randomUUID(),
     at = '2026-09-20T11:12:13.123456+00:00';
@@ -1736,8 +1787,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(47);
-    expect(writeTools.length).toBe(99);
+    expect(readTools.length).toBe(49);
+    expect(writeTools.length).toBe(101);
     expect(writeTools.find((t) => t.name === 'refund_paypal')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,

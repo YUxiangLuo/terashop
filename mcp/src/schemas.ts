@@ -195,6 +195,30 @@ export const checkoutQuote = z.strictObject({
     }),
   ),
 });
+export const adminCheckoutQuote = checkoutQuote.extend({
+  customer_id: id,
+  stored_status: checkoutQuote.shape.status,
+});
+export const adminCheckoutQuotePage = z.strictObject({
+  items: z
+    .array(
+      adminCheckoutQuote.pick({
+        id: true,
+        customer_id: true,
+        order_id: true,
+        stored_status: true,
+        status: true,
+        is_reserved: true,
+        currency: true,
+        total: true,
+        expires_at: true,
+        created_at: true,
+        updated_at: true,
+      }),
+    )
+    .max(100),
+  next_cursor: id.nullable(),
+});
 export const orderResult = adminOrderPage.shape.items.element.extend({
   ...totals,
   tax_context: jsonObject,

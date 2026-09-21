@@ -1872,6 +1872,7 @@ export type Database = {
         Returns: Json
       }
       get_admin_category: { Args: { category_id: string }; Returns: Json }
+      get_admin_checkout_quote: { Args: { quote_id: string }; Returns: Json }
       get_admin_customer: { Args: { customer_id: string }; Returns: Json }
       get_admin_location: { Args: { location_id: string }; Returns: Json }
       get_admin_metafield_definition: {
@@ -1954,6 +1955,16 @@ export type Database = {
           parent_id?: string
           root_only?: boolean
           search?: string
+        }
+        Returns: Json
+      }
+      list_admin_checkout_quotes: {
+        Args: {
+          after_id?: string
+          customer_id_filter?: string
+          has_order?: boolean
+          page_size?: number
+          status_filter?: string
         }
         Returns: Json
       }
