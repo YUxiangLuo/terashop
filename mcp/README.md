@@ -4,6 +4,8 @@
 
 **当前为可运行的 stdio MCP，112 个显式工具（53 个只读、59 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
 
+最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。当前优先串联登录授权、逐用户凭据刷新、Streamable HTTP 和真实客户端验收；大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器只用于登录和授权，不依赖 Admin SPA 执行业务。
+
 ## 运行与凭据
 
 在仓库根目录执行 `bun install --frozen-lockfile`。通过 MCP 客户端的安全环境配置或凭据管理器提供以下环境变量，再运行 `bun run mcp:stdio`：
@@ -190,9 +192,13 @@ grant 元数据已通过私有 PostgreSQL 表和 service-only `mcp_grant_command
 
 下游会话归属：[mcp_bind_downstream_session](../docs/api.md#mcp-下游会话归属受信服务内部接口) 将真实 Auth session UUID 不可变地绑定到一个 grant，撤销/会话删除仍保留归属。writeCredentials 现通过下游用户 JWT 调用 get_mcp_downstream_session 取得已验证身份，再绑定并核对回执后保存；不自行解码 JWT，同一用户的不同会话也不能替换。凭据写入、已初始化读取和刷新准入均检查绑定会话存在；未初始化读取仍返回 revision=0。联合实验为四个 grant 分别登录，验证同用户会话替换拒绝；数据库测试验证删除会话后不再返回密文或完成刷新。不证明 refresh token 配对、完整超时策略或用户同意；下一步推进可信关联及刷新代理，仍不开放远程入口。
 
-下游登录原语：[createDownstreamLogin](src/login.ts) 由受信宿主提供 browserSession 和固定 callbackUrl，生成私有 verifier、S256 challenge、随机 state 及含 state 的 redirectTo。exchange(callbackUrl,browserSession) 接收完整回调，校验固定 origin/path、唯一 code/state、无 fragment/未知参数和浏览器绑定，五分钟内单次兑换。非法回调返回 LOGIN_CALLBACK_REJECTED，不请求 Auth、不消耗原尝试；匹配后兑换结果未知不重试。`bun run test:current tests/mcp-login.test.ts tests/unit/mcp-login.test.ts` 验证真实邮件往返、重复/编码参数、目标替换、PKCE、串用、并发及过期。browserSession 必须来自宿主验证的受保护会话，不能取自回调参数；尚无 HTTP 处理器、完整 CSRF 部署、用户同意或 grant 创建，不是可部署登录入口。进程重启须重新登录，token 不交给 MCP 客户端。
+下游登录原语：[createDownstreamLogin](src/login.ts) 由受信宿主提供 browserSession 和固定 callbackUrl，生成私有 verifier、S256 challenge、随机 state 及含 state 的 redirectTo。exchange(callbackUrl,browserSession) 接收完整回调，校验固定 origin/path、唯一 code/state、无 fragment/未知参数和浏览器绑定，五分钟内单次兑换。非法回调返回 LOGIN_CALLBACK_REJECTED，不请求 Auth、不消耗原尝试；匹配后兑换结果未知不重试。`bun run test:current tests/mcp-login.test.ts tests/unit/mcp-login.test.ts` 验证真实邮件往返、重复/编码参数、目标替换、PKCE、串用、并发及过期。browserSession 必须来自宿主验证的受保护会话，不能取自回调参数；原语已接入下方 Request/Response 处理器，但尚无部署入口、用户同意或 grant 创建。进程重启须重新登录，token 不交给 MCP 客户端。
 
-浏览器会话原语：[createLoginBrowserSessions](src/browser-sessions.ts) 为固定 HTTPS origin 签发五分钟 `__Host-` Cookie（Secure/HttpOnly/SameSite=Lax）及独立 CSRF token。GET 验证唯一、已签发且未过期的 Cookie；POST 另要求同源 Origin 和同会话 X-CSRF-Token，撤销后拒绝后续读取。内存容量为 1024，满时拒绝新会话，不驱逐活跃项；重启丢失，不支持多节点共享。它不代表认证或业务授权。`bun test tests/unit/mcp-browser-sessions.test.ts` 覆盖请求头校验、过期/撤销/容量和 PKCE 浏览器串用；未验收真实浏览器 Cookie。仍需安全签发入口、限流、no-store 页面及登录尝试路由，长流程后须重查会话。
+浏览器会话原语：[createLoginBrowserSessions](src/browser-sessions.ts) 为固定 HTTPS origin 签发五分钟 `__Host-` Cookie（Secure/HttpOnly/SameSite=Lax）及独立 CSRF token。GET 验证唯一、已签发且未过期的 Cookie；POST 另要求同源 Origin 和同会话 X-CSRF-Token，撤销后拒绝后续读取。内存容量为 1024，满时拒绝新会话，不驱逐活跃项；重启丢失，不支持多节点共享。它不代表认证或业务授权。`bun test tests/unit/mcp-browser-sessions.test.ts` 覆盖请求头校验、过期/撤销/容量和 PKCE 浏览器串用。
+
+下游登录 HTTP 流程：[createLoginHttpHandler](src/login-http.ts) 提供 `handle(Request)`，不启动监听器，必须由宿主放在可信上游授权事务之后。`POST /login/session` 要求精确 Origin 与 X-Tera-Login:start，返回 Cookie/CSRF；单实例每分钟最多签发 20 次。`POST /login/email` 验证 Cookie/CSRF 和最多 1024 字节的严格 JSON `{email}`，只发一次真实 PKCE 邮件且禁止自动注册/重发；失败不返回提供方错误。固定 callbackUrl 的 GET 兑换后 303 到 `/login/status`；该地址只返回 pending/authenticated/consumed，不返回用户 UUID 或 token。`POST /login/cancel` 撤销本地事务。所有响应 no-store/no-referrer；回调路径不可位于保留的 `/login/` 路径下。
+
+凭据仅暂存在服务端内存；`takeIdentity` 要求原会话带 CSRF 的 `POST /login/approve`，一次性交给内部宿主，handle 不服务该路径。此方法不是用户同意或 grant 创建，宿主仍需验证并绑定上游身份、展示批准范围并安全持久化。五分钟绝对期限无续期，访问/签发时清理过期记录，无后台定时擦除保证；取消/过期不回滚 Auth 已创建的会话。进程级节流不能替代边缘和上游身份限流，也不保证隐藏时序差异。Request/Response 测试及真实本地 SMTP/Auth 往返已通过；另用 agent-browser 在临时回环 HTTPS 服务验证 HttpOnly、自动携带 Cookie、CSRF 拒绝、回调跳转及取消（该浏览器检查使用模拟 Auth）。尚无登录页面、可信双身份关联、生产监听器或远程 MCP transport。
 
 独立授权候选实验：`bun test tests/unit/oauth-provider.test.ts`。固定开发依赖 `oidc-provider 9.12.2`，只在回环随机端口验证 Code/S256、resource/aud、业务 scopes、刷新轮换和 grant 撤销，不连接真实账号或 Supabase。已验证错误 resource 的刷新可能消耗旧 token、重试导致 grant 撤销；JWT 签名仍有效不代表 grant 仍有效。库明确警告 Bun 不受官方支持，内存 adapter 和自动同意仅用于实验；尚未选定生产授权服务。下一批优先核对独立部署的受支持方案，再推进持久化和逐用户凭据代理，不将该 fixture 改成远程登录入口。详见 ADR-027 的实验记录。
 

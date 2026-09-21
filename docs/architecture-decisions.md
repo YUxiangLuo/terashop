@@ -490,11 +490,17 @@ grant revoke 持相同的 grant 行锁，在同一事务中删除凭据行并保
 
 版本依据：Supabase Auth `v2.196.0` 的 [PKCE handler](https://github.com/supabase/auth/blob/v2.196.0/internal/api/token.go#L214-L288) 验证 verifier，成功兑换后在事务中删除 flow state；不能据此假设并发兑换天然串行，宿主仍禁止重复请求。[OTP](https://github.com/supabase/auth/blob/v2.196.0/internal/api/otp.go#L17-L47) 接受 code_challenge/code_challenge_method；邮件 GET verify 在 PKCE 模式重定向为 code，而 POST verify 直接签发 token，不能混用。新增本地测试经真实 SMTP 邮件及 GET 验证链接取得 code，验证错误 verifier 拒绝、原尝试成功、新 session 身份与本地重复兑换拒绝；未启用真实远程登录。
 
-浏览器会话边界现由 [createLoginBrowserSessions](../mcp/src/browser-sessions.ts) 提供，尚无路由或监听器。仅接受固定 HTTPS origin，不为本地开发降低 Secure Cookie 要求。issue 生成独立的 32 字节会话标识与 CSRF token，Cookie 为 `__Host-tera-mcp-login; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300`，无 Domain。内存表只保存会话摘要、CSRF 摘要及五分钟绝对期限，无滑动续期；最多 1024 个会话，创建时清理过期项，满容量拒绝新会话，不驱逐活跃会话。它仅标识登录浏览器事务，不代表用户已认证或取得任何 store scope。
+浏览器会话边界由 [createLoginBrowserSessions](../mcp/src/browser-sessions.ts) 提供，本身不启动监听器。仅接受固定 HTTPS origin，不为本地开发降低 Secure Cookie 要求。issue 生成独立的 32 字节会话标识与 CSRF token，Cookie 为 `__Host-tera-mcp-login; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=300`，无 Domain。内存表只保存会话摘要、CSRF 摘要及五分钟绝对期限，无滑动续期；最多 1024 个会话，创建时清理过期项，满容量拒绝新会话，不驱逐活跃会话。它仅标识登录浏览器事务，不代表用户已认证或取得任何 store scope。
 
 read(request,false) 仅接受固定 origin 的 GET 和唯一、合法、已签发且未过期的 Cookie；回调仍须另外经过 login.ts 的 state/PKCE 校验。read(request,true) 仅接受 POST，并要求 Origin 精确匹配及同会话 `X-CSRF-Token`；revoke 复用该检查，删除服务端会话并返回过期 Cookie。均不采信 Host/Forwarded 来重建 origin；代理必须在后续入口正确提供 Request URL。返回的浏览器标识只能供内部 login 调用，不写入页面或 URL。未知/重复 Cookie、错误来源/方法/CSRF、过期或撤销均统一 BROWSER_SESSION_REJECTED。
 
-当前只有 Request/Header 单测及与 PKCE 的内存串联，不是实际浏览器 Cookie 验收，也没有完整 HTTP CSRF 部署。宿主仍需实现安全的会话签发入口、限流、no-store 页面、会话到登录尝试的路由、上游身份与批准流程；容量上限不能替代防滥用。进程重启丢失所有会话，多节点不共享；检查不取消已在途的兑换，长流程后仍须重查会话，不能缓存 read 返回值绕过撤销。
+下游 Request/Response 流程已由 [createLoginHttpHandler](../mcp/src/login-http.ts) 串联会话签发、一次性邮件发送、PKCE 回调、状态查询和取消。固定 HTTPS origin，bootstrap 要求同源 Origin/自定义请求头，单实例每分钟最多 20 次；每会话只发送一次邮件，create_user=false，1024 字节流式正文上限及十秒正文/提供方请求预算。所有 HTTP 响应 no-store/no-referrer，不含下游身份或凭据，失败不透露邮件提供方正文，发送成功/失败均返回 email_requested，待认证状态只显示 pending（不保证时序不可区分）。callback 成功后清除地址栏中的参数，跳转到固定状态地址；错误浏览器/state 不消耗合法尝试，兑换过程中取消或过期则不保留结果。
+
+内部 takeIdentity 仅允许原会话携带 CSRF 的 POST，一次性返回已验证管理员身份与同一次兑换的凭据，HTTP handler 不公开该领取路径。宿主必须另外证明并绑定上游授权身份、取得明确同意，才可创建 grant、加密保存凭据；不能把此方法当作 grant 批准。身份暂存在内存，五分钟后禁止访问，访问/签发时清理过期项，无定时擦除保证。进程重启丢失所有会话，多节点不共享；取消不回滚已在 Auth 创建的会话，不宣称自动登出。
+
+验证包含路由单测、真实本地 SMTP/Auth 往返，以及 agent-browser 对临时回环 HTTPS 监听器的 Cookie/CSRF/回调跳转/取消检查；浏览器检查使用模拟 Auth，与真实邮件测试分开，不代表真实 MCP 客户端或完整生产登录验收。没有产品登录页面、上游授权关联或生产监听器；当前处理器只能挂在未来宿主验证的上游授权事务之后，进程级限流不替代边缘/用户限流。
+
+用户已明确最终交付是远程 MCP，stdio 只保留为调试/兼容入口。2026-09-21 再核对 [Keycloak 官方 MCP 指南](https://www.keycloak.org/securing-apps/mcp-authz-server)，其兼容表仍将 RFC 8707 列为 Not supported，不能以本仓库开启实验功能的通过结果宣布生产支持；本轮不将 Keycloak 定为生产方案，也不退回忽略 resource 的静态 audience 替代。生产授权服务选择仍是发布前阻塞项；先推进不依赖具体上游提供方的下游登录，再完成双身份批准、刷新代理和远程 transport。
 
 1. **授权兼容性与工具权限清单。** 清单已完成；嵌入式库和独立 Keycloak 的上述协议实验已完成，实验性 feature、生产存储和隔离边界仍需验收。外部服务账号、生产配置与部署需另行授权。
 2. **逐用户 grant 与凭据代理。** 完成可信账号关联、加密凭据保存/轮换、精确用户 UUID 校验、撤销与错误恢复；使用两个不同管理员交叉验证，防止“均为管理员”掩盖身份串用。
