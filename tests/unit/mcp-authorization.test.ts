@@ -1,5 +1,9 @@
 import { expect, spyOn, test } from 'bun:test';
-import { KeycloakGrantAuthorizer, type AuthorizationConfig } from '../../mcp/src/authorization';
+import {
+  GrantAuthorizer,
+  KeycloakGrantAuthorizer,
+  type AuthorizationConfig,
+} from '../../mcp/src/authorization';
 
 function fixture() {
   const config: AuthorizationConfig = {
@@ -168,5 +172,60 @@ test('expiry is enforced again after lookup; nbf at the current second is allowe
     expect(f.calls.length).toBe(4);
   } finally {
     clock.mockRestore();
+  }
+});
+
+test('OIDC profile binds provider grant rather than SSO sid and requires the approved Supabase subject', async () => {
+  const f = fixture();
+  delete f.claims.typ;
+  Object.assign(f.claims, {
+    token_type: 'Bearer',
+    token_kind: 'AccessToken',
+    sub: f.grant.user_id,
+    grant_id: 'provider-approval-a',
+    sid: 'unrelated-sso-session',
+  });
+  const authorizer = new GrantAuthorizer({ ...f.config, tokenProfile: 'oidc-provider' }, f.request);
+  const result = await authorizer.authorize('opaque-token');
+  expect(result.expectedUserId).toBe(f.grant.user_id);
+  expect(result.authorization.scopes).toEqual(['store:read']);
+  expect(JSON.parse(f.calls[1].init.body as string).p_binding).toEqual({
+    issuer: f.config.issuer,
+    subject: f.grant.user_id,
+    client_id: 'agent-a',
+    resource: f.config.resource,
+    project: 'project-a',
+    session_id: 'provider-approval-a',
+  });
+  await expect(f.authorizer.authorize('opaque-token')).rejects.toThrow(/^AUTHORIZATION_DENIED$/);
+  f.grant.user_id = crypto.randomUUID();
+  await expect(result.authorization.currentScopes()).rejects.toThrow(/^AUTHORIZATION_DENIED$/);
+});
+
+test('OIDC profile rejects wrong token kinds, missing authorization IDs and multiple audiences before lookup', async () => {
+  for (const change of [
+    { token_type: undefined },
+    { token_type: 'DPoP' },
+    { token_kind: 'RefreshToken' },
+    { token_kind: undefined },
+    { grant_id: undefined },
+    { grant_id: '' },
+    { sub: 'not-a-user-uuid' },
+    { aud: ['https://shop.example/mcp', 'https://other.example/mcp'] },
+  ]) {
+    const f = fixture();
+    Object.assign(
+      f.claims,
+      {
+        token_type: 'Bearer',
+        token_kind: 'AccessToken',
+        sub: f.grant.user_id,
+        grant_id: 'provider-approval-a',
+      },
+      change,
+    );
+    const authorizer = new GrantAuthorizer({ ...f.config, tokenProfile: 'oidc-provider' }, f.request);
+    await expect(authorizer.authorize('opaque-token')).rejects.toThrow(/^AUTHORIZATION_DENIED$/);
+    expect(f.calls).toHaveLength(1);
   }
 });

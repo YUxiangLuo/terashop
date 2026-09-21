@@ -514,3 +514,17 @@ read(request,false) 仅接受固定 origin 的 GET 和唯一、合法、已签�
 4. **并发与部署验收。** 交叉复用 session/event ID、重连、进程重启、并发 refresh、授权服务不可用、执行前撤销、执行中撤销及不确定写结果均须测试；两个真实客户端完成授权、升级 scope、断开授权和恢复流程后，才声明远程可用。
 
 依据（2026-09-21 核对）：[MCP 2026-07-28 Authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)、[Authorization Security Considerations](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/security-considerations)、[Authorization Server Discovery](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery)、[Supabase OAuth token security](https://supabase.com/docs/guides/auth/oauth-server/token-security)。这些规范与文档支持边界选择，不代表本仓库或当前部署已经具备上述能力。
+
+### 生产授权服务选型与受支持运行时验证
+
+后续决策取代上文“授权服务尚未选定”的状态：用户批准独立 Node.js LTS Docker 授权服务运行 `oidc-provider 9.12.2`，MCP 继续使用 Bun，安装/构建/测试也由 Bun 驱动。该库的 [运行时要求](https://github.com/panva/node-oidc-provider/blob/v9.12.2/lib/index.js) 不支持 Bun，不能将 Bun 单测成功当作生产兼容证明。Keycloak 保留为历史实验，不作为当前生产实现路径；此决定不授权部署或修改共享基础设施。
+
+Supabase 保持唯一用户目录。授权服务须通过自定义登录交互验证真实 Supabase 管理员会话，以已验证的 Auth UUID 为 sub，展示并取得逐客户端/resource/scope 同意；不再要求用户管理第二套账号，不按邮箱建立身份映射。现有下游登录处理器只是原语，尚未接入 provider interaction。provider 授权与本地 grant/加密凭据批准仍需一致性和失败恢复设计，不能先发可用业务授权再补做用户同意。
+
+资源令牌选择 **opaque access token + 在线 introspection**。固定版本实测 JWT access token introspection 返回 400 unsupported_token_type；JWT 在 grant 撤销后仍可验签，因此不采用仅离线验签的替代路径。资源服务器使用独立机密客户端，introspection policy 只准许该客户端读取当前唯一 resource 的 AccessToken，refresh token 即使带 access_token hint 也返回 inactive。显式附加 grant_id 与 token_kind=AccessToken，不能把 token_type_hint 当作令牌类型保证。
+
+`GrantAuthorizer` 的可信配置显式指定 oidc-provider profile，要求精确 issuer、单一 audience、未过期 exp、有效 nbf（若有）、active/Bearer/AccessToken、UUID sub、client_id 和非空 grant_id。本地 grant.user_id 必须等于 sub。六字段 binding 的 session_id 保存 provider grant_id，作为上游授权纪元，不使用共享 SSO sid；本地 grant UUID 仍独立生成。轮换保持纪元，新授权必须产生新纪元并重新批准，不复活旧本地 grant。历史 Keycloak profile 和类名别名仅保留兼容，不从入站 token 动态选择 profile。
+
+支持运行时检查为 `bun scripts/mcp-oidc-compat.ts`：Bun 构建共享场景，在 digest 固定的 Node 22 LTS 容器执行，实测 v22.23.2；只挂载临时产物与依赖，非 root、只读文件系统、无外部网络、不发布端口。JWT/opaque 场景均覆盖 discovery、S256、resource、scope、轮换/重放/撤销；opaque 场景进一步用真实 introspection 和实际 MCP authorizer 验证合成批准前拒绝、批准后权限交集、旧上下文撤销，以及新授权不继承旧批准。测试的内存 adapter、自动同意、合成 UUID/批准记录不得用于生产，不宣称真实数据库端到端或并发验收。
+
+后续顺序：① 持久化 provider adapter 与重启恢复，验证 code/refresh 单次消费的并发拒绝及 grant 撤销与写入竞争，不能只实现覆盖写；② 真实 Supabase 登录/同意与本地 grant、加密凭据创建，失败时不得遗留可越权授权；③ Streamable HTTP、metadata/challenge、逐请求身份/权限与请求预算；④ 密钥/代理/日志/限流部署配置、故障恢复及两个真实客户端验收。生产授权服务、持久化 adapter 和 HTTP listener 本批均未实现。

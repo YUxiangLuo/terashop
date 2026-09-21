@@ -6,6 +6,8 @@
 
 最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。当前优先串联登录授权、逐用户凭据刷新、Streamable HTTP 和真实客户端验收；大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器只用于登录和授权，不依赖 Admin SPA 执行业务。
 
+远程授权方案已选定：独立 Node.js LTS 容器运行 `oidc-provider 9.12.2`，MCP 与安装、构建、测试工具仍使用 Bun。Supabase 保持唯一用户目录；授权服务须从真实 Supabase 登录取得 UUID，不建立第二套账号或按邮箱推断身份。采用 opaque access token 与在线 introspection；当前只完成受支持运行时的协议验证和 MCP 校验 profile，尚无生产授权服务、持久化 provider adapter 或远程监听器。
+
 ## 运行与凭据
 
 在仓库根目录执行 `bun install --frozen-lockfile`。通过 MCP 客户端的安全环境配置或凭据管理器提供以下环境变量，再运行 `bun run mcp:stdio`：
@@ -138,7 +140,7 @@
 
 HTTP 必须先解决 **MCP 专用访问令牌 → 当前管理员数据库身份** 的受信映射/令牌交换。普通 Supabase session JWT 不能直接作为 MCP HTTP 的 bearer token；也不能先验证外部 OAuth，再用无用户约束的 service role 代执行。当前没有实现或启用此链路，不开放占位 HTTP endpoint。
 
-远程接入设计已记录在 [ADR-027](../docs/architecture-decisions.md#adr-027远程-mcp-使用独立授权与逐用户下游身份)：选择独立 MCP 授权记录与逐用户下游会话，固定单项目 resource，在线检查撤销，逐工具执行 scope 校验；只读权限也包含管理端敏感信息。read/write 与资金、访问控制、隐私附加 scopes 分开批准。授权服务选型、凭据代理和 HTTP transport **尚未实现**，不将此设计计入工具覆盖或生产可用性。
+远程接入设计已记录在 [ADR-027](../docs/architecture-decisions.md#adr-027远程-mcp-使用独立授权与逐用户下游身份)：选择独立 MCP 授权记录与逐用户下游会话，固定单项目 resource，在线检查撤销，逐工具执行 scope 校验；只读权限也包含管理端敏感信息。read/write 与资金、访问控制、隐私附加 scopes 分开批准。授权服务选型、凭据加密存储及显式刷新已落实；真实登录/同意的完整关联、生产授权服务和 HTTP transport **尚未实现**，不将局部验证计入生产可用性。
 
 以下能力是**未实现的新业务**，不是可以靠 MCP 包装补齐的功能：后台代客下单、通用 Order Edit、客户合并/账户重关联、换货补发、退货面单、复杂税制、多币种。其中后台代客下单与 [ADR-023](../docs/architecture-decisions.md#adr-023游客复用匿名-auth-与线上交易权限) 的仅客户线上下单决策冲突，不能作为本轮开发默认项。完整覆盖现有 Admin 管理域不意味着这些新业务已经实现；新增时需先确认业务范围，再设计数据库不变量与审核流程。
 
@@ -202,7 +204,11 @@ grant 元数据已通过私有 PostgreSQL 表和 service-only `mcp_grant_command
 
 凭据仅暂存在服务端内存；`takeIdentity` 要求原会话带 CSRF 的 `POST /login/approve`，一次性交给内部宿主，handle 不服务该路径。此方法不是用户同意或 grant 创建，宿主仍需验证并绑定上游身份、展示批准范围并安全持久化。五分钟绝对期限无续期，访问/签发时清理过期记录，无后台定时擦除保证；取消/过期不回滚 Auth 已创建的会话。进程级节流不能替代边缘和上游身份限流，也不保证隐藏时序差异。Request/Response 测试及真实本地 SMTP/Auth 往返已通过；另用 agent-browser 在临时回环 HTTPS 服务验证 HttpOnly、自动携带 Cookie、CSRF 拒绝、回调跳转及取消（该浏览器检查使用模拟 Auth）。尚无登录页面、可信双身份关联、生产监听器或远程 MCP transport。
 
-独立授权候选实验：`bun test tests/unit/oauth-provider.test.ts`。固定开发依赖 `oidc-provider 9.12.2`，只在回环随机端口验证 Code/S256、resource/aud、业务 scopes、刷新轮换和 grant 撤销，不连接真实账号或 Supabase。已验证错误 resource 的刷新可能消耗旧 token、重试导致 grant 撤销；JWT 签名仍有效不代表 grant 仍有效。库明确警告 Bun 不受官方支持，内存 adapter 和自动同意仅用于实验；尚未选定生产授权服务。下一批优先核对独立部署的受支持方案，再推进持久化和逐用户凭据代理，不将该 fixture 改成远程登录入口。详见 ADR-027 的实验记录。
+独立授权协议验证：`bun test tests/unit/oauth-provider.test.ts` 是快速回归，Bun 不是 provider 支持的部署运行时。另运行 `bun scripts/mcp-oidc-compat.ts`，在固定 digest 的 Node 22 LTS Docker 容器复用同一场景；容器无外部网络、不发布端口、非 root、只读，仅挂载临时构建产物和依赖。两种令牌格式均验证 Code/S256、resource/aud、业务 scopes、刷新轮换和 grant 撤销。错误 resource 的刷新可能消耗旧 token，重试导致 grant 撤销；JWT 签名仍有效不代表授权仍有效。实测该版本 JWT access token 的 introspection 返回 unsupported_token_type，因此生产方案选择 opaque token。内存 adapter、合成身份和自动同意仅用于测试，不连接真实账号或 Supabase，不是生产登录流程。
+
+`GrantAuthorizer` 增加显式 `tokenProfile: 'oidc-provider'`，要求 active、Bearer、AccessToken 类型、精确 issuer/单一 resource、未过期时间、UUID sub、client_id 和 provider grant_id；本地批准的 user_id 必须等于 sub。数据库 binding.session_id 在此 profile 保存 provider grant_id（授权纪元），不使用 SSO sid，且不等于本地 grant UUID。真实 introspection 与合成批准存储的联合测试验证无批准拒绝、refresh token 拒绝、轮换保留绑定、撤销阻断旧上下文，以及新授权不能继承旧批准。profile 由可信配置决定，不从 token 选择；省略仍保留历史 Keycloak 行为，`KeycloakGrantAuthorizer` 为兼容别名。已有凭据读写/刷新共用此校验，但尚未完成 OIDC 与真实数据库、登录同意的完整联合验收。
+
+下一步实现 provider 持久化 adapter，验证单次消费及撤销的并发安全，再接真实 Supabase 登录/同意、本地授权与凭据保存、Streamable HTTP、生产配置及客户端验收。上述 Docker 命令仅是 opt-in 协议检查，不创建或部署授权服务。详见 ADR-027。
 
 ```bash
 bun run typecheck

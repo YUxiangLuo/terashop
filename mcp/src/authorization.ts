@@ -23,6 +23,12 @@ const claims = z.object({
   nbf: z.number().int().optional(),
   scope: z.string(),
 });
+const oidcClaims = claims.omit({ typ: true, sid: true }).extend({
+  token_type: z.literal('Bearer'),
+  token_kind: z.literal('AccessToken'),
+  sub: z.uuid(), // Our authorization service uses the verified Supabase UUID as subject.
+  grant_id: text,
+});
 const grant = z.object({
   id: z.uuid(),
   user_id: z.uuid(),
@@ -32,6 +38,9 @@ const grant = z.object({
 });
 
 export interface AuthorizationConfig {
+  // Explicit trusted deployment choice, never selected from token contents.
+  // Omission preserves the historical Keycloak experiment only.
+  tokenProfile?: 'keycloak' | 'oidc-provider';
   issuer: string;
   introspectionEndpoint: string;
   introspectionClientId: string;
@@ -58,8 +67,8 @@ function endpoint(value: string): URL {
 }
 
 // Trusted-host only. Never passed tool arguments, and never used for business RPCs.
-// This implements the Keycloak introspection profile, not generic OIDC discovery.
-export class KeycloakGrantAuthorizer {
+// These are two fixed introspection profiles, not generic OIDC discovery.
+export class GrantAuthorizer {
   private readonly config: AuthorizationConfig;
   constructor(
     config: AuthorizationConfig,
@@ -80,6 +89,7 @@ export class KeycloakGrantAuthorizer {
       if (!value.trim()) throw new Error('Missing authorization configuration');
     this.config = {
       ...config,
+      tokenProfile: z.enum(['keycloak', 'oidc-provider']).parse(config.tokenProfile ?? 'keycloak'),
       supabaseUrl: backend.origin,
       scopes: z.array(scope).parse([...config.scopes]),
     };
@@ -114,21 +124,21 @@ export class KeycloakGrantAuthorizer {
   private async resolve(token: string) {
     if (!token || token.length > 16384 || /\s/.test(token)) throw new Error('Invalid token');
     const c = this.config;
-    const verified = claims.parse(
-      await this.json(c.introspectionEndpoint, {
-        method: 'POST',
-        body: new URLSearchParams({
-          token,
-          token_type_hint: 'access_token',
-          client_id: c.introspectionClientId,
-          client_secret: c.introspectionClientSecret,
-        }),
+    const response = await this.json(c.introspectionEndpoint, {
+      method: 'POST',
+      body: new URLSearchParams({
+        token,
+        token_type_hint: 'access_token',
+        client_id: c.introspectionClientId,
+        client_secret: c.introspectionClientSecret,
       }),
-    );
+    });
+    const verified = c.tokenProfile === 'oidc-provider' ? oidcClaims.parse(response) : claims.parse(response);
     const now = Math.floor(Date.now() / 1000);
     if (
       verified.iss !== c.issuer ||
       !(Array.isArray(verified.aud) ? verified.aud : [verified.aud]).includes(c.resource) ||
+      (c.tokenProfile === 'oidc-provider' && Array.isArray(verified.aud) && verified.aud.length !== 1) ||
       verified.exp <= now ||
       (verified.nbf !== undefined && verified.nbf > now)
     )
@@ -139,11 +149,14 @@ export class KeycloakGrantAuthorizer {
       client_id: verified.client_id,
       resource: c.resource,
       project: c.project,
-      session_id: verified.sid,
+      // The database field denotes an upstream authorization epoch, not necessarily SSO sid.
+      session_id: 'grant_id' in verified ? verified.grant_id : verified.sid,
     };
     const approved = grant.parse(
       await this.rpc('mcp_grant_command', { p_action: 'resolve', p_binding: binding }),
     );
+    if (c.tokenProfile === 'oidc-provider' && approved.user_id !== verified.sub)
+      throw new Error('Changed approved account');
     // Expiry can pass while the grant lookup is in flight.
     if (verified.exp <= Math.floor(Date.now() / 1000)) throw new Error('Expired token');
     const tokenScopes = verified.scope.split(' ');
@@ -428,3 +441,6 @@ export class KeycloakGrantAuthorizer {
     }
   }
 }
+
+// Preserve existing Keycloak fixtures while new hosts select the explicit OIDC profile.
+export { GrantAuthorizer as KeycloakGrantAuthorizer };
