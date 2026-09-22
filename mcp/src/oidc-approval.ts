@@ -1,4 +1,5 @@
 import * as z from 'zod/v4';
+import { randomBytes } from 'node:crypto';
 import type Provider from 'oidc-provider';
 import { AdminBackend } from './backend';
 import type { createCredentialCipher } from './credentials';
@@ -149,10 +150,13 @@ export function createOidcApproval(
           throw new Error('Changed login session');
         assertFresh();
         upstream = new provider.Grant({ accountId: userId, clientId: c.clientId });
+        // v9.12.2 normally allocates jti in save(). Preallocate a host-only ID so
+        // durable recovery metadata precedes the first provider persistence.
+        const providerGrantId = randomBytes(32).toString('base64url');
+        upstream.jti = providerGrantId;
         upstream.addResourceScope(c.resource, c.scopes.join(' '));
         // OIDC protocol scopes are not store permissions. This flow supports offline refresh.
         upstream.addOIDCScope('openid offline_access');
-        const providerGrantId = await upstream.save();
         const approvedBinding = {
           issuer: provider.issuer,
           subject: userId,
@@ -167,6 +171,7 @@ export function createOidcApproval(
           await journal.store.begin({ interactionId: journal.interactionId, binding: approvedBinding });
           journalStarted = true;
         }
+        if ((await upstream.save()) !== providerGrantId) throw new Error('Changed provider grant identity');
         localCreateAttempted = true;
         const approved = z
           .object({

@@ -211,7 +211,7 @@ test('mismatched persistence receipts cannot complete approval or falsely confir
   }
 });
 
-test('journal admission precedes local writes; uncertain admission and cleanup retain recovery work', async () => {
+test('journal admission precedes provider and local writes; uncertain admission retains recovery work', async () => {
   for (const fault of ['none', 'begin', 'finish', 'cleanup'] as const) {
     let f: Awaited<ReturnType<typeof fixture>>;
     let binding: Record<string, string> | undefined;
@@ -222,7 +222,8 @@ test('journal admission precedes local writes; uncertain admission and cleanup r
         async begin(entry) {
           expect(entry.interactionId).toBe('interaction-test');
           expect(f.calls).not.toContain('mcp_grant_command:create');
-          expect(await f.provider.Grant.find(entry.binding.session_id)).toBeDefined();
+          expect(entry.binding.session_id).toMatch(/^[A-Za-z0-9_-]{43}$/);
+          expect(await f.provider.Grant.find(entry.binding.session_id)).toBeUndefined();
           binding = entry.binding;
           if (fault === 'begin') throw new Error('Lost journal receipt');
         },
@@ -251,6 +252,44 @@ test('journal admission precedes local writes; uncertain admission and cleanup r
         await expect(f.approval.revoke()).rejects.toThrow('APPROVAL_CLEANUP_UNCONFIRMED');
       else await f.approval.revoke();
       expect(endings).toEqual(['revoked']);
+    }
+  }
+});
+
+test('provider save failure after journal admission never creates a downstream grant', async () => {
+  for (const fault of ['before-save', 'lost-receipt', 'wrong-id'] as const) {
+    let recorded: string | undefined;
+    const endings: string[] = [];
+    const f = await fixture(undefined, {
+      interactionId: 'save-failure',
+      store: {
+        async begin(entry) {
+          recorded = entry.binding.session_id;
+        },
+        async finish(_id, state) {
+          endings.push(state);
+        },
+        async pending() {
+          return [];
+        },
+      },
+    });
+    const save = f.provider.Grant.prototype.save;
+    f.provider.Grant.prototype.save = async function () {
+      expect(this.jti).toBe(recorded!);
+      if (fault === 'before-save') throw new Error('save failed');
+      expect(await save.call(this)).toBe(recorded!);
+      if (fault === 'lost-receipt') throw new Error('save receipt lost');
+      return 'wrong-id';
+    };
+    try {
+      await expect(f.approval.approve(f.identity)).rejects.toThrow(/^APPROVAL_UNCONFIRMED$/);
+      expect(recorded).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(endings).toEqual(['revoked']);
+      expect(await f.provider.Grant.find(recorded!)).toBeUndefined();
+      expect(f.calls).not.toContain('mcp_grant_command:create');
+    } finally {
+      f.provider.Grant.prototype.save = save;
     }
   }
 });
