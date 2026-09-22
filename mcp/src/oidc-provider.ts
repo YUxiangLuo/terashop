@@ -31,7 +31,7 @@ const https = url.refine((value) => {
     (url.href === value || value === url.origin)
   );
 });
-const configuration = z.strictObject({
+export const oidcProviderConfiguration = z.strictObject({
   issuer: https
     .refine((value) => new URL(value).pathname === '/')
     .transform((value) => new URL(value).origin),
@@ -85,7 +85,7 @@ const configuration = z.strictObject({
 // The host owns a dedicated persistent adapter and its connection lifecycle.
 export function createOidcProvider(input: unknown, Adapter: AdapterConstructor): Provider {
   try {
-    const c = configuration.parse(input);
+    const c = oidcProviderConfiguration.parse(input);
     const ids = c.clients.map((client) => client.id);
     if (
       new Set([...ids, c.introspectionClient.id]).size !== ids.length + 1 ||

@@ -8,6 +8,7 @@ import postgres from 'postgres';
 import { createOidcAdapter } from '../../mcp/src/oidc-adapter';
 import { verifyOAuthProvider } from './oauth-provider-compat';
 import { verifyOAuthInteraction } from './oauth-interaction';
+import { verifyOidcService } from './oauth-service-runtime';
 
 assert.equal(process.versions.bun, undefined);
 assert.equal(process.release.lts, 'Jod');
@@ -59,6 +60,15 @@ try {
     console.log('PASS: Node LTS PostgreSQL protocol and barrier-controlled HTTP code/refresh races');
     await verifyOAuthInteraction(Adapter);
     console.log('PASS: Node LTS PostgreSQL interaction binding, consent and completion cleanup');
+    const local = new URL(url);
+    local.hostname = '127.0.0.1'; // Node shares only this disposable database's network namespace.
+    await verifyOidcService(local.href, {
+      key: await readFile('/check/key.pem', 'utf8'),
+      cert: await readFile('/check/cert.pem', 'utf8'),
+    });
+    console.log(
+      'PASS: direct TLS service startup, private configuration, failure cleanup, CLI restart and SIGTERM',
+    );
   }
 } finally {
   await db.end({ timeout: 5 });

@@ -284,4 +284,18 @@ bun run docs:check
 
 宿主边界原语见 [oidc-host](src/oidc-host.ts)：`readOidcProviderConfiguration` 仅读取绝对路径、非符号链接、组/其他用户无任何权限的普通文件（例如 0600/0400），限制 1–65536 字节、严格 UTF-8/JSON；读取后仍须交给 createOidcProvider 做语义校验。父目录也须由部署方保护；不支持通过符号链接装载的 Secret 卷，不保证在 JS 中擦除已解析字符串。
 
-`createOidcTlsHandler` 包住 interaction 与 provider callback，首版仅直接 TLS、精确 Host，拒绝重复 Host、absolute-form 地址和所有 Forwarded/X-Forwarded-*；provider.proxy 必须始终为 false。无 TLS 的 HTTP 即使伪造正确 Host 也不能进入业务处理器。此函数不启动服务、不装载 TLS 证书、不管理数据库或进程退出；上述服务装配与 Node 容器验收仍待完成。本批测试用 OpenSSL 生成一次性证书，在 Bun 中验证真实 TLS 与明文拒绝；不等于生产 TLS 或完整 provider 端到端验收。
+`createOidcTlsHandler` 包住 interaction 与 provider callback，首版仅直接 TLS、精确 Host，拒绝重复 Host、absolute-form 地址和所有 Forwarded/X-Forwarded-*；provider.proxy 必须始终为 false。无 TLS 的 HTTP 即使伪造正确 Host 也不能进入业务处理器。此函数不启动服务、不装载 TLS 证书、不管理数据库或进程退出；下面的服务入口负责装配。
+
+授权服务入口：[auth.ts](src/auth.ts) 仅支持 Node 22 LTS，拒绝 Bun 运行时，只接受一个私有配置文件的绝对路径参数；[startOidcService](src/oidc-service.ts) 先校验配置、证书域名/有效期/私钥配对、加密密钥及数据库权限，最后监听直接 HTTPS。失败统一报 OIDC_SERVICE_START_FAILED，不打印秘密或底层错误。SIGINT/SIGTERM 停止接收连接，等待处理器后关闭连接池；尚未验证在途登录/批准的关闭或崩溃恢复。
+
+配置是严格 JSON，必填字段如下（不提供默认秘密）：
+
+- `provider`：上文 createOidcProvider 的完整配置。
+- `databaseUrl`：独立 issuer PostgreSQL URL，含账号、密码和数据库，不接受查询参数；仅 localhost/字面回环允许明文，其余强制 verify-full TLS。提前显式应用 auth/storage.sql；运行角色必须拥有两表 SELECT/INSERT/UPDATE/DELETE，不得是超级用户、CREATEDB、CREATEROLE、BYPASSRLS 或有 oidc schema CREATE 权限。启动不建表、不执行迁移。
+- `downstream`：`project/supabaseUrl/anonKey/serviceRoleKey/callbackUrl`，callback 必须符合现有登录宿主同源合同；service-role 仅用于内部授权与凭据保存，不用于店铺业务工具。
+- `credentialKeys`：key ID 到规范 base64url AES-256 密钥的映射，最多八个；`activeCredentialKey` 指定当前写入密钥，旧密钥用于解密，不自动轮换。
+- `tls`：`key/cert` 为 PEM 内容（保留换行），与其他秘密一起置于私有文件；`listen` 为 `host/port`，host 限 127.0.0.1、::1 或 0.0.0.0，port 为 0–65535（0 仅用于临时端口测试）。生产 issuer 必须与实际访问 authority 一致，不能接未经验证的 TLS 终止代理。
+
+使用 Bun 将入口编译为 Node ESM，外置 oidc-provider 与 postgres，并随产物提供锁定版本依赖：`bun build mcp/src/auth.ts --target=node --format=esm --external=oidc-provider --external=postgres --outfile=dist/auth.mjs`。在受支持 Node 容器中执行 `node dist/auth.mjs /run/private/issuer.json`；这是入口用法，不是生产部署清单。
+
+`bun scripts/mcp-oidc-compat.ts --with-storage` 现另用一次性 OpenSSL 证书和私有 tmpfs 配置验证真实 Node TLS discovery/JWKS、错误 Host、缺失加密密钥、只读角色、证书域名不匹配、端口冲突清理、重复 close，以及真实 CLI 同配置重启/JWKS 稳定和 SIGTERM 退出。Node 与临时 PostgreSQL 共享隔离网络命名空间，不发布端口。此服务烟测未调用真实下游账号，不证明旧 token/在途交互重启恢复；下一步仍需 Node 真实 Supabase 联合验收、登录/同意 UI、崩溃补偿、Streamable HTTP/RFC9728 和真实远程客户端验收。

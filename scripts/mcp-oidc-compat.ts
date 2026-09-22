@@ -71,14 +71,42 @@ try {
       `${await Bun.file(join(root, 'mcp/auth/storage.sql')).text()}
        create role oidc_runtime login password '${password}';
        grant usage on schema oidc to oidc_runtime;
-       grant select, insert, update, delete on all tables in schema oidc to oidc_runtime;`,
+       grant select, insert, update, delete on all tables in schema oidc to oidc_runtime;
+       create role oidc_readonly login password '${password}';
+       grant usage on schema oidc to oidc_readonly;
+       grant select on all tables in schema oidc to oidc_readonly;`,
     );
     await Bun.write(join(directory, 'database-url'), `postgres://oidc_runtime:${password}@oidc-db/postgres`);
     await chmod(join(directory, 'database-url'), 0o644); // Disposable credential, readable by container uid 1000.
+    const certificate = Bun.spawnSync(
+      [
+        'openssl',
+        'req',
+        '-x509',
+        '-newkey',
+        'ec',
+        '-pkeyopt',
+        'ec_paramgen_curve:P-256',
+        '-nodes',
+        '-keyout',
+        join(directory, 'key.pem'),
+        '-out',
+        join(directory, 'cert.pem'),
+        '-days',
+        '1',
+        '-subj',
+        '/CN=auth.example',
+        '-addext',
+        'subjectAltName=DNS:auth.example',
+      ],
+      { stdout: 'ignore', stderr: 'ignore' },
+    );
+    if (certificate.exitCode !== 0) throw new Error('Could not create disposable TLS certificate');
+    await chmod(join(directory, 'key.pem'), 0o644); // Synthetic test key only; service JSON is private in tmpfs.
   }
   const build = await Bun.build({
     entrypoints: (storage
-      ? ['tests/support/oauth-storage-runtime.ts']
+      ? ['tests/support/oauth-storage-runtime.ts', 'mcp/src/auth.ts']
       : ['tests/support/oauth-provider-compat.ts', 'tests/support/oauth-interaction.ts']
     ).map((path) => join(root, path)),
     outdir: directory,
@@ -116,8 +144,10 @@ console.log('PASS: interaction/login/explicit consent/code issuance/failed compl
       '--name',
       name,
       '--network',
-      storage ? network : 'none',
+      storage ? `container:${database}` : 'none',
       '--read-only',
+      '--tmpfs',
+      '/tmp:rw,noexec,nosuid,size=1m',
       '--user',
       'node',
       '--cap-drop',
