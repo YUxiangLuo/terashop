@@ -143,6 +143,16 @@ export async function nodeOidcService(configuration: Record<string, unknown>) {
           throw new Error('Node service did not shut down cleanly');
         child = await start();
       },
+      crashRestart: async (afterExit: () => Promise<void>) => {
+        const killed = Bun.spawn(['docker', 'kill', '--signal', 'KILL', name], {
+          stdout: 'ignore',
+          stderr: 'ignore',
+        });
+        if ((await killed.exited) !== 0 || (await child.exited) !== 137)
+          throw new Error('Node service was not killed');
+        await afterExit();
+        child = await start();
+      },
       request: (path: string, init: RequestInit = {}) =>
         fetch(`https://127.0.0.1:${address.port}${path}`, {
           ...init,

@@ -252,7 +252,9 @@ Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并
 
 内部 [recoverOidcApprovals](src/oidc-recovery.ts) 在 Node 启动取得 issuer 锁之后、开放监听之前执行，不提供独立 CLI／HTTP／MCP tool。每条记录先核对 issuer/resource/project，再保存上游撤销标记、调用下游 revoke_binding，验证终态及用户，最后写日志 revoked；不补发授权码，不读取凭据密文，不修改 completed/revoked 日志。任意失败停止扫描，启动返回 OIDC_SERVICE_START_FAILED，不开放监听或输出 READY。恢复纳入在途工作；发现所有权丢失后不再发起下游撤销，等待当前恢复操作结束再关闭连接池，监听前再次检查所有权。重启从 pending 首条开始，不持久化跳过失败项的游标。Bun 真实数据库测试覆盖回执丢失、日志写入中断、跨池续跑及 102 条跨页；Node 测试覆盖恢复 503 后启动失败、真实 HTTP 屏障期间端口未监听、重试成功，以及真实 Supabase 上预置中断记录在 READY 前被双端撤销。目前没有周期性后台恢复。
 
-`bun scripts/mcp-oidc-compat.ts --with-storage` 另验证真实 Node CLI 恢复中连续两次 SIGKILL：使用同一 issuer PostgreSQL，阻塞下游撤销 HTTP 回执后观察上游撤销标记已持久化、日志仍 pending、未监听且没有 READY，再强杀进程；第二进程重复同一恢复并再次强杀，第三进程确认回执后日志变为 revoked、开放 TLS，最后 SIGTERM 正常退出。屏障基于收到完整请求，不用睡眠推断。下游为可控 HTTP 回执夹具，不是真实 Supabase 写入；仍须补充真实批准阶段在途写入的强杀验收，网络分区接管也未验证。
+`bun scripts/mcp-oidc-compat.ts --with-storage` 另验证真实 Node CLI 恢复中连续两次 SIGKILL：使用同一 issuer PostgreSQL，阻塞下游撤销 HTTP 回执后观察上游撤销标记已持久化、日志仍 pending、未监听且没有 READY，再强杀进程；第二进程重复同一恢复并再次强杀，第三进程确认回执后日志变为 revoked、开放 TLS，最后 SIGTERM 正常退出。屏障基于收到完整请求，不用睡眠推断。此场景下游为可控 HTTP 回执夹具，不是真实 Supabase 写入。
+
+真实 Supabase 强杀验收在 `bun run test:current tests/mcp-oidc-interaction.test.ts` 的 Node 场景：第四名管理员走真实邮件 PKCE／同意流程，使用本地测试库凭据表锁与 pg_blocking_pids 屏障阻塞在途凭据 RPC，再 SIGKILL 容器并核对退出码 137。进程死亡后先观察 grant 仍 active、日志 pending，释放锁并确认原 RPC 确实提交 revision=1 密文，之后才重启授权服务。READY 后必须观察 grant revoked、密文已删除、上游撤销标记持久化、日志 revoked；前两名管理员的正常授权仍能调用店铺工具。未模拟 Supabase 响应，未以固定睡眠推断时序；表锁只用于一次性本地数据库。该测试覆盖凭据写入阶段，其他批准阶段的强杀与网络分区接管仍未验证。
 
 固定服务配置已集中到 [createOidcProvider](src/oidc-provider.ts)，真实数据库联合测试及 Node PostgreSQL 交互场景现使用它。输入为 `issuer/resource/scopes/signingKey/cookieKeys/clients/introspectionClient`，另由宿主传入持久化 adapter。要求 HTTPS 根 issuer、固定 HTTPS resource、完整 ES256/P-256 私有 JWK（含 kid/alg/use，并验证公私钥匹配）、1–3 个有序 Cookie 签名密钥和独立 introspection secret；后两类值均为 32 字节的规范 base64url，不生成默认密钥。clients 项为 `id/applicationType/redirectUris`：web 仅 HTTPS，native 首版仅 HTTP 字面 loopback（127.0.0.1/::1），不支持自定义 scheme、localhost、query/fragment 回调。native 端口匹配遵循 provider 的 loopback 规则。未知字段、重复 ID/范围/密钥/回调、缺失或不匹配的密钥统一拒绝为 INVALID_OIDC_PROVIDER_CONFIGURATION，不返回配置详情。
 

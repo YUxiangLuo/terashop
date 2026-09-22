@@ -165,7 +165,7 @@ for (const runtime of ['bun', 'node'] as const)
       );
       const tokens: string[] = [];
       const refreshTokens: string[] = [];
-      for (let index = 0; index < 3; index++) {
+      for (let index = 0; index < (node ? 4 : 3); index++) {
         const user = await signup();
         users.push(user);
         await makeAdmin(user.userId);
@@ -235,8 +235,63 @@ for (const runtime of ['bun', 'node'] as const)
         await callback.body?.cancel();
         failCompletion = runtime === 'bun' && index === 2;
         const disconnect = runtime === 'node' && index === 2;
+        const crash = runtime === 'node' && index === 3;
         let approved: Response | undefined;
-        if (node && (index === 0 || disconnect)) {
+        if (node && crash) {
+          // Block the real credential RPC after local grant creation has committed.
+          // Killing Node must not be mistaken for cancellation of its HTTP/DB write.
+          const blocker = postgres(process.env.DB_URL!, { max: 1 });
+          let pending: Promise<Response> | undefined;
+          let transaction = false;
+          try {
+            await blocker`begin`;
+            transaction = true;
+            await blocker`set local statement_timeout='15s'`;
+            await blocker`lock table private.mcp_credentials in access exclusive mode`;
+            const [owner] = await blocker`select pg_backend_pid() as pid`;
+            pending = call(`${path}/approve`, 'approve');
+            void pending.catch(() => {});
+            const deadline = Date.now() + 3000;
+            for (;;) {
+              const [waiter] = await db`select exists(select 1 from pg_stat_activity
+                where ${owner.pid}::integer=any(pg_blocking_pids(pid))) as blocked`;
+              if (waiter.blocked) break;
+              if (Date.now() >= deadline) throw new Error('Credential RPC did not reach database barrier');
+              await Bun.sleep(10);
+            }
+            await node.crashRestart(async () => {
+              await expect(pending!).rejects.toThrow();
+              const [before] = await db`select id,state from private.mcp_grants
+                where binding->>'project'=${project} and user_id=${user.userId}::uuid`;
+              expect(before.state).toBe('active');
+              const [attempt] = await store!`select state from oidc.approval_attempts
+                where binding->>'subject'=${user.userId}`;
+              expect(attempt.state).toBe('pending');
+              // Release the in-flight Supabase transaction only after Node is dead.
+              await blocker`commit`;
+              transaction = false;
+              const deadline = Date.now() + 3000;
+              for (;;) {
+                const rows =
+                  await db`select revision from private.mcp_credentials where grant_id=${before.id}::uuid`;
+                if (rows.length) {
+                  expect(Number(rows[0].revision)).toBe(1);
+                  break;
+                }
+                if (Date.now() >= deadline)
+                  throw new Error('In-flight credential write did not commit after crash');
+                await Bun.sleep(10);
+              }
+            });
+          } finally {
+            if (transaction) await blocker`rollback`;
+            await blocker.end();
+            await pending?.then(
+              (response) => response.body?.cancel(),
+              () => {},
+            );
+          }
+        } else if (node && (index === 0 || disconnect)) {
           // Hold the issuer write lock, then observe the real approval blocked
           // on it before sending SIGTERM. Do not infer ordering from a sleep.
           const lock = await store.reserve();
@@ -294,7 +349,7 @@ for (const runtime of ['bun', 'node'] as const)
         const [grant] = await db`select id,binding,state,downstream_session_id from private.mcp_grants
         where binding->>'project'=${project} and user_id=${user.userId}::uuid`;
         expect(grant).toBeDefined();
-        if (disconnect) {
+        if (disconnect || crash) {
           expect(grant.state).toBe('revoked');
           expect(await db`select 1 from private.mcp_credentials where grant_id=${grant.id}`).toHaveLength(0);
           expect(
@@ -363,7 +418,7 @@ for (const runtime of ['bun', 'node'] as const)
         expect(tools.tools.some((t) => t.name === 'update_shop_settings')).toBe(index === 1);
       }
       if (node) {
-        // The disconnect scenario above restarted the process, so all preceding
+        // The crash scenario above restarted the process, so all preceding
         // terminal writes must have completed and survived that restart.
         const attempts = await store`select binding->>'subject' as subject,state
           from oidc.approval_attempts where binding->>'project'=${project} order by binding->>'subject'`;
@@ -371,10 +426,14 @@ for (const runtime of ['bun', 'node'] as const)
           users
             .map((user, index) => ({
               subject: user.userId,
-              state: index === 2 ? 'revoked' : 'completed',
+              state: index >= 2 ? 'revoked' : 'completed',
             }))
             .sort((a, b) => a.subject.localeCompare(b.subject)),
         );
+        for (const session of sessions) {
+          const settings = await toolData<{ currency: string }>(session.client, 'get_admin_shop_settings');
+          expect(settings.currency).toBe('USD');
+        }
       }
       // Revoking A cannot break B or let the old A context keep using its token.
       const [first] =
@@ -474,4 +533,4 @@ for (const runtime of ['bun', 'node'] as const)
         }
       }
     }
-  }, 30_000);
+  }, 45_000);
