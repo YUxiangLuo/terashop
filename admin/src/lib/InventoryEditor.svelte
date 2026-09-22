@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { beforeNavigate } from "$app/navigation";
+  import InventoryHistory from "./InventoryHistory.svelte";
+  import { variantLabel } from "./catalog";
   import {
     supabase,
     message,
@@ -19,7 +21,12 @@
   let {
     product,
     disabled = false,
-  }: { product: ProductDetail; disabled?: boolean } = $props();
+    preferredSku = "",
+  }: {
+    product: ProductDetail;
+    disabled?: boolean;
+    preferredSku?: string;
+  } = $props();
   let locations = $state<Location[]>([]);
   let location = $state("");
   let variant = $state("");
@@ -31,6 +38,7 @@
   let error = $state("");
   let notice = $state("");
   let pending = $state<StockCommand | null>(null);
+  let historyVersion = $state(0);
   let key = "";
   let alive = true;
   let generation = 0;
@@ -86,6 +94,12 @@
         "";
       variant =
         saved?.variant_id ??
+        product.variants.find(
+          (item) =>
+            item.track_inventory &&
+            preferredSku &&
+            item.sku?.toLowerCase().includes(preferredSku.toLowerCase()),
+        )?.id ??
         product.variants.find((item) => item.track_inventory)?.id ??
         "";
       ready = true;
@@ -110,6 +124,7 @@
       if (!alive || current !== generation) return;
       if (result.error) throw result.error;
       inventory = result.data as unknown as Inventory;
+      historyVersion++;
     } catch (cause) {
       if (alive && current === generation) error = message(cause);
     } finally {
@@ -237,7 +252,11 @@
             void refresh();
           }}
           >{#each product.variants.filter((item) => item.track_inventory) as item}<option
-              value={item.id}>{item.sku || item.id}</option
+              value={item.id}
+              >{variantLabel(item, product.options)} · {item.sku ||
+                item.id.slice(0, 8)}{item.is_active
+                ? ""
+                : " · Inactive"}</option
             >{/each}</select
         ></label
       >
@@ -302,4 +321,10 @@
       No tracked variant or active location available. Save a tracked variant
       before managing stock.
     </p>{/if}
+  {#if ready && variant && location}
+    {#key `${variant}:${location}:${historyVersion}`}<InventoryHistory
+        {variant}
+        {location}
+      />{/key}
+  {/if}
 </section>

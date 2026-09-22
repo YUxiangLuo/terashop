@@ -2,6 +2,14 @@
   import { onMount } from "svelte";
   import { beforeNavigate } from "$app/navigation";
   import InventoryEditor from "./InventoryEditor.svelte";
+  import VariantEditor from "./VariantEditor.svelte";
+  import CategoryPicker from "./CategoryPicker.svelte";
+  import {
+    optionChanges,
+    validateVariants,
+    variantLabel,
+    type ProductOption,
+  } from "./catalog";
   import {
     getProduct,
     saveProduct,
@@ -25,6 +33,8 @@
   let images = $state<ProductImage[]>([]);
   let status = $state<ProductStatus>("draft");
   let variants = $state<ProductVariant[]>([]);
+  let options = $state<ProductOption[]>([]);
+  let categories = $state<ProductDetail["categories"]>([]);
   let loaded = $state(false);
   let busy = $state(false);
   let error = $state("");
@@ -34,7 +44,15 @@
   let alive = true;
   let editable = $derived(loaded && (!!product || creating));
   let dirty = $derived(
-    loaded && JSON.stringify({ fields, images, status, variants }) !== baseline,
+    loaded &&
+      JSON.stringify({
+        fields,
+        images,
+        status,
+        variants,
+        options,
+        categories,
+      }) !== baseline,
   );
 
   onMount(() => {
@@ -63,8 +81,17 @@
     };
     images = value?.images.map((image) => ({ ...image })) ?? [];
     status = value?.status ?? "draft";
-    variants = value?.variants.map((variant) => ({ ...variant })) ?? [];
-    baseline = JSON.stringify({ fields, images, status, variants });
+    variants = structuredClone(value?.variants ?? []);
+    options = structuredClone(value?.options ?? []);
+    categories = structuredClone(value?.categories ?? []);
+    baseline = JSON.stringify({
+      fields,
+      images,
+      status,
+      variants,
+      options,
+      categories,
+    });
     loaded = true;
     uncertain = false;
   }
@@ -96,6 +123,12 @@
   async function save(event: SubmitEvent) {
     event.preventDefault();
     if (!editable || busy || uncertain) return;
+    try {
+      validateVariants(options, variants, status === "active");
+    } catch (cause) {
+      error = message(cause);
+      return;
+    }
     if (
       status !== (product?.status ?? "draft") &&
       !window.confirm(
@@ -110,12 +143,21 @@
       // The URL retains this UUID across refreshes and uncertain create responses.
       const saved = await saveProduct(id, product?.revision ?? null, {
         product: { ...fields, status },
-        // PATCH only the fields this editor owns; preserve options, cost and metadata.
-        variants: variants.map(({ id, sku, price, is_active }) => ({
+        ...optionChanges(options, product?.options ?? []),
+        category_ids: categories.map((category) => category.id),
+        // Preserve cost, barcode, ordering and metadata outside this editor.
+        variants: variants.map(
+          ({ id, sku, price, is_active, track_inventory }) => ({
+            id,
+            sku: sku || null,
+            price,
+            is_active,
+            track_inventory,
+          }),
+        ),
+        variant_options: variants.map(({ id, option_value_ids }) => ({
           id,
-          sku,
-          price,
-          is_active,
+          option_value_ids,
         })),
         images: [
           ...images.map((image) => ({
@@ -284,74 +326,17 @@
               </div>
             </div>
           </section>
-          <section class="card">
-            <div class="section-heading">
-              <h2>Variants & pricing</h2>
-              {#if !product?.options.length && !variants.length}
-                <button
-                  type="button"
-                  onclick={() =>
-                    variants.push({
-                      id: crypto.randomUUID(),
-                      sku: null,
-                      price: 0,
-                      is_active: true,
-                      track_inventory: true,
-                      option_value_ids: [],
-                    })}>Add standard variant</button
-                >
-              {/if}
-            </div>
-            <p class="small muted">
-              Prices are in USD. Existing sizes and colors are preserved; option
-              creation is outside this MVP.
-            </p>
-            {#each variants as variant, index (variant.id)}
-              <div class="variant-row">
-                <p class="small">
-                  <strong
-                    >{product?.options
-                      .flatMap((option) =>
-                        option.values
-                          .filter((value) =>
-                            variant.option_value_ids.includes(value.id),
-                          )
-                          .map((value) => value.value),
-                      )
-                      .join(" / ") || "Standard variant"}</strong
-                  >
-                </p>
-                <div class="fields two">
-                  <label
-                    >SKU<input
-                      aria-label={`Variant ${index + 1} SKU`}
-                      bind:value={variant.sku}
-                      maxlength="200"
-                    /></label
-                  >
-                  <label
-                    >Price · USD<input
-                      aria-label={`Variant ${index + 1} price`}
-                      type="number"
-                      min="0"
-                      max="9999999999.99"
-                      step="0.01"
-                      required
-                      bind:value={variant.price}
-                    /></label
-                  >
-                </div>
-                <label class="check-label"
-                  ><input
-                    type="checkbox"
-                    bind:checked={variant.is_active}
-                  />Available for sale</label
-                >
-              </div>
-            {:else}<p class="empty">
-                Add a variant before publishing this product.
-              </p>{/each}
-          </section>
+          <VariantEditor
+            bind:options
+            bind:variants
+            savedIds={product?.variants.map((variant) => variant.id) ?? []}
+            onremove={(id) => {
+              variants = variants.filter((variant) => variant.id !== id);
+              images.forEach((image) => {
+                if (image.variant_id === id) image.variant_id = null;
+              });
+            }}
+          />
           <section class="card">
             <h2>Product images</h2>
             <p class="small muted">
@@ -391,6 +376,18 @@
                       ? " · Variant-specific"
                       : ""}
                   </p>
+                  <label
+                    >Image assignment<select
+                      aria-label={`Image ${index + 1} assignment`}
+                      bind:value={image.variant_id}
+                      ><option value={null}>All variants</option
+                      >{#each variants as variant (variant.id)}<option
+                          value={variant.id}
+                          >{variantLabel(variant, options)} · {variant.sku ||
+                            variant.id.slice(0, 8)}</option
+                        >{/each}</select
+                    ></label
+                  >
                   {#if editable}<div class="actions">
                       <button
                         type="button"
@@ -415,28 +412,31 @@
             {:else}<p class="empty">No images yet.</p>{/each}
           </section>
         </div>
-        <aside class="card">
-          <h2>Product status</h2>
-          <label
-            >Visibility<select bind:value={status}>
-              <option value="draft">Draft</option><option value="active"
-                >Active</option
-              ><option value="archived">Archived</option>
-            </select></label
-          >
-          <p class="small muted">
-            Draft and archived products stay out of the public catalog.
-            Publishing requires a valid variant. Static storefront pages need a
-            rebuild after catalog changes.
-          </p>
-          <hr />
-          <p class="small muted">
-            {dirty ? "You have unsaved changes." : "No unsaved changes."}
-          </p>
-          <p class="small muted">
-            Removing an image only removes its product association after saving.
-            The Storage file is retained for existing links.
-          </p>
+        <aside class="editor-main">
+          <section class="card">
+            <h2>Product status</h2>
+            <label
+              >Visibility<select bind:value={status}>
+                <option value="draft">Draft</option><option value="active"
+                  >Active</option
+                ><option value="archived">Archived</option>
+              </select></label
+            >
+            <p class="small muted">
+              Draft and archived products stay out of the public catalog.
+              Publishing requires a valid variant. Static storefront pages need
+              a rebuild after catalog changes.
+            </p>
+            <hr />
+            <p class="small muted">
+              {dirty ? "You have unsaved changes." : "No unsaved changes."}
+            </p>
+            <p class="small muted">
+              Removing an image only removes its product association after
+              saving. The Storage file is retained for existing links.
+            </p>
+          </section>
+          <CategoryPicker bind:selected={categories} />
         </aside>
       </div>
     </fieldset>

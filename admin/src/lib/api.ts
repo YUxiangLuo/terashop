@@ -4,6 +4,8 @@ import {
   PUBLIC_SUPABASE_ANON_KEY,
 } from "$env/static/public";
 import type { Database, Json } from "../../../types/database";
+import type { ProductOption, ProductVariant } from "./catalog";
+export type { ProductOption, ProductVariant } from "./catalog";
 
 export const supabase = createClient<Database>(
   PUBLIC_SUPABASE_URL,
@@ -46,19 +48,8 @@ export interface ProductDetail {
   product_type: string;
   images: ProductImage[];
   variants: ProductVariant[];
-  options: Array<{
-    id: string;
-    name: string;
-    values: Array<{ id: string; value: string }>;
-  }>;
-}
-export interface ProductVariant {
-  id: string;
-  sku: string | null;
-  price: number;
-  is_active: boolean;
-  track_inventory: boolean;
-  option_value_ids: string[];
+  options: ProductOption[];
+  categories: Array<{ id: string; name: string; slug: string }>;
 }
 export interface Location {
   id: string;

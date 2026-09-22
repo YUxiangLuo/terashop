@@ -262,6 +262,22 @@ fieldset {
   flex-wrap: wrap;
   align-items: center;
 }
+.actions .grow {
+  flex: 1 1 160px;
+}
+.category-selection {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.5rem 0;
+}
+.category-selection:last-of-type {
+  margin-bottom: 1rem;
+}
+.stock-detail {
+  scroll-margin-top: 1.5rem;
+}
 .table-wrap {
   overflow-x: auto;
 }
@@ -555,6 +571,8 @@ address {
   .sidebar {
     padding: 0.8rem 1rem;
     flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.5rem;
     align-items: center;
     justify-content: space-between;
     border-right: 0;
@@ -569,7 +587,8 @@ address {
     display: none;
   }
   .sidebar nav a {
-    padding: 0.55rem 0.8rem;
+    padding: 0.55rem 0.5rem;
+    gap: 0.3rem;
   }
   .sidebar nav {
     display: flex;

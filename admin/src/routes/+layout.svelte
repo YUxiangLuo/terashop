@@ -109,11 +109,18 @@
       <p class="eyebrow">Store management</p>
       <nav aria-label="Main navigation">
         <a
-          class:nav-active={!page.url.pathname.startsWith("/orders")}
-          aria-current={!page.url.pathname.startsWith("/orders")
+          class:nav-active={page.url.pathname === "/" ||
+            page.url.pathname.startsWith("/products/")}
+          aria-current={page.url.pathname === "/" ||
+          page.url.pathname.startsWith("/products/")
             ? "page"
             : undefined}
           href="/">▦ <span>Products</span></a
+        >
+        <a
+          class:nav-active={page.url.pathname === "/inventory"}
+          aria-current={page.url.pathname === "/inventory" ? "page" : undefined}
+          href="/inventory">▧ <span>Inventory</span></a
         >
         <a
           class:nav-active={page.url.pathname.startsWith("/orders")}
