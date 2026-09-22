@@ -180,6 +180,108 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
       await save(config);
     }
 
+    // Kill two independent CLI processes after upstream revocation and while the
+    // downstream receipt is blocked. A third process must finish the same entry.
+    const interrupted = {
+      ...entry,
+      interactionId: 'service-killed-recovery',
+      binding: { ...entry.binding, session_id: 'service-killed-grant' },
+    };
+    await journal.begin(interrupted);
+    let gate = Promise.withResolvers<void>();
+    let observed = Promise.withResolvers<void>();
+    let calls = 0;
+    const recoveryBackend = createHttpServer(async (req, res) => {
+      try {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        assert.deepEqual(JSON.parse(body), { p_action: 'revoke_binding', p_binding: interrupted.binding });
+        calls++;
+        const waiting = gate.promise;
+        observed.resolve();
+        await waiting;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: null, user_id: null, scopes: [], state: 'revoked', version: 2 }));
+      } catch (error) {
+        observed.reject(error);
+        res.destroy();
+      }
+    });
+    await new Promise<void>((resolve) => recoveryBackend.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = recoveryBackend.address();
+      assert(address && typeof address !== 'string');
+      await save({
+        ...config,
+        downstream: { ...config.downstream, supabaseUrl: `http://127.0.0.1:${address.port}` },
+      });
+      for (const phase of ['kill', 'kill-again', 'complete']) {
+        gate = Promise.withResolvers<void>();
+        observed = Promise.withResolvers<void>();
+        const child = spawn(process.execPath, ['/check/auth.mjs', path], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stdout = '',
+          stderr = '';
+        const ready = Promise.withResolvers<void>();
+        child.stdout.on('data', (part) => {
+          stdout += part;
+          if (stdout === 'OIDC_SERVICE_READY\n') ready.resolve();
+        });
+        child.stderr.on('data', (part) => {
+          stderr += part;
+        });
+        const exited = new Promise<{ code: number | null; signal: string | null }>((resolve, reject) => {
+          child.once('error', reject);
+          child.once('exit', (code, signal) => resolve({ code, signal }));
+        });
+        const prematureExit = exited.then(() => {
+          throw new Error('Exited before recovery barrier');
+        });
+        // Attach immediately; the losing race branch is still observed after exit.
+        const arrived = Promise.race([observed.promise, prematureExit]);
+        const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
+        try {
+          await arrived;
+          assert.equal(stdout, '');
+          await assert.rejects(get(port, '/jwks'));
+          assert.deepEqual(await journal.pending(), [interrupted]);
+          const revoked =
+            await observer`select id from oidc.revoked_grants where id=${interrupted.binding.session_id}`;
+          assert.equal(revoked.length, 1);
+          if (phase !== 'complete') {
+            child.kill('SIGKILL');
+            assert.deepEqual(await exited, { code: null, signal: 'SIGKILL' });
+            assert.equal(stdout, '');
+            assert.deepEqual(await journal.pending(), [interrupted]);
+          } else {
+            gate.resolve();
+            await Promise.race([ready.promise, prematureExit]);
+            assert.deepEqual(await journal.pending(), []);
+            const [terminal] = await observer`select state from oidc.approval_attempts
+              where interaction_id=${interrupted.interactionId}`;
+            assert.equal(terminal.state, 'revoked');
+            assert.equal((await get(port, '/jwks')).status, 200);
+            child.kill('SIGTERM');
+            assert.deepEqual(await exited, { code: 0, signal: null });
+          }
+          assert.equal(stderr, '');
+        } finally {
+          clearTimeout(timer);
+          gate.resolve();
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+          await exited;
+        }
+      }
+      assert.equal(calls, 3);
+    } finally {
+      gate.resolve();
+      recoveryBackend.closeAllConnections();
+      await new Promise<void>((resolve) => recoveryBackend.close(() => resolve()));
+      await observer`delete from oidc.approval_attempts where interaction_id=${interrupted.interactionId}`;
+      await save(config);
+    }
+
     // Separate real processes: graceful release, then physical lock-session loss.
     for (const shutdown of ['signal', 'ownership'] as const) {
       const child = spawn(process.execPath, ['/check/auth.mjs', path], { stdio: ['ignore', 'pipe', 'pipe'] });
