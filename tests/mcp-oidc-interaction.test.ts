@@ -806,6 +806,9 @@ for (const runtime of ['bun', 'node'] as const)
         let readsHeld = 0;
         let claims = 0;
         let refreshRequests = 0;
+        let loseCompletion = false;
+        let lostCompletions = 0;
+        let shopReads = 0;
         const proxy = Bun.serve({
           hostname: '127.0.0.1',
           port: 0,
@@ -816,6 +819,7 @@ for (const runtime of ['bun', 'node'] as const)
             headers.delete('host');
             if (url.pathname === '/auth/v1/token' && url.searchParams.get('grant_type') === 'refresh_token')
               refreshRequests++;
+            if (url.pathname === '/rest/v1/rpc/get_admin_shop_settings') shopReads++;
             const response = await fetch(`${API}${url.pathname}${url.search}`, {
               method: req.method,
               headers,
@@ -826,6 +830,20 @@ for (const runtime of ['bun', 'node'] as const)
             if (url.pathname.endsWith('/mcp_credential_command') && body) {
               const args = JSON.parse(new TextDecoder().decode(body));
               if (args.p_action === 'claim_refresh' && args.p_grant_id === original.grantId) claims++;
+              if (
+                loseCompletion &&
+                args.p_action === 'complete_refresh' &&
+                args.p_grant_id === original.grantId
+              ) {
+                // Consume the real committed success before withholding its
+                // receipt. This is an injected gateway failure, not a DB mock.
+                expect(response.status).toBe(200);
+                const receipt = await response.json();
+                expect(receipt.revision).toBe(7);
+                lostCompletions++;
+                loseCompletion = false;
+                return new Response(null, { status: 502 });
+              }
               if (args.p_action === 'read' && args.p_grant_id === original.grantId && readsHeld < 2) {
                 const receipt = await response.clone().json();
                 expect(receipt.revision).toBe(4);
@@ -860,6 +878,40 @@ for (const runtime of ['bun', 'node'] as const)
           renewed = await authorizer.readCredentials(tokens[1], cipher);
           expect(renewed.revision).toBe(5);
           expect(renewed.expectedUserId).toBe(users[1].userId);
+          await authorizer.writeCredentials(tokens[1], cipher, {
+            expectedRevision: 5,
+            credentials: { ...renewed.credentials!, expiresAt: Math.floor(Date.now() / 1000) + 20 },
+            anonKey: ANON_KEY,
+          });
+          const previousRefreshToken = renewed.credentials!.refreshToken;
+          const readsBeforeLoss = shopReads;
+          loseCompletion = true;
+          expect(await networkCall(tokens[1])).toEqual({
+            status: 503,
+            body: { error: 'authorization_unavailable' },
+          });
+          expect(lostCompletions).toBe(1);
+          expect(refreshRequests).toBe(2);
+          expect(claims).toBe(3);
+          expect(shopReads).toBe(readsBeforeLoss);
+          // A failed acknowledgement is not proof of a pending transaction.
+          renewed = await authorizer.readCredentials(tokens[1], cipher);
+          expect(renewed.revision).toBe(7);
+          expect(renewed.credentials!.refreshToken).not.toBe(previousRefreshToken);
+          expect(renewed.expectedUserId).toBe(users[1].userId);
+          const [completed] = await db`select c.refresh_id,g.downstream_session_id
+            from private.mcp_credentials c join private.mcp_grants g on g.id=c.grant_id
+            where g.id=${original.grantId}::uuid`;
+          expect(completed).toEqual({
+            refresh_id: null,
+            downstream_session_id: binding.downstream_session_id,
+          });
+          const recovered = await networkCall(tokens[1]);
+          expect(recovered.status).toBe(200);
+          expect(recovered.body.result.structuredContent.data.currency).toBe('USD');
+          expect(shopReads).toBe(readsBeforeLoss + 1);
+          expect(refreshRequests).toBe(2);
+          expect(claims).toBe(3);
         } finally {
           releaseReads.resolve();
           if (mcpProcess!.exitCode === null) {
@@ -895,7 +947,7 @@ for (const runtime of ['bun', 'node'] as const)
         expect((await authorizer.authorize(tokens[1])).expectedUserId).toBe(users[1].userId);
         const restored = await authorizer.readCredentials(rotated.data.access_token, cipher);
         expect(restored.expectedUserId).toBe(users[1].userId);
-        expect(restored.revision).toBe(5);
+        expect(restored.revision).toBe(7);
         expect(restored.credentials).not.toBeNull();
         expect((await authorizer.authorize(rotated.data.access_token)).grantId).toBe(before.grantId);
         expect(
@@ -931,7 +983,7 @@ for (const runtime of ['bun', 'node'] as const)
           async () => {
             const [pending] = await db`select revision,refresh_id from private.mcp_credentials
               where grant_id=${original.grantId}::uuid`;
-            expect(Number(pending.revision)).toBe(6);
+            expect(Number(pending.revision)).toBe(8);
             expect(pending.refresh_id).not.toBeNull();
             pendingRefreshId = pending.refresh_id;
             abort.abort();
@@ -956,7 +1008,7 @@ for (const runtime of ['bun', 'node'] as const)
           });
           const [pending] = await db`select revision,refresh_id from private.mcp_credentials
             where grant_id=${original.grantId}::uuid`;
-          expect(Number(pending.revision)).toBe(6);
+          expect(Number(pending.revision)).toBe(8);
           expect(pending.refresh_id).toBe(pendingRefreshId);
         }
         const replay = await refresh(refreshTokens[1]);

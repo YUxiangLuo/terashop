@@ -17,7 +17,7 @@
 | 业务工具 | [工具测试](../tests/unit/mcp.test.ts) 断言 112 个工具及只读 53 个；业务合同见下表 | 工具数不代表全部新业务；真实 PayPal Sandbox 另需外部配置 |
 | 授权与用户隔离 | [授权入口](src/auth.ts)、[宿主](src/oidc-service.ts)、逐用户加密凭据、在线撤销／scope 检查、刷新准入；[联合测试](../tests/mcp-oidc-interaction.test.ts) 使用真实本地 Auth／SMTP／数据库 | 用户可操作的登录／同意页、目标客户端兼容性 |
 | 持久化与恢复 | [批准日志](src/oidc-journal.ts)、[启动恢复](src/oidc-recovery.ts)、单实例锁；已有正常退出、强杀和迟到凭据写入回归 | 其他批准阶段故障、密钥轮换与备份恢复演练；不承诺网络分区接管 |
-| MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新；真实 HTTPS 店铺读写、版本冲突、降权／撤销、刷新 pending 竞争及刷新断连后重启拒绝已验证；另以测试转发器验证双请求竞争领取仅一次 Auth 刷新；店铺设置断连后迟到提交与重读已验证 | 刷新完成回执丢失；其他写入类型的未知结果须按各自幂等／版本合同验收 |
+| MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新；真实 HTTPS 店铺读写、版本冲突、降权／撤销、刷新 pending 竞争及刷新断连后重启拒绝已验证；另以测试转发器验证双请求领取和完成回执丢失；店铺设置断连后迟到提交与重读已验证 | 其他写入类型的未知结果须按各自幂等／版本合同验收；尚非公网或全部工具端到端验收 |
 | 网络故障边界 | [TLS 测试](../tests/unit/mcp-http-service.test.ts) 覆盖慢请求体、introspection 超时／断连、排空及 CLI SIGTERM | 凭据／刷新／业务调用阶段阻塞与断连、握手和请求头慢连接防护、并发与资源预算 |
 
 真实 Supabase 联合测试的 Bun 场景仍直接转发到 handler；Node 场景已通过独立 Bun MCP CLI 的真实 HTTPS 入口连接真实 Node 授权服务和本地 Supabase，验证店铺读写、只读令牌越权拒绝、版本冲突、管理员降权、撤销隔离及授权服务重启后的有效／失效令牌。独立 TCP／TLS 单测仍用本地授权后端夹具验证故障边界。**上述联合场景通过不等于整批端到端或公网验收完成。** 下方记录保留各场景范围，不作为生产就绪证明。
@@ -268,7 +268,9 @@ HTTPS 下游刷新 pending 竞争已接入同一 Node 场景：通过可信凭�
 
 HTTPS 双请求领取竞争使用独立的临时回环 Supabase 转发器：只在该子场景将 MCP 的下游 URL 切到转发器，实际请求和响应仍来自本地 Auth／数据库。提前加密过期时间至 revision=4，暂缓两份真实凭据读取回执，两者均确认版本为 4 后一同放行；验证两次 claim_refresh、仅一次 Auth refresh 请求，两个 HTTPS 结果分别为 200 与 503，成功读取 USD，密文推进为 revision=5、身份不变。finally 停止测试进程／转发器、恢复原私有配置并重启直接连接的 MCP，读取仍成功。此转发器不是生产代理支持，也不模拟数据库成功回执；其余联合场景仍直接连接 Supabase。
 
-HTTPS 刷新断连回归沿用真实 Auth 写入屏障：再次提前加密过期时间（revision 5→6），观察刷新已领取且 Auth 被锁阻塞后中止客户端请求，并在释放数据库锁之前向 MCP 发送 SIGTERM。MCP 必须在 5 秒看门狗内退出码 0；然后释放锁、以相同私有配置启动新的 Bun MCP 进程。连续两次 HTTPS 读取均须返回 503，revision=6 及同一个 refresh_id 保持不变，不重置或接管未知结果的刷新。此结果证明本地等待结束和 pending 状态跨 MCP 重启保留，不证明 Auth 在途事务已回滚，也未统计该断连子场景的底层 HTTP 重试次数；此类 pending 仍须撤销并重新授权，不提供自动恢复令牌的后门。
+HTTPS 刷新完成回执丢失复用上述测试转发器：提前过期时间至 revision=6，真实 Auth 刷新及 complete_refresh 已返回成功、确认提交 revision=7 后，转发器消费成功回执并向 MCP 注入空 502。首个 MCP 请求必须返回 503，店铺读取计数不增加，不重试刷新或领取；独立授权重读须取得 revision=7 的新 refresh token、相同用户／session 及已清空的 refresh_id。下一次显式 HTTPS 读取成功，只增加一次店铺读取，不增加 claim_refresh 或 Auth refresh 请求。恢复直接连接及后续授权服务重启后仍可用。该场景模拟成功回执被网关错误替换，不是 TCP 断线，也不伪造数据库提交；与仍 pending 的未知刷新必须区分。
+
+HTTPS 刷新断连回归沿用真实 Auth 写入屏障：再次提前加密过期时间（revision 7→8），观察刷新已领取且 Auth 被锁阻塞后中止客户端请求，并在释放数据库锁之前向 MCP 发送 SIGTERM。MCP 必须在 5 秒看门狗内退出码 0；然后释放锁、以相同私有配置启动新的 Bun MCP 进程。连续两次 HTTPS 读取均须返回 503，revision=8 及同一个 refresh_id 保持不变，不重置或接管未知结果的刷新。此结果证明本地等待结束和 pending 状态跨 MCP 重启保留，不证明 Auth 在途事务已回滚，也未统计该断连子场景的底层 HTTP 重试次数；此类 pending 仍须撤销并重新授权，不提供自动恢复令牌的后门。
 
 HTTPS 店铺写入断连回归对本地 private.shop_settings 加 SHARE 表锁，通过 pg_blocking_pids 确認实际 update_shop_settings RPC 已阻塞后中止客户端，并在释放锁之前要求 MCP SIGTERM 退出码 0。数据库解锁后，测试直接观察原 RPC 仍提交了唯一新店名且 revision 只增加 1；随后重启 MCP，通过真实 HTTPS 重读确认名称／版本、时区／币种，再显式探测原旧版本写入被拒绝、数据不变。finally 恢复原店名。此场景证明“客户端没有收到结果／MCP 已退出”不等于写入回滚，恢复应先重读而非自动重放；不证明所有写命令都会迟到提交，也不替代支付渠道幂等验收。锁与数据修改只用于可丢弃本地库。
 
