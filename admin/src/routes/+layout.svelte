@@ -118,6 +118,13 @@
           href="/">▦ <span>Products</span></a
         >
         <a
+          class:nav-active={page.url.pathname.startsWith("/categories")}
+          aria-current={page.url.pathname.startsWith("/categories")
+            ? "page"
+            : undefined}
+          href="/categories">◇ <span>Categories</span></a
+        >
+        <a
           class:nav-active={page.url.pathname === "/inventory"}
           aria-current={page.url.pathname === "/inventory" ? "page" : undefined}
           href="/inventory">▧ <span>Inventory</span></a

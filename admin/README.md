@@ -36,7 +36,9 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 - 商品列表通过 `list_admin_products` 搜索名称/SKU、筛选状态、按服务端游标加载更多；编辑时重新读取详情。
 - 创建和编辑商品名称、slug、描述、vendor、product type，以及图片 alt、排序、关联删除；支持 draft / active / archived 切换，发布或撤回前要求确认。
 - 商品规格支持选项/值的增删改、逐变体组合选择，以及按指定 USD 价格生成缺失组合（最多 500 个变体）。已有变体 ID、SKU、价格不被重新生成，停用组合也不自动重新启用；可编辑 SKU、价格、启停与库存跟踪。删除选项/值会清除对应组合选择，发布前校验完整性与唯一性。仅新建未保存的变体可移除，已有变体通过停用保留交易历史。
-- 图片可关联全部变体或指定变体；分类可搜索、分页选择和取消关联，搜索不丢失已有选择。允许保留/关联停用分类，但不提供分类内容管理、批量导入或变体永久删除。
+- 图片可关联全部变体或指定变体；分类可搜索、分页选择和取消关联，搜索不丢失已有选择。允许保留/关联停用分类，不提供批量导入或变体永久删除。
+- `/categories` 支持按层展开、分页加载的分类树，加载后的同级分类按 position/ID 排列；搜索/状态筛选保存在 URL，筛选结果平铺显示，不隐藏停用父分类下的匹配子分类。支持新建（默认停用）、编辑名称/slug/描述/图片 URL、父分类、同级排序与启停。不提供分类删除。停用不级联停用子分类或商品，不移除商品关联；修改仍需重新构建静态 Storefront。
+- 分类保存保留原始 `updated_at` 微秒令牌；循环、冲突或未知结果必须显式重读，不能换令牌覆盖。新建 UUID 保留在 URL，未知创建结果按同一 UUID 核对。父分类搜索/分页不会丢失当前选择。
 - 使用 `create_product` / `update_product` 原子保存商品、规格、变体、图片和分类，保留成本、条码及扩展等未编辑字段。更新携带读取时的 revision；冲突或失败不会自动换版本重试。先重新读取并核对保存结果，再编辑。创建 UUID 保留在 URL，刷新仍读取同一商品，不盲目生成新 UUID 重试。
 - `/inventory` 提供跨商品名称/SKU 子串搜索、商品分页和选中商品的库存操作，不一次加载全店变体或库存。商品详情下也提供同一库存区：按已保存的 tracked variant 和活跃仓库查询 on_hand / reserved / available，支持正负整数调整及备注，独立于商品保存。先保存或放弃商品编辑，再调整库存。
 - 库存流水按当前变体、仓库及原因查询，按原始字符串 ID 分页，支持刷新和订单跳转；调整成功后刷新库存及流水。历史 `on_hand_after` 不是当前可用量，预占/释放未必产生流水。库存页面与商品页面共用同一待决调整记录。不提供仓库创建、调拨或停用仓库流水查询 UI。
@@ -81,5 +83,7 @@ location / {
 ```
 
 构建只写入公开配置，不从数据库预取商品、管理员资料或会话。远程 Supabase 与图片 URL 必须可由浏览器访问，不能发布 localhost 构建。关闭索引的 meta 标记不是访问控制；实际授权依赖 Auth、数据库和 Storage RLS。
+
+分类浏览器回归：启动本地 Supabase 与 Admin 后运行 `bun scripts/admin-categories-smoke.ts`（需要 `agent-browser`；默认访问 `http://127.0.0.1:5174`，可用 `ADMIN_URL` 指定其他本地端口）。脚本验证创建、展开树、父级/状态/排序、URL 筛选、并发冲突锁定与显式重读、移至根级，以及商品分类选择跨搜索保留；只创建并清理本次临时账号和分类，不保存测试商品。桌面、移动端和列表截图写入 `/tmp/admin-category-*.png`。分类数据库回归：`bun run test:current tests/admin-categories.test.ts`。
 
 自动检查：`admin:check`、`admin:build`、`bun test tests/unit/admin-commands.test.ts tests/unit/admin-catalog.test.ts`；数据库回归可运行 `bun run test:current tests/product-edit.test.ts tests/admin-order-operations.test.ts tests/admin-retry.test.ts tests/storage-admin.test.ts`。浏览器验收应包含登录失败、普通客户拒绝、管理员恢复会话、创建/发布/归档、规格组合增删及原 ID 保留、图片上传和变体归属、分类跨搜索保留、库存搜索/流水分页、仓库/变体切换、备注冲突、部分发货、未知写结果刷新后原键重试，以及桌面/移动端与深链接刷新。整个回归套件会写入额外目录数据；恢复演示环境需重新 setup（会清空账号）并构建 Storefront。

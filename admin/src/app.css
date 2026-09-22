@@ -278,6 +278,27 @@ fieldset {
 .stock-detail {
   scroll-margin-top: 1.5rem;
 }
+.category-tree {
+  list-style: none;
+  margin: 0;
+  padding-left: 0;
+}
+.category-tree .category-tree {
+  margin-left: 0.75rem;
+  border-left: 1px solid #dfe4dc;
+}
+.category-node {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  padding: 0.85rem 0;
+  border-bottom: 1px solid #edf0e9;
+}
+.category-node .grow {
+  flex: 1 1 130px;
+  min-width: 0;
+}
 .table-wrap {
   overflow-x: auto;
 }

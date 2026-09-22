@@ -61,6 +61,7 @@
 
 <section class="card" aria-label="Product categories">
   <h2>Categories</h2>
+  <p class="small"><a href="/categories">Manage categories →</a></p>
   <p class="small muted">
     Assignments are saved with the product. Search does not clear your
     selections.
