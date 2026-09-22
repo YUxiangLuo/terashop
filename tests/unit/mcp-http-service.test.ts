@@ -54,17 +54,38 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     );
     let active = true;
     let credentialReads = 0;
+    let grantReads = 0;
     let hold = false;
     let slowBody = false;
     const slowArrived = Promise.withResolvers<void>();
     const arrived = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
+    let stalled:
+      | {
+          arrived: ReturnType<typeof Promise.withResolvers<void>>;
+          aborted: ReturnType<typeof Promise.withResolvers<void>>;
+          release: ReturnType<typeof Promise.withResolvers<void>>;
+          calls: number;
+        }
+      | undefined;
     backend = Bun.serve({
       hostname: '127.0.0.1',
       port: 0,
       async fetch(req) {
         const path = new URL(req.url).pathname;
         if (path === '/introspect') {
+          if (stalled) {
+            const current = stalled;
+            current.calls++;
+            const aborted = () => current.aborted.resolve();
+            req.signal.addEventListener('abort', aborted, { once: true });
+            current.arrived.resolve();
+            try {
+              await current.release.promise;
+            } finally {
+              req.signal.removeEventListener('abort', aborted);
+            }
+          }
           if (slowBody) slowArrived.resolve();
           if (hold) {
             arrived.resolve();
@@ -83,7 +104,8 @@ test('real Bun TLS service enforces private configuration and serves an authenti
             scope: 'store:read',
           });
         }
-        if (path.endsWith('/mcp_grant_command'))
+        if (path.endsWith('/mcp_grant_command')) {
+          grantReads++;
           return Response.json({
             id: grantId,
             user_id: userId,
@@ -91,6 +113,7 @@ test('real Bun TLS service enforces private configuration and serves an authenti
             state: 'active',
             version: 1,
           });
+        }
         if (path.endsWith('/mcp_credential_command')) {
           credentialReads++;
           return Response.json({ revision: 1, envelope });
@@ -137,7 +160,7 @@ test('real Bun TLS service enforces private configuration and serves an authenti
       fetch(`https://127.0.0.1:${service!.port}${route}`, {
         ...init,
         tls: { ca: cert },
-        signal: AbortSignal.timeout(5000),
+        signal: init.signal ?? AbortSignal.timeout(5000),
         headers: { host: '127.0.0.1', ...Object.fromEntries(new Headers(init.headers)) },
       });
     const metadata = await local('/.well-known/oauth-protected-resource/mcp');
@@ -170,6 +193,63 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     await denied.body?.cancel();
     await client.close();
     active = true;
+    // A live TCP connection must be cancelled, not just abandoned locally.
+    // The per-introspection deadline is shorter than the service deadline.
+    for (const mode of ['deadline', 'disconnect'] as const) {
+      const barrier = {
+        arrived: Promise.withResolvers<void>(),
+        aborted: Promise.withResolvers<void>(),
+        release: Promise.withResolvers<void>(),
+        calls: 0,
+      };
+      stalled = barrier;
+      const reads = credentialReads;
+      const grants = grantReads;
+      const started = performance.now();
+      const controller = new AbortController();
+      const request = local('/mcp', {
+        method: 'POST',
+        headers: { authorization: 'Bearer opaque' },
+        body: '{}',
+        signal: controller.signal,
+      });
+      void request.catch(() => {});
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          (async () => {
+            await barrier.arrived.promise;
+            if (mode === 'disconnect') {
+              controller.abort();
+              await expect(request).rejects.toThrow();
+            } else {
+              const denied = await request;
+              expect(denied.status).toBe(401);
+              expect(denied.headers.get('cache-control')).toBe('no-store');
+              expect(await denied.json()).toEqual({ error: 'unauthorized' });
+              expect(performance.now() - started).toBeGreaterThan(9000);
+            }
+            await barrier.aborted.promise;
+            await service!.close();
+            expect(barrier.calls).toBe(1);
+            expect(grantReads).toBe(grants);
+            expect(credentialReads).toBe(reads);
+          })(),
+          new Promise<never>((_, reject) => {
+            watchdog = setTimeout(
+              () => reject(new Error(`Stalled ${mode}`)),
+              mode === 'disconnect' ? 3000 : 14_000,
+            );
+          }),
+        ]);
+      } finally {
+        clearTimeout(watchdog);
+        controller.abort();
+        barrier.release.resolve();
+        stalled = undefined;
+      }
+      service = await startAdminHttpService(path);
+    }
     // Keep the socket active but never finish the chunked body. The total
     // request deadline, not the idle timer, must terminate this request.
     const readsBefore = credentialReads;
@@ -291,4 +371,4 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     await backend?.stop(true);
     await rm(directory, { recursive: true, force: true });
   }
-}, 45000);
+}, 60000);
