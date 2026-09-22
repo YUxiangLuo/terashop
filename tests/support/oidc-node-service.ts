@@ -1,7 +1,6 @@
 import { chmod, chown, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createServer } from 'node:net';
 
 // Linux-only local integration fixture. Host networking reaches the runner's
 // loopback Supabase, but the service itself binds only 127.0.0.1. No proxy or mocks.
@@ -17,11 +16,9 @@ export async function nodeOidcService(configuration: Record<string, unknown>) {
     await rm(directory, { recursive: true, force: true });
   };
   try {
-    const reserve = createServer();
-    await new Promise<void>((resolve) => reserve.listen(0, '127.0.0.1', resolve));
-    const address = reserve.address();
-    if (!address || typeof address === 'string') throw new Error('Missing fixture port');
-    await new Promise<void>((resolve, reject) => reserve.close((e) => (e ? reject(e) : resolve())));
+    const issuer = new URL((configuration.provider as { issuer: string }).issuer);
+    if (issuer.protocol !== 'https:' || issuer.hostname !== '127.0.0.1' || !issuer.port)
+      throw new Error('Expected explicit loopback issuer port');
     const certificate = Bun.spawnSync(
       [
         'openssl',
@@ -47,13 +44,14 @@ export async function nodeOidcService(configuration: Record<string, unknown>) {
     );
     if (certificate.exitCode !== 0) throw new Error('Fixture certificate failed');
     const cert = await Bun.file(join(directory, 'cert.pem')).text();
+    const key = await Bun.file(join(directory, 'key.pem')).text();
     const path = join(directory, 'config.json');
     await writeFile(
       path,
       JSON.stringify({
         ...configuration,
-        tls: { cert, key: await Bun.file(join(directory, 'key.pem')).text() },
-        listen: { host: '127.0.0.1', port: address.port },
+        tls: { cert, key },
+        listen: { host: '127.0.0.1', port: Number(issuer.port) },
       }),
       { mode: 0o600 },
     );
@@ -133,6 +131,8 @@ export async function nodeOidcService(configuration: Record<string, unknown>) {
     let child = await start();
     return {
       close,
+      tls: { cert, key },
+      caPath: join(directory, 'cert.pem'),
       restart: async (whileStopping?: () => Promise<void>) => {
         const stop = Bun.spawn(['docker', 'stop', '--time', '10', name], {
           stdout: 'ignore',
@@ -154,12 +154,12 @@ export async function nodeOidcService(configuration: Record<string, unknown>) {
         child = await start();
       },
       request: (path: string, init: RequestInit = {}) =>
-        fetch(`https://127.0.0.1:${address.port}${path}`, {
+        fetch(`${issuer.origin}${path}`, {
           ...init,
           redirect: 'manual',
           signal: AbortSignal.any([AbortSignal.timeout(10000), ...(init.signal ? [init.signal] : [])]),
           tls: { ca: cert },
-          headers: { ...Object.fromEntries(new Headers(init.headers)), host: '127.0.0.1:3000' },
+          headers: init.headers,
         }),
     };
   } catch (error) {

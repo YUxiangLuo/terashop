@@ -2,6 +2,9 @@ import { expect, test } from 'bun:test';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createAdminHttpHandler } from '../mcp/src/http';
 import { createServer } from 'node:http';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { createOidcProvider } from '../mcp/src/oidc-provider';
@@ -24,8 +27,8 @@ for (const runtime of ['bun', 'node'] as const)
     const db = testDatabase();
     const name = `oidc_login_${crypto.randomUUID().replaceAll('-', '')}`;
     const project = `interaction-${crypto.randomUUID()}`;
-    const origin = 'https://127.0.0.1:3000';
-    const resource = 'https://shop.example/mcp';
+    let origin = 'https://127.0.0.1:3000';
+    let resource = 'https://shop.example/mcp';
     const redirect = 'https://client.example/callback';
     const secret = randomBytes(32).toString('base64url');
     const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
@@ -37,9 +40,32 @@ for (const runtime of ['bun', 'node'] as const)
     let node: Awaited<ReturnType<typeof nodeOidcService>> | undefined;
     let server: ReturnType<typeof createServer> | undefined;
     let provider: ReturnType<typeof createOidcProvider> | undefined;
+    let mcpDirectory: string | undefined;
+    let mcpProcess: ReturnType<typeof Bun.spawn> | undefined;
     const sessions: Awaited<ReturnType<typeof mcpSession>>[] = [];
     const users: Awaited<ReturnType<typeof signup>>[] = [];
     try {
+      if (runtime === 'node') {
+        // Use actual authorities end to end, without Host rewriting or proxies.
+        const ports: number[] = [];
+        const reservations = [createServer(), createServer()];
+        try {
+          for (const reservation of reservations) {
+            await new Promise<void>((resolve) => reservation.listen(0, '127.0.0.1', resolve));
+            const address = reservation.address();
+            if (!address || typeof address === 'string') throw new Error('Missing fixture port');
+            ports.push(address.port);
+          }
+        } finally {
+          for (const reservation of reservations)
+            if (reservation.listening)
+              await new Promise<void>((resolve, reject) =>
+                reservation.close((error) => (error ? reject(error) : resolve())),
+              );
+        }
+        origin = `https://127.0.0.1:${ports[0]}`;
+        resource = `https://127.0.0.1:${ports[1]}/mcp`;
+      }
       await db.unsafe(`create database ${name}`);
       created = true;
       const databaseUrl = new URL(process.env.DB_URL!);
@@ -98,6 +124,48 @@ for (const runtime of ['bun', 'node'] as const)
         expect(fence.revoked).toBe(true);
         // Remove this synthetic journal fixture before the three real-user assertions.
         await store`delete from oidc.approval_attempts where interaction_id=${interrupted.interactionId}`;
+        mcpDirectory = await mkdtemp(join(tmpdir(), 'tera-mcp-network-'));
+        const configPath = join(mcpDirectory, 'config.json');
+        await writeFile(
+          configPath,
+          JSON.stringify({
+            authorization: {
+              issuer: origin,
+              resource,
+              project,
+              introspectionEndpoint: `${origin}/token/introspection`,
+              introspectionClientId: 'resource',
+              introspectionClientSecret: secret,
+              supabaseUrl: API,
+              serviceRoleKey: SERVICE_KEY,
+              anonKey: ANON_KEY,
+              scopes: ['store:read', 'store:write'],
+              allowWrites: true,
+            },
+            credentialKeys: { test: encryptionKey.toString('base64url') },
+            activeCredentialKey: 'test',
+            tls: node.tls,
+            listen: { host: '127.0.0.1', port: Number(new URL(resource).port) },
+          }),
+          { mode: 0o600 },
+        );
+        const child = Bun.spawn([process.execPath, 'mcp/src/remote.ts', configPath], {
+          env: { ...process.env, NODE_EXTRA_CA_CERTS: node.caPath },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        });
+        mcpProcess = child;
+        const watchdog = setTimeout(() => child.kill('SIGKILL'), 10_000);
+        try {
+          const reader = child.stdout.getReader();
+          try {
+            expect(new TextDecoder().decode((await reader.read()).value)).toBe('MCP_HTTP_READY\n');
+          } finally {
+            reader.releaseLock();
+          }
+        } finally {
+          clearTimeout(watchdog);
+        }
       } else {
         provider = createOidcProvider(providerConfig, createOidcAdapter(store));
         provider.proxy = true; // Isolated Bun fixture only, never the Node service.
@@ -440,7 +508,10 @@ for (const runtime of ['bun', 'node'] as const)
           await remote.connect(
             new StreamableHTTPClientTransport(new URL(resource), {
               requestInit: { headers: { authorization: `Bearer ${token}` } },
-              fetch: (input, init) => http(new Request(input, init)),
+              fetch: (input, init) =>
+                node
+                  ? fetch(input, { ...init, tls: { ca: node.tls.cert }, signal: AbortSignal.timeout(10_000) })
+                  : http(new Request(input, init)),
             }),
           );
           expect((await toolData<{ currency: string }>(remote, 'get_admin_shop_settings')).currency).toBe(
@@ -491,6 +562,29 @@ for (const runtime of ['bun', 'node'] as const)
         (await toolData<{ currency: string }>(sessions[1].client, 'get_admin_shop_settings')).currency,
       ).toBe('USD');
       if (node) {
+        const networkCall = async (token: string) => {
+          const response = await fetch(resource, {
+            method: 'POST',
+            tls: { ca: node!.tls.cert },
+            signal: AbortSignal.timeout(10_000),
+            headers: {
+              authorization: `Bearer ${token}`,
+              'content-type': 'application/json',
+              accept: 'application/json, text/event-stream',
+            },
+            body: JSON.stringify({
+              jsonrpc: '2.0',
+              id: 1,
+              method: 'tools/call',
+              params: { name: 'get_admin_shop_settings', arguments: {} },
+            }),
+          });
+          return { status: response.status, body: await response.json() };
+        };
+        expect((await networkCall(tokens[0])).status).toBe(401);
+        const allowed = await networkCall(tokens[1]);
+        expect(allowed.status).toBe(200);
+        expect(allowed.body.result.structuredContent.data.currency).toBe('USD');
         const refresh = async (token: string) => {
           const response = await local('/token', {
             method: 'POST',
@@ -519,6 +613,9 @@ for (const runtime of ['bun', 'node'] as const)
         expect(restored.credentials).not.toBeNull();
         expect((await authorizer.authorize(rotated.data.access_token)).grantId).toBe(before.grantId);
         expect(
+          (await networkCall(rotated.data.access_token)).body.result.structuredContent.data.currency,
+        ).toBe('USD');
+        expect(
           (await toolData<{ currency: string }>(sessions[1].client, 'get_admin_shop_settings')).currency,
         ).toBe('USD');
         const next = await refresh(rotated.data.refresh_token);
@@ -542,12 +639,20 @@ for (const runtime of ['bun', 'node'] as const)
         expect(
           (await sessions[1].client.callTool({ name: 'get_admin_shop_settings', arguments: {} })).isError,
         ).toBe(true);
+        expect((await networkCall(next.data.access_token)).status).toBe(401);
+        mcpProcess!.kill('SIGTERM');
+        expect(await mcpProcess!.exited).toBe(0);
       }
     } finally {
       try {
         try {
           for (const session of sessions) await session.close();
         } finally {
+          if (mcpProcess && mcpProcess.exitCode === null) {
+            mcpProcess.kill('SIGKILL');
+            await mcpProcess.exited;
+          }
+          if (mcpDirectory) await rm(mcpDirectory, { recursive: true, force: true });
           await node?.close();
           if (server)
             await new Promise<void>((resolve, reject) =>

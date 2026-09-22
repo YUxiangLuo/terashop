@@ -17,10 +17,10 @@
 | 业务工具 | [工具测试](../tests/unit/mcp.test.ts) 断言 112 个工具及只读 53 个；业务合同见下表 | 工具数不代表全部新业务；真实 PayPal Sandbox 另需外部配置 |
 | 授权与用户隔离 | [授权入口](src/auth.ts)、[宿主](src/oidc-service.ts)、逐用户加密凭据、在线撤销／scope 检查、刷新准入；[联合测试](../tests/mcp-oidc-interaction.test.ts) 使用真实本地 Auth／SMTP／数据库 | 用户可操作的登录／同意页、目标客户端兼容性 |
 | 持久化与恢复 | [批准日志](src/oidc-journal.ts)、[启动恢复](src/oidc-recovery.ts)、单实例锁；已有正常退出、强杀和迟到凭据写入回归 | 其他批准阶段故障、密钥轮换与备份恢复演练；不承诺网络分区接管 |
-| MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新 | 完整 HTTPS MCP＋真实授权服务＋Supabase 联合链路 |
+| MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新；真实 HTTPS 联合读取／撤销已验证 | 联合链路中的写入、降权、刷新竞争与故障分支 |
 | 网络故障边界 | [TLS 测试](../tests/unit/mcp-http-service.test.ts) 覆盖慢请求体、introspection 超时／断连、排空及 CLI SIGTERM | 凭据／刷新／业务调用阶段阻塞与断连、握手和请求头慢连接防护、并发与资源预算 |
 
-真实 Supabase 联合测试的 MCP 客户端通过 `fetch` 直接转发到 handler；真实 MCP TCP／TLS 测试的授权后端则是本地夹具。**两类测试分别通过，不等于完整远程链路通过。** 下方实验记录保存各自的范围，不作为生产就绪证明。
+真实 Supabase 联合测试的 Bun 场景仍直接转发到 handler；Node 场景已通过独立 Bun MCP CLI 的真实 HTTPS 入口连接真实 Node 授权服务和本地 Supabase，验证读取、工具发现、撤销隔离及授权服务重启后的有效／失效令牌。独立 TCP／TLS 单测仍用本地授权后端夹具验证故障边界。**联合读取通过不等于整批端到端或公网验收完成。** 下方记录保留各场景范围，不作为生产就绪证明。
 
 按顺序完成以下批次后，才将首版标为可交付；每批更新本清单并记录实际运行的验证，不以历史测试结果代替当前执行：
 
@@ -260,7 +260,7 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 真实数据库联合验收：`bun run test:current tests/mcp-oidc-interaction.test.ts`。临时独立 issuer 数据库与真实本地 Supabase/Auth/SMTP，走完整授权请求、邮件 PKCE、同意 POST、发码和兑换；在线 introspection + 本地授权解析后解密下游凭据，经实际 MCP SDK 内存 transport 调用店铺工具。两名管理员分别批准只读/读写，检查工具发现范围、精确 UUID/Auth session、撤销 A 阻断旧工具上下文而 B 仍可调用。Bun 模式另模拟 provider result 已保存但完成回执丢失，确认两端授权撤销、密文删除。
 
-同一命令现在还运行 Node 服务模式：Linux Docker 中固定 digest 的 Node 22 LTS 执行真实 auth.ts 入口，非 root、只读文件系统、私有 0600 配置、临时最小权限数据库角色，经验证一次性证书的直接 HTTPS 请求，不模拟下游响应、不启用 provider.proxy。需要 Docker、OpenSSL 和本地 Supabase；容器使用 host 网络访问本机回环服务，授权监听仅绑定 127.0.0.1。测试客户端将 allowlist 中的固定 issuer authority 映射到随机本地端口，不测试公网 DNS/证书。结束删除容器、临时配置、账号、grant、issuer 数据库和角色。测试驱动及 MCP SDK 内存 transport 仍在 Bun；Node 模式未注入完成故障，未验证浏览器 UI、进程崩溃恢复或远程 MCP transport。
+同一命令还运行 Node 服务模式：Linux Docker 中固定 digest 的 Node 22 LTS 执行真实 auth.ts 入口，非 root、只读文件系统、私有 0600 配置、临时最小权限数据库角色，经验证一次性证书的直接 HTTPS 请求，不模拟下游响应、不启用 provider.proxy。需要 Docker、OpenSSL 和本地 Supabase；容器使用 host 网络访问本机回环服务，授权监听仅绑定 127.0.0.1。issuer 和 MCP resource 均使用实际随机回环端口，不改写 Host。独立 Bun 子进程运行 remote.ts，通过 NODE_EXTRA_CA_CERTS 显式信任测试授权服务证书；SDK 客户端同样校验证书，使用真实 HTTPS 调用店铺读取和工具列表。验证本地撤销 A 后 A 返回 401、B 仍读取成功，授权服务重启后刷新所得 token 仍可读取，刷新令牌重放导致整组撤销后 MCP 返回 401；MCP SIGTERM 退出码为 0。结束删除进程、临时配置、账号、grant、issuer 数据库和角色。保留原内存 transport 检查；未完成真实网络写入、下游刷新竞争、浏览器 UI 或公网 DNS/证书验收。
 
 Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并要求退出码 0，重新使用同一私有配置和数据库启动真实入口。先消费 B 的原刷新令牌并撤销 A 的本地授权；第一次重启后 A 仍被拒绝，B 的旧访问令牌、grant 绑定、加密凭据及店铺调用仍有效，替代刷新令牌可继续轮换且权限不变。随后重放原刷新令牌返回 invalid_grant，整组授权失效；第二次重启后先检查访问令牌仍不可用，再确认最新刷新令牌被拒绝，旧 MCP 上下文也无法调用。此测试不重启数据库，不覆盖强制崩溃、SSO Cookie 恢复或密钥轮换。
 
@@ -294,11 +294,11 @@ provider 禁用开发登录、userinfo 和动态注册，忽略数据库残留�
 
 Streamable HTTP 第一层已实现：[createAdminHttpHandler](src/http.ts) 使用 SDK 2.0.0 WebStandard transport，每个 POST 独立 server、JSON 响应、无 MCP session／GET SSE／DELETE；逐请求在线授权并读取该用户的加密凭据，工具执行仍复查权限。凭据剩余不超过 30 秒时调用已有 claim-refresh 协议一次，再重新读取；回执不明返回 503，不重放刷新或业务请求。只接收 Authorization Bearer，不接受 URL token，拒绝错误 Host／跨源 Origin，流式读取请求体并限制 1 MiB，响应 no-store。提供 resource 路径对应的 RFC 9728 元数据和 401 resource_metadata challenge。写工具仍须宿主显式 allowWrites，且受 token／grant／部署 scopes 交集限制。
 
-SDK StreamableHTTPClientTransport 测试覆盖初始化、列表、双用户权限隔离、降权／撤销、体积边界、凭据错绑与刷新回执丢失；真实 Node/Bun 授权服务＋Supabase 联合场景覆盖通过 handler 调用店铺工具，该联合场景客户端 fetch 直接连接 handler。
+SDK StreamableHTTPClientTransport 测试覆盖初始化、列表、双用户权限隔离、降权／撤销、体积边界、凭据错绑与刷新回执丢失；真实授权服务＋Supabase 联合场景中，Bun 模式直接调用 handler，Node 模式另启动独立 Bun HTTPS MCP CLI，通过实际网络调用店铺读取，范围见上方 Node 联合验收。
 
 Bun 入口已提供：[remote.ts](src/remote.ts)／[startAdminHttpService](src/http-service.ts)。从仓库根目录执行 `bun mcp/src/remote.ts /absolute/path/to/mcp.json`；只接受配置文件绝对路径，文件须为私有普通文件（如 0600），禁止符号链接，上限 64 KiB。JSON 顶层为 `authorization`、`credentialKeys`、`activeCredentialKey`、`tls`、`listen`，拒绝未知字段。authorization 必填 issuer、resource、introspectionEndpoint、introspectionClientId、introspectionClientSecret、project、supabaseUrl、serviceRoleKey、anonKey、scopes、allowWrites；固定使用 oidc-provider profile。resource 必须是带非根路径的 HTTPS URL；credentialKeys 为 key ID→32 字节规范 base64url 密钥，须能解密授权服务存储的凭据；tls 为 PEM key/cert，启动检查有效期、resource 主机名及密钥配对；listen 为 host（127.0.0.1／::1／0.0.0.0）和 port。生产配置不得提交仓库。
 
-仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。请求体上限 1 MiB，连接空闲超时 30 秒，处理截止时间 30 秒；截止时中止本地读取／下游等待并返回超时，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。真实 TCP／TLS 测试使用一次性证书验证 SDK 初始化／列表、Host/Origin/代理头拒绝、鉴权失效、配置权限、排空及 CLI SIGTERM。该网络测试的授权后端为本地夹具，尚未覆盖完整网络入口＋真实 Supabase 联合部署；限流、下游阻塞截止时间、刷新并发及公网客户端验收仍待完成。启动成功仅表示配置与监听就绪，不证明后端凭据有效。
+仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。请求体上限 1 MiB，连接空闲超时 30 秒，处理截止时间 30 秒；截止时中止本地读取／下游等待并返回超时，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。真实 TCP／TLS 单测使用一次性证书验证 SDK 初始化／列表、Host/Origin/代理头拒绝、鉴权失效、配置权限、排空及 CLI SIGTERM，该单测的授权后端为本地夹具；真实后端联合读取另由 Node 场景验证。限流、凭据／业务调用阻塞、刷新并发及公网客户端验收仍待完成。启动成功仅表示配置与监听就绪，不证明后端凭据有效。
 
 慢请求与退出组合回归使用真实 TLS 分块请求，每 500 毫秒发送少量字节但不结束请求体，以排除连接空闲超时的作用。观察授权后端收到请求后开始关闭服务，验证拒绝新连接、等待在途请求、约 30 秒返回 504 request_timeout、没有读取下游凭据，随后关闭完成。此验证覆盖已进入处理器的慢请求体，不覆盖 TLS 握手／请求头慢速发送或业务写入取消；临时证书由客户端显式信任，不关闭证书验证，无需公网域名或生产证书。
 
