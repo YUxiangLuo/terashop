@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { beforeNavigate } from "$app/navigation";
+  import FulfillmentEditor from "./FulfillmentEditor.svelte";
   import {
     supabase,
     message,
@@ -21,6 +22,7 @@
   let order = $state.raw<OrderDetail | null>(null);
   let balance = $state.raw<FulfillmentBalance | null>(null);
   let busy = $state(true);
+  let fulfillmentBusy = $state(false);
   let ready = $state(false);
   let error = $state("");
   let notice = $state("");
@@ -47,6 +49,7 @@
   beforeNavigate(({ cancel }) => {
     if (
       busy ||
+      fulfillmentBusy ||
       ((noteDirty || shipmentDirty) &&
         !window.confirm(
           "Leave and discard unsaved edits? Any dispatched shipment request remains saved in this tab.",
@@ -102,7 +105,7 @@
     }
   }
   async function saveNote(clear = false) {
-    if (!order || busy || !ready || noteUncertain) return;
+    if (!order || busy || fulfillmentBusy || !ready || noteUncertain) return;
     busy = true;
     error = "";
     notice = "";
@@ -131,7 +134,7 @@
   }
   async function ship(event?: SubmitEvent) {
     event?.preventDefault();
-    if (busy || !ready || !order || noteDirty) return;
+    if (busy || fulfillmentBusy || !ready || !order || noteDirty) return;
     const items =
       balance?.lines
         .filter((line) => !!quantities[line.order_item_id])
@@ -228,7 +231,8 @@
 >
 <svelte:window
   onbeforeunload={(event) => {
-    if (busy || noteDirty || shipmentDirty) event.preventDefault();
+    if (busy || fulfillmentBusy || noteDirty || shipmentDirty)
+      event.preventDefault();
   }}
 />
 <div class="page-heading">
@@ -239,7 +243,9 @@
         {dateTime(order.created_at)} · USD
       </p>{/if}
   </div>
-  <button onclick={reload} disabled={busy}>Reload order</button>
+  <button onclick={reload} disabled={busy || fulfillmentBusy}
+    >Reload order</button
+  >
 </div>
 {#if error}<p class="notice error" role="alert">{error}</p>{/if}
 {#if notice}<p class="notice" role="status">{notice}</p>{/if}
@@ -323,6 +329,17 @@
                   )?.name ?? line.order_item_id} × {line.quantity}
                 </li>{/each}
             </ul>
+            <FulfillmentEditor
+              fulfillmentId={shipment.id}
+              orderId={id}
+              disabled={busy ||
+                fulfillmentBusy ||
+                noteDirty ||
+                shipmentDirty ||
+                !!pending}
+              onSaved={load}
+              onBusyChange={(value) => (fulfillmentBusy = value)}
+            />
           </article>{:else}<p class="small muted">
             No shipments recorded yet.
           </p>{/each}
@@ -341,7 +358,7 @@
           </div>
         {:else if balance?.is_fulfillable}
           <form onsubmit={ship}>
-            <fieldset disabled={busy || !ready || noteDirty}>
+            <fieldset disabled={busy || fulfillmentBusy || !ready || noteDirty}>
               <h3 class="small">Record a shipment</h3>
               <p class="small muted">
                 Enter only the quantities shipped now. Payment and quantity
@@ -402,15 +419,21 @@
               rows="4"
               maxlength="10000"
               bind:value={note}
-              disabled={busy || !ready || noteUncertain}></textarea></label
+              disabled={busy || fulfillmentBusy || !ready || noteUncertain}
+            ></textarea></label
           >
           <div class="actions form-action">
-            <button disabled={busy || !ready || noteUncertain || !noteDirty}
-              >Save note</button
+            <button
+              disabled={busy ||
+                fulfillmentBusy ||
+                !ready ||
+                noteUncertain ||
+                !noteDirty}>Save note</button
             ><button
               type="button"
               onclick={() => saveNote(true)}
               disabled={busy ||
+                fulfillmentBusy ||
                 !ready ||
                 noteUncertain ||
                 order.admin_note === null}>Clear saved note</button

@@ -592,6 +592,7 @@ address {
   }
   .sidebar nav {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.25rem;
   }
   .sidebar .brand span {

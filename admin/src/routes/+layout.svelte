@@ -129,6 +129,13 @@
             : undefined}
           href="/orders">▤ <span>Orders</span></a
         >
+        <a
+          class:nav-active={page.url.pathname.startsWith("/customers")}
+          aria-current={page.url.pathname.startsWith("/customers")
+            ? "page"
+            : undefined}
+          href="/customers">♧ <span>Customers</span></a
+        >
       </nav>
       <div class="sidebar-note">
         Products, stock and shipments.<br /><small>Single store · USD</small>

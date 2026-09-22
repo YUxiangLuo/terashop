@@ -3,12 +3,23 @@ import type { Database } from "../../../types/database";
 type Functions = Database["public"]["Functions"];
 export type StockCommand = Functions["adjust_inventory"]["Args"];
 export type ShipmentCommand = Functions["create_fulfillment"]["Args"];
+export type FulfillmentUpdateCommand = {
+  fulfillment_id: string;
+  expected_version: number;
+  changes: {
+    status?: "delivered" | "cancelled";
+    carrier?: string;
+    tracking_number?: string;
+    tracking_url?: string | null;
+  };
+  idempotency_key: string;
+};
 
 // Retain the exact command before dispatch, including across a page reload.
 // No credentials or customer addresses are stored here. Callers scope by Auth user.
 export function commandKey(
   user: string,
-  kind: "stock" | "shipment",
+  kind: "stock" | "shipment" | "fulfillment-update",
   resource: string,
 ) {
   return `tera-admin-command:${user}:${kind}:${resource}`;
@@ -33,9 +44,7 @@ export async function dispatchCommand<T>(
   storage: Storage,
   key: string,
   command: T,
-  send: (
-    command: T,
-  ) => PromiseLike<{
+  send: (command: T) => PromiseLike<{
     data: unknown;
     error: { code?: string; message: string } | null;
     status: number;
@@ -135,5 +144,42 @@ export function isShipmentCommand(value: unknown): value is ShipmentCommand {
         Number.isInteger(item.quantity) &&
         Number(item.quantity) > 0,
     )
+  );
+}
+
+export function isFulfillmentUpdateCommand(
+  value: unknown,
+): value is FulfillmentUpdateCommand {
+  if (
+    !object(value) ||
+    !Object.keys(value).every((key) =>
+      [
+        "fulfillment_id",
+        "expected_version",
+        "changes",
+        "idempotency_key",
+      ].includes(key),
+    ) ||
+    !uuid(value.fulfillment_id) ||
+    !uuid(value.idempotency_key) ||
+    !Number.isSafeInteger(value.expected_version) ||
+    Number(value.expected_version) < 1 ||
+    !object(value.changes)
+  )
+    return false;
+  const changes = value.changes;
+  const keys = Object.keys(changes);
+  return (
+    keys.length > 0 &&
+    keys.every((key) => {
+      const field = changes[key];
+      if (key === "status")
+        return field === "delivered" || field === "cancelled";
+      if (key === "carrier" || key === "tracking_number")
+        return typeof field === "string";
+      if (key === "tracking_url")
+        return field === null || typeof field === "string";
+      return false;
+    })
   );
 }

@@ -5,6 +5,7 @@ import {
   readCommand,
   isStockCommand,
   isShipmentCommand,
+  isFulfillmentUpdateCommand,
 } from "../../admin/src/lib/commands";
 
 const stock = {
@@ -154,4 +155,61 @@ test("saved commands reject malformed quantities, identities and extra RPC field
     "cannot be read",
   );
   expect(storage.getItem("key")).toBe("{}");
+});
+
+test("fulfillment updates strictly validate fields and replay their original version and key", async () => {
+  const storage = memoryStorage();
+  const update = {
+    fulfillment_id: stock.variant_id,
+    expected_version: 7,
+    changes: { tracking_number: "NEW", tracking_url: null },
+    idempotency_key: stock.idempotency_key,
+  };
+  expect(isFulfillmentUpdateCommand(update)).toBe(true);
+  for (const invalid of [
+    { ...update, expected_version: 0 },
+    { ...update, expected_version: 1.5 },
+    { ...update, changes: {} },
+    { ...update, changes: { status: "shipped" } },
+    { ...update, changes: { carrier: null } },
+    { ...update, changes: { carrier: undefined } },
+    { ...update, changes: { items: [] } },
+    { ...update, order_id: stock.location_id },
+  ])
+    expect(isFulfillmentUpdateCommand(invalid)).toBe(false);
+
+  const key = commandKey(
+    "admin-a",
+    "fulfillment-update",
+    update.fulfillment_id,
+  );
+  await expect(
+    dispatchCommand(
+      storage,
+      key,
+      update,
+      async () => {
+        throw new Error("response lost");
+      },
+      () => true,
+    ),
+  ).rejects.toThrow("response lost");
+  const restored = readCommand(storage, key, isFulfillmentUpdateCommand)!;
+  expect(restored.expected_version).toBe(7);
+  expect(restored.idempotency_key).toBe(update.idempotency_key);
+  await dispatchCommand(
+    storage,
+    key,
+    restored,
+    async (args) => {
+      expect(args).toEqual(update);
+      return {
+        data: { id: update.fulfillment_id, version: 8 },
+        error: null,
+        status: 200,
+      };
+    },
+    (data) => (data as { version: number }).version === 8,
+  );
+  expect(storage.getItem(key)).toBeNull();
 });
