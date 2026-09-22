@@ -4,6 +4,7 @@ import postgres from 'postgres';
 import { createOidcAdapter } from '../mcp/src/oidc-adapter';
 import { heldTransactionRace, testDatabase } from './database-concurrency';
 import { verifyOAuthProvider } from './support/oauth-provider-compat';
+import { verifyApprovalJournal } from './support/oauth-journal';
 
 // A fresh dedicated database on the already validated disposable local cluster.
 // No tables or migrations are added to the shop database.
@@ -32,6 +33,10 @@ afterAll(async () => {
   } finally {
     await admin.close();
   }
+});
+
+test('OIDC approval journal preserves bindings, terminal states and paginated recovery work', async () => {
+  await verifyApprovalJournal(db);
 });
 
 test('OIDC payloads persist across pools; secondary indexes update and TTL is enforced', async () => {

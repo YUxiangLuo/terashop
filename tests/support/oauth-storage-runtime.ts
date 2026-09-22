@@ -9,6 +9,8 @@ import { createOidcAdapter } from '../../mcp/src/oidc-adapter';
 import { verifyOAuthProvider } from './oauth-provider-compat';
 import { verifyOAuthInteraction } from './oauth-interaction';
 import { verifyOidcService } from './oauth-service-runtime';
+import { createOidcApprovalJournal } from '../../mcp/src/oidc-journal';
+import { journalFixture, verifyApprovalJournal } from './oauth-journal';
 
 assert.equal(process.versions.bun, undefined);
 assert.equal(process.release.lts, 'Jod');
@@ -36,6 +38,12 @@ try {
   assert.equal(rolcreaterole, false);
   await assert.rejects(db`create table oidc.forbidden(id integer)`, { code: '42501' });
   if (phase === 'seed') {
+    const journal = createOidcApprovalJournal(db);
+    await journal.begin(journalFixture('restart-pending'));
+    await journal.begin(journalFixture('restart-completed'));
+    await journal.finish('restart-completed', 'completed');
+    await journal.begin(journalFixture('restart-revoked'));
+    await journal.finish('restart-revoked', 'revoked');
     await session.upsert('restart-session', { uid: 'restart-uid', accountId: String(process.pid) }, 300);
     await refresh.upsert('used-refresh', { grantId: 'used-grant' }, 300);
     await refresh.consume('used-refresh');
@@ -43,6 +51,10 @@ try {
     await refresh.upsert('revoked-refresh', { grantId: 'revoked-grant' }, 300);
     await grants.destroy('revoked-grant');
   } else if (phase === 'resume') {
+    const journal = createOidcApprovalJournal(db);
+    assert.deepEqual(await journal.pending(), [journalFixture('restart-pending')]);
+    await assert.rejects(journal.begin(journalFixture('restart-completed')));
+    await assert.rejects(journal.begin(journalFixture('restart-revoked')));
     const persisted = await session.findByUid('restart-uid');
     assert(persisted);
     assert.notEqual(persisted.accountId, String(process.pid));
@@ -56,6 +68,8 @@ try {
     await assert.rejects(grants.upsert('revoked-grant', {}, 300), { error: 'invalid_grant' });
   } else {
     assert.equal(phase, undefined);
+    await verifyApprovalJournal(db);
+    console.log('PASS: durable approval journal, immutable binding, terminal races and pagination');
     await verifyOAuthProvider('opaque', Adapter, true);
     console.log('PASS: Node LTS PostgreSQL protocol and barrier-controlled HTTP code/refresh races');
     await verifyOAuthInteraction(Adapter);
