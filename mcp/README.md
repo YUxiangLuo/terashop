@@ -262,6 +262,10 @@ provider 禁用开发登录、userinfo 和动态注册，忽略数据库残留�
 
 远程版本后续按以下依赖顺序推进：
 
+Streamable HTTP 第一层已实现：[createAdminHttpHandler](src/http.ts) 使用 SDK 2.0.0 WebStandard transport，每个 POST 独立 server、JSON 响应、无 MCP session／GET SSE／DELETE；逐请求在线授权并读取该用户的加密凭据，工具执行仍复查权限。凭据剩余不超过 30 秒时调用已有 claim-refresh 协议一次，再重新读取；回执不明返回 503，不重放刷新或业务请求。只接收 Authorization Bearer，不接受 URL token，拒绝错误 Host／跨源 Origin，流式读取请求体并限制 1 MiB，响应 no-store。提供 resource 路径对应的 RFC 9728 元数据和 401 resource_metadata challenge。写工具仍须宿主显式 allowWrites，且受 token／grant／部署 scopes 交集限制。
+
+当前是 Web Request handler，**未提供可部署的 Bun HTTP/TLS 入口**，不信任代理头、不支持跨源浏览器 CORS。SDK StreamableHTTPClientTransport 测试覆盖初始化、列表、双用户权限隔离、降权／撤销、体积边界、凭据错绑与刷新回执丢失；真实 Node/Bun 授权服务＋Supabase 联合场景覆盖通过 handler 调用店铺工具。客户端 fetch 在测试中直接连接 handler，不是公网或实际 MCP TCP 监听验收。后续仍需私有配置、TLS／监听生命周期、请求时限与限流、真实网络客户端和刷新并发联合验收。
+
 1. 固定 Node 授权服务配置与入口：预注册客户端、签名/Cookie/加密密钥、最小数据库权限、TTL、受信 TLS 代理及启动校验；把真实 Supabase 联合场景带入 Node，并验证服务重启与密钥恢复。
 2. 用户登录/同意页面：展示真实 client/resource/scopes 和离线刷新，同源 Cookie/CSRF、拒绝/到期/失败状态；只用于用户授权，不用于 Agent 操作 Admin SPA。补真实浏览器验收。
 3. 跨存储失败恢复：持久化批准进度或等价的可验证补偿，覆盖在途退出、创建回执未知、未完成交互与孤立密文清理；明确单实例限制及敏感 payload 保留期。

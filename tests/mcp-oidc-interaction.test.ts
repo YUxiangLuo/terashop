@@ -1,4 +1,6 @@
 import { expect, test } from 'bun:test';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { createAdminHttpHandler } from '../mcp/src/http';
 import { createServer } from 'node:http';
 import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import postgres from 'postgres';
@@ -414,6 +416,42 @@ for (const runtime of ['bun', 'node'] as const)
         sessions.push(mcp);
         const settings = await toolData<{ currency: string }>(mcp.client, 'get_admin_shop_settings');
         expect(settings.currency).toBe('USD');
+        const http = createAdminHttpHandler(
+          {
+            tokenProfile: 'oidc-provider',
+            issuer: origin,
+            resource,
+            project,
+            introspectionEndpoint: `${origin}/token/introspection`,
+            introspectionClientId: 'resource',
+            introspectionClientSecret: secret,
+            supabaseUrl: API,
+            serviceRoleKey: SERVICE_KEY,
+            anonKey: ANON_KEY,
+            scopes: ['store:read', 'store:write'],
+            allowWrites: true,
+          },
+          cipher,
+          (url, init) =>
+            url === `${origin}/token/introspection` ? local('/token/introspection', init) : fetch(url, init),
+        );
+        const remote = new Client({ name: 'http-integration', version: '1' });
+        try {
+          await remote.connect(
+            new StreamableHTTPClientTransport(new URL(resource), {
+              requestInit: { headers: { authorization: `Bearer ${token}` } },
+              fetch: (input, init) => http(new Request(input, init)),
+            }),
+          );
+          expect((await toolData<{ currency: string }>(remote, 'get_admin_shop_settings')).currency).toBe(
+            'USD',
+          );
+          expect((await remote.listTools()).tools.some((t) => t.name === 'update_shop_settings')).toBe(
+            index === 1,
+          );
+        } finally {
+          await remote.close();
+        }
         const tools = await mcp.client.listTools();
         expect(tools.tools.some((t) => t.name === 'update_shop_settings')).toBe(index === 1);
       }
