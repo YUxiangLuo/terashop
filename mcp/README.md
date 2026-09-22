@@ -218,6 +218,10 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 上述是存储进程重建和单 provider 进程内的 HTTP 并发验收，不是完整授权服务重启、数据库重启、多节点服务或崩溃恢复证明；合成身份/自动同意仍仅用于测试。下一步接真实 Supabase 登录/同意、本地授权与凭据保存，并补全签名密钥/Cookie 配置的服务重启验收，再接 Streamable HTTP、生产配置及客户端验收。Docker 命令不部署生产授权服务。详见 ADR-027。
 
+首次批准原语 [createOidcApproval](src/oidc-approval.ts) 补齐“尚未签发 MCP token 时保存下游凭据”的路径。受信宿主为一个已验证 interaction 固定 client/resource/scopes，取得明确同意后将 `takeIdentity` 的结果交给一次性 approve：在线重查精确管理员 UUID/Auth session、新建 provider Grant、创建本地 grant、绑定独占 session、以 revision=1 加密保存，最后重查授权和凭据有效期。成功仅向内部宿主返回两个 grant ID，不返回凭据，不调用 interactionFinished 或签发授权码；宿主必须成功后才允许继续发码。本流程包含 openid/offline_access，宿主同意页须明确涵盖离线刷新，不得据此扩大 store scopes。
+
+任何失败均消耗本次批准，不自动重试。尽力撤销上游及已知 ID 的本地 grant，正常本地撤销删除密文；创建响应丢失而未知本地 ID、撤销失败或回执异常返回 APPROVAL_CLEANUP_UNCONFIRMED，不能声称回滚完成。不得继续发码或复用本次登录会话，需要后续受信清理；进程崩溃没有持久化补偿调度。单测覆盖身份/会话替换、并发、畸形回执、结果丢失；`tests/mcp-login.test.ts` 用真实邮件登录、Auth 与数据库验证首次保存和已提交写响应丢失后的撤销。该集成在 Bun 执行，上游 Grant 使用真实库的内存 adapter；尚未串联浏览器同意、provider interaction 与 Node 持久化部署，也不构成完整远程授权流程。
+
 ```bash
 bun run typecheck
 bun run test:unit

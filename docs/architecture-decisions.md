@@ -546,3 +546,13 @@ provider 9.12.2 先 find/check 再 consume，单纯更新 consumed 不能防止�
 两个顺序启动的独立 Node 进程验证存储恢复：首进程写入会话、消费 refresh、撤销另一 grant 后退出；第二进程读取会话与 consumed，重复消费和复活撤销授权均拒绝。此后真实 provider 的 code 和 refresh HTTP 请求使用测试 adapter 屏障，在两个请求均读到未消费状态后放行，验证最多一个 200、其他响应为 invalid_grant 且无令牌，竞争后该组 access/refresh 均不可用，另一授权保持有效。同一并发场景也纳入 Bun 数据库集成回归。
 
 此证据不涵盖完整 provider 进程重启后继续浏览器交互、签名/Cookie 密钥恢复、数据库重启或多节点同时服务；没有人为终止在途进程或证明所有崩溃点。持久化检查和协议并发场景仍使用合成身份/自动同意，不是登录服务。下一步串联真实 Supabase 登录与显式同意、本地 grant 和凭据保存，同时落实稳定部署配置与服务重启检查，再接远程 transport。
+
+### 首次批准先保存凭据，再允许宿主发码
+
+现有 GrantAuthorizer.writeCredentials 依赖已签发的 MCP token，不能用于首次用户批准。新增内部 [createOidcApproval](../mcp/src/oidc-approval.ts)，为一个受信 interaction 固定 client/resource/scopes；宿主必须验证该 interaction、展示 store scopes 与 offline_access 并取得明确同意，身份仅来自原浏览器的 takeIdentity。原语自身不证明同意、不接收 HTTP、不签发 token，也不能暴露为 MCP 工具。
+
+approve 在首次 await 前消耗本次尝试，重查下游真实管理员 UUID 和精确 Auth session，然后新建独立 provider Grant，以其 ID 为授权纪元创建本地 grant，绑定独占 session，再保存 revision=1 的认证密文。每次网络等待后在关键完成边界检查凭据期限，返回前重查本地/上游 grant；成功只返回内部两个 grant ID。宿主只有成功后才可 interactionFinished，不先签发 bearer 再保存凭据。本路径与原凭据更新/刷新路径分开，不引入 service-role 业务执行。
+
+失败保守返回 APPROVAL_UNCONFIRMED，尝试撤销新上游与已知本地 grant；本地撤销沿用事务删除密文。上游撤销不依赖取得本地 ID。若创建回执丢失而未知本地 ID、清理调用失败或回执畸形，则返回 APPROVAL_CLEANUP_UNCONFIRMED；禁止继续发码，不能声称全部回滚。两套存储不是分布式事务，进程崩溃、完成回执丢失、成功后宿主未完成交互等情况仍需持久化恢复/清理设计，不复用原登录会话自动重新批准。
+
+验证包括真实库 Grant 的单测，以及真实本地邮件 PKCE → Cookie/CSRF 内部身份交接 → grant/session/密文数据库保存的集成；模拟数据库写成功但响应丢失后确认两端 grant 撤销、密文删除且只写一次。此批在 Bun 执行，上游用内存 adapter，未模拟用户在真实 consent 页点击，也未完成 provider interaction 到浏览器事务的不可替换绑定。下一步实现该绑定与同意流程，再做 Node 持久化全链路验收；当前仍无远程 MCP listener。
