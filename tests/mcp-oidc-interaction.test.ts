@@ -143,14 +143,14 @@ for (const runtime of ['bun', 'node'] as const)
       );
       const tokens: string[] = [];
       const refreshTokens: string[] = [];
-      for (let index = 0; index < (runtime === 'node' ? 2 : 3); index++) {
+      for (let index = 0; index < 3; index++) {
         const user = await signup();
         users.push(user);
         await makeAdmin(user.userId);
         const previous = (await authMessages(user.email)).map((m) => m.ID);
         const cookies = new Map<string, { pair: string; path: string }>();
         let csrf = '';
-        const call = async (input: string, action?: string, body?: string) => {
+        const call = async (input: string, action?: string, body?: string, signal?: AbortSignal) => {
           const url = new URL(input, origin);
           expect(url.origin).toBe(origin);
           const cookie = [...cookies.values()]
@@ -164,6 +164,7 @@ for (const runtime of ['bun', 'node'] as const)
           const response = await local(`${url.pathname}${url.search}`, {
             method: action ? 'POST' : 'GET',
             body,
+            signal,
             headers: {
               cookie,
               ...(action
@@ -210,9 +211,10 @@ for (const runtime of ['bun', 'node'] as const)
         await verified.body?.cancel();
         expect(callback.status).toBe(303);
         await callback.body?.cancel();
-        failCompletion = index === 2;
-        let approved: Response;
-        if (node && index === 0) {
+        failCompletion = runtime === 'bun' && index === 2;
+        const disconnect = runtime === 'node' && index === 2;
+        let approved: Response | undefined;
+        if (node && (index === 0 || disconnect)) {
           // Hold the issuer write lock, then observe the real approval blocked
           // on it before sending SIGTERM. Do not infer ordering from a sleep.
           const lock = await store.reserve();
@@ -220,7 +222,8 @@ for (const runtime of ['bun', 'node'] as const)
           try {
             await lock`select pg_advisory_lock(1952805473, 1869177955)`;
             const [owner] = await lock`select pg_backend_pid() as pid`;
-            pending = call(`${path}/approve`, 'approve');
+            const abort = new AbortController();
+            pending = call(`${path}/approve`, 'approve', undefined, abort.signal);
             void pending.catch(() => {}); // Joined below, including failure paths.
             const deadline = Date.now() + 2000;
             for (;;) {
@@ -229,6 +232,10 @@ for (const runtime of ['bun', 'node'] as const)
               if (waiter.blocked) break;
               if (Date.now() >= deadline) throw new Error('Approval did not reach issuer write barrier');
               await Bun.sleep(10);
+            }
+            if (disconnect) {
+              abort.abort();
+              await expect(pending).rejects.toThrow();
             }
             await node.restart(async () => {
               const deadline = Date.now() + 2000;
@@ -247,7 +254,7 @@ for (const runtime of ['bun', 'node'] as const)
               expect(waiter.blocked).toBe(true);
               await lock`select pg_advisory_unlock(1952805473, 1869177955)`;
             });
-            approved = await pending;
+            if (!disconnect) approved = await pending;
           } finally {
             try {
               await lock`select pg_advisory_unlock_all()`;
@@ -265,6 +272,15 @@ for (const runtime of ['bun', 'node'] as const)
         const [grant] = await db`select id,binding,state,downstream_session_id from private.mcp_grants
         where binding->>'project'=${project} and user_id=${user.userId}::uuid`;
         expect(grant).toBeDefined();
+        if (disconnect) {
+          expect(grant.state).toBe('revoked');
+          expect(await db`select 1 from private.mcp_credentials where grant_id=${grant.id}`).toHaveLength(0);
+          expect(
+            await store`select 1 from oidc.revoked_grants where id=${grant.binding.session_id}`,
+          ).toHaveLength(1);
+          continue;
+        }
+        if (!approved) throw new Error('Missing approval response');
         if (failCompletion) {
           expect(approved.status).toBe(403);
           expect(grant.state).toBe('revoked');

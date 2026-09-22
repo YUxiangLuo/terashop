@@ -72,6 +72,10 @@ export function createOidcInteractionHandler(
     return Response.json(body, { status });
   }
   async function send(res: ServerResponse, response: Response) {
+    const body = await response.text();
+    // end() may silently succeed after disconnect. Approval must instead enter
+    // its existing revocation path, and the host must await that cleanup.
+    if (res.destroyed) throw new Error('Interaction connection closed');
     res.statusCode = response.status;
     for (const [name, value] of response.headers) if (name !== 'set-cookie') res.setHeader(name, value);
     const cookies = response.headers.getSetCookie();
@@ -80,7 +84,7 @@ export function createOidcInteractionHandler(
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
-    res.end(await response.text());
+    res.end(body);
   }
 
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {

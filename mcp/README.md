@@ -234,7 +234,9 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并要求退出码 0，重新使用同一私有配置和数据库启动真实入口。先消费 B 的原刷新令牌并撤销 A 的本地授权；第一次重启后 A 仍被拒绝，B 的旧访问令牌、grant 绑定、加密凭据及店铺调用仍有效，替代刷新令牌可继续轮换且权限不变。随后重放原刷新令牌返回 invalid_grant，整组授权失效；第二次重启后先检查访问令牌仍不可用，再确认最新刷新令牌被拒绝，旧 MCP 上下文也无法调用。此测试不重启数据库，不覆盖强制崩溃、SSO Cookie 恢复或密钥轮换。
 
-在途批准退出验收复用上述 Node 场景：持有 issuer adapter 的写入 advisory lock，通过 pg_blocking_pids 确认批准已阻塞后发送 SIGTERM；观察监听器停止接收，同时数据库写入仍在等待，才释放屏障。原批准须返回 303，服务退出码须为 0，重启后用原 Cookie 和 resume 地址继续兑换授权码，验证本地 grant、加密凭据及店铺调用。测试保留客户端连接，不以固定睡眠推断并发顺序；尚未验证客户端断连、下游超时、其他登录阶段及强制崩溃下的清理或补偿。
+在途批准退出验收复用上述 Node 场景：持有 issuer adapter 的写入 advisory lock，通过 pg_blocking_pids 确认批准已阻塞后发送 SIGTERM；观察监听器停止接收，同时数据库写入仍在等待，才释放屏障。保持连接的批准须返回 303，服务退出码须为 0，重启后用原 Cookie 和 resume 地址继续兑换授权码，验证本地 grant、加密凭据及店铺调用。
+
+第三名管理员另覆盖批准等待期间主动断连再 SIGTERM：释放屏障并正常重启后，必须观察到本地 grant 已撤销、密文已删除、issuer 撤销标记已持久化。此回归曾复现断连后 grant 仍 active；响应发送现检查已销毁连接并触发现有批准失败清理，服务等待处理器完成后才关闭数据库。检查的是发送前已知断连，不保证客户端收到响应，也不覆盖发送后的断连、下游超时、其他登录阶段或强制崩溃补偿；不以固定睡眠推断并发顺序。
 
 固定服务配置已集中到 [createOidcProvider](src/oidc-provider.ts)，真实数据库联合测试及 Node PostgreSQL 交互场景现使用它。输入为 `issuer/resource/scopes/signingKey/cookieKeys/clients/introspectionClient`，另由宿主传入持久化 adapter。要求 HTTPS 根 issuer、固定 HTTPS resource、完整 ES256/P-256 私有 JWK（含 kid/alg/use，并验证公私钥匹配）、1–3 个有序 Cookie 签名密钥和独立 introspection secret；后两类值均为 32 字节的规范 base64url，不生成默认密钥。clients 项为 `id/applicationType/redirectUris`：web 仅 HTTPS，native 首版仅 HTTP 字面 loopback（127.0.0.1/::1），不支持自定义 scheme、localhost、query/fragment 回调。native 端口匹配遵循 provider 的 loopback 规则。未知字段、重复 ID/范围/密钥/回调、缺失或不匹配的密钥统一拒绝为 INVALID_OIDC_PROVIDER_CONFIGURATION，不返回配置详情。
 
@@ -292,7 +294,7 @@ bun run docs:check
 
 `createOidcTlsHandler` 包住 interaction 与 provider callback，首版仅直接 TLS、精确 Host，拒绝重复 Host、absolute-form 地址和所有 Forwarded/X-Forwarded-*；provider.proxy 必须始终为 false。无 TLS 的 HTTP 即使伪造正确 Host 也不能进入业务处理器。此函数不启动服务、不装载 TLS 证书、不管理数据库或进程退出；下面的服务入口负责装配。
 
-授权服务入口：[auth.ts](src/auth.ts) 仅支持 Node 22 LTS，拒绝 Bun 运行时，只接受一个私有配置文件的绝对路径参数；[startOidcService](src/oidc-service.ts) 先校验配置、证书域名/有效期/私钥配对、加密密钥及数据库权限，最后监听直接 HTTPS。失败统一报 OIDC_SERVICE_START_FAILED，不打印秘密或底层错误。SIGINT/SIGTERM 停止接收连接，等待处理器后关闭连接池；在途批准的正常退出已按上文验证，其他登录阶段、断连及崩溃恢复仍待验证。
+授权服务入口：[auth.ts](src/auth.ts) 仅支持 Node 22 LTS，拒绝 Bun 运行时，只接受一个私有配置文件的绝对路径参数；[startOidcService](src/oidc-service.ts) 先校验配置、证书域名/有效期/私钥配对、加密密钥及数据库权限，最后监听直接 HTTPS。失败统一报 OIDC_SERVICE_START_FAILED，不打印秘密或底层错误。SIGINT/SIGTERM 停止接收连接，等待处理器后关闭连接池；在途批准保持连接及发送前断连的正常退出已按上文验证，其他登录阶段及崩溃恢复仍待验证。
 
 配置是严格 JSON，必填字段如下（不提供默认秘密）：
 

@@ -147,7 +147,7 @@ export async function nodeOidcService(configuration: Record<string, unknown>) {
         fetch(`https://127.0.0.1:${address.port}${path}`, {
           ...init,
           redirect: 'manual',
-          signal: AbortSignal.timeout(10000),
+          signal: AbortSignal.any([AbortSignal.timeout(10000), ...(init.signal ? [init.signal] : [])]),
           tls: { ca: cert },
           headers: { ...Object.fromEntries(new Headers(init.headers)), host: '127.0.0.1:3000' },
         }),
