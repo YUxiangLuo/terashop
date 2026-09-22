@@ -598,6 +598,86 @@ for (const runtime of ['bun', 'node'] as const)
                 expect(current.revision).toBe(before.revision + 1);
               }
             }
+            if (index === 1) {
+              const initial = await toolData<Settings>(remote, 'get_admin_shop_settings');
+              const lostName = `Disconnected ${crypto.randomUUID()}`;
+              const write = { expected_revision: initial.revision, changes: { name: lostName } };
+              const abort = new AbortController();
+              try {
+                const outcome = await heldTransactionRace(
+                  db,
+                  (tx) => tx`lock table private.shop_settings in share mode`,
+                  () =>
+                    fetch(resource, {
+                      method: 'POST',
+                      tls: { ca: node!.tls.cert },
+                      signal: AbortSignal.any([abort.signal, AbortSignal.timeout(10_000)]),
+                      headers: {
+                        authorization: `Bearer ${token}`,
+                        'content-type': 'application/json',
+                        accept: 'application/json, text/event-stream',
+                      },
+                      body: JSON.stringify({
+                        jsonrpc: '2.0',
+                        id: 10,
+                        method: 'tools/call',
+                        params: { name: 'update_shop_settings', arguments: write },
+                      }),
+                    }).then(
+                      async (response) => {
+                        await response.body?.cancel();
+                        return 'responded';
+                      },
+                      () => 'disconnected',
+                    ),
+                  async () => {
+                    // The real RPC is waiting on our table lock. Disconnect and
+                    // drain MCP before releasing it; do not assume DB rollback.
+                    abort.abort();
+                    const child = mcpProcess!;
+                    child.kill('SIGTERM');
+                    const watchdog = setTimeout(() => child.kill('SIGKILL'), 5000);
+                    try {
+                      expect(await child.exited).toBe(0);
+                    } finally {
+                      clearTimeout(watchdog);
+                    }
+                  },
+                );
+                expect(outcome).toBe('disconnected');
+                // Prove the dispatched RPC can commit after MCP has exited.
+                const deadline = Date.now() + 3000;
+                for (;;) {
+                  const [row] = await db`select name,revision from private.shop_settings where singleton`;
+                  if (row.name === lostName) {
+                    expect(row.revision).toBe(initial.revision + 1);
+                    break;
+                  }
+                  if (Date.now() >= deadline) throw new Error('In-flight shop write did not commit');
+                  await Bun.sleep(10);
+                }
+                await startMcp!();
+                const recovered = await toolData<Settings>(remote, 'get_admin_shop_settings');
+                expect(recovered).toMatchObject({
+                  name: lostName,
+                  revision: initial.revision + 1,
+                  timezone: initial.timezone,
+                  currency: initial.currency,
+                });
+                // Explicit stale-version probe, not an automatic write retry.
+                expect(
+                  (await remote.callTool({ name: 'update_shop_settings', arguments: write })).isError,
+                ).toBe(true);
+                expect(await toolData<Settings>(remote, 'get_admin_shop_settings')).toEqual(recovered);
+              } finally {
+                if (mcpProcess!.exitCode !== null) await startMcp!();
+                const current = await toolData<Settings>(remote, 'get_admin_shop_settings');
+                await toolData(remote, 'update_shop_settings', {
+                  expected_revision: current.revision,
+                  changes: { name: initial.name },
+                });
+              }
+            }
           }
         } finally {
           await remote.close();
