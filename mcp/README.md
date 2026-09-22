@@ -2,13 +2,39 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**当前为可运行的 stdio MCP，112 个显式工具（53 个只读、59 个写入）。尚未达到完整 Admin 覆盖，也不提供远程 HTTP 服务。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限。
+**已实现 stdio 和直接 HTTPS 的无状态 Streamable HTTP MCP，112 个显式工具（53 个只读、59 个写入）；远程交付验收尚未完成。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限，也不将工具数量视为完整 Admin 覆盖证明。
 
 最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。当前优先串联登录授权、逐用户凭据刷新、Streamable HTTP 和真实客户端验收；大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器只用于登录和授权，不依赖 Admin SPA 执行业务。
 
-远程授权方案已选定：独立 Node.js LTS 容器运行 `oidc-provider 9.12.2`，MCP 与安装、构建、测试工具仍使用 Bun。Supabase 保持唯一用户目录；授权服务须从真实 Supabase 登录取得 UUID，不建立第二套账号或按邮箱推断身份。采用 opaque access token 与在线 introspection；已完成受支持运行时的协议验证、MCP 校验 profile 和初版 PostgreSQL provider adapter，尚无生产授权服务或远程监听器。
+远程授权方案已实现：独立 Node 22 LTS 运行 `oidc-provider 9.12.2`，MCP 与安装、构建、测试工具使用 Bun。Supabase 保持唯一用户目录；授权服务从真实 Supabase 登录取得 UUID，不建立第二套账号或按邮箱推断身份。采用 opaque access token、在线 introspection 和 PostgreSQL provider adapter；已提供两个服务入口，但尚未完成生产部署验收。
 
-## 运行与凭据
+## 当前状态与首版交付清单
+
+首版范围为**单店、单实例、预注册客户端的远程 Admin MCP**。仅直接 TLS，不支持反向代理、动态客户端注册或多节点无缝接管；授权实例接管前须确认旧进程停止。浏览器用于用户登录／同意，不用于 Agent 操作 Admin SPA。
+
+| 能力 | 已实现与证据 | 尚未完成的验收 |
+| --- | --- | --- |
+| 业务工具 | [工具测试](../tests/unit/mcp.test.ts) 断言 112 个工具及只读 53 个；业务合同见下表 | 工具数不代表全部新业务；真实 PayPal Sandbox 另需外部配置 |
+| 授权与用户隔离 | [授权入口](src/auth.ts)、[宿主](src/oidc-service.ts)、逐用户加密凭据、在线撤销／scope 检查、刷新准入；[联合测试](../tests/mcp-oidc-interaction.test.ts) 使用真实本地 Auth／SMTP／数据库 | 用户可操作的登录／同意页、目标客户端兼容性 |
+| 持久化与恢复 | [批准日志](src/oidc-journal.ts)、[启动恢复](src/oidc-recovery.ts)、单实例锁；已有正常退出、强杀和迟到凭据写入回归 | 其他批准阶段故障、密钥轮换与备份恢复演练；不承诺网络分区接管 |
+| MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新 | 完整 HTTPS MCP＋真实授权服务＋Supabase 联合链路 |
+| 网络故障边界 | [TLS 测试](../tests/unit/mcp-http-service.test.ts) 覆盖慢请求体、introspection 超时／断连、排空及 CLI SIGTERM | 凭据／刷新／业务调用阶段阻塞与断连、握手和请求头慢连接防护、并发与资源预算 |
+
+真实 Supabase 联合测试的 MCP 客户端通过 `fetch` 直接转发到 handler；真实 MCP TCP／TLS 测试的授权后端则是本地夹具。**两类测试分别通过，不等于完整远程链路通过。** 下方实验记录保存各自的范围，不作为生产就绪证明。
+
+按顺序完成以下批次后，才将首版标为可交付；每批更新本清单并记录实际运行的验证，不以历史测试结果代替当前执行：
+
+- [x] 统一当前状态、历史记录及首版边界；保留代码／测试证据入口。
+- [ ] 本地端到端：真实 HTTPS MCP＋Node 授权服务＋Supabase，验证授权后工具读写、双用户隔离、降权／撤销、刷新竞争、断连与结果未知；不自动重放写入。
+- [ ] 用户授权体验：展示真实 client/resource/scopes 与离线刷新，覆盖登录、批准、拒绝、取消、到期及失败，使用真实浏览器验收 Cookie／CSRF 与页面。
+- [ ] 运行防护与运维：限流和并发预算、慢连接防护、日志脱敏核对、健康／退出、密钥轮换、敏感 payload 保留、备份恢复、部署与升级手册。已有永久撤销标记不可随意清理。
+- [ ] 公网与目标客户端：域名及可信证书就绪后，验证预注册客户端的完整授权、调用、刷新、重连和撤销；部署／共享数据库升级须另行授权。生产启用支付能力前完成对应 Sandbox 与渠道验收。
+
+前四批可使用回环服务和客户端显式信任的临时证书推进，不关闭证书验证，不要求现在提供公网域名。公网验收未完成前，不宣称已可供远程用户使用。
+
+独立扩展不阻塞上述首版：大文件媒体、冻结快照导出、Metafield 定义删除和 Storefront 设置消费端。代客下单、通用 Order Edit、客户合并、复杂税制、多币种等仍需单独业务设计。库存调拨保持即时原子调拨，不增加在途／收货追踪。
+
+## stdio 运行与凭据
 
 在仓库根目录执行 `bun install --frozen-lockfile`。通过 MCP 客户端的安全环境配置或凭据管理器提供以下环境变量，再运行 `bun run mcp:stdio`：
 
@@ -19,7 +45,7 @@
 | `TERA_ADMIN_ACCESS_TOKEN` | 非匿名管理员用户的有效 Supabase access token |
 | `TERA_MCP_ALLOW_WRITES` | 只有精确值 `true` 才注册写工具；省略时仅注册只读工具 |
 
-首次管理员初始化沿用 [Admin 文档](../admin/README.md)。通过现有 Supabase Auth 登录取得短期会话；本阶段不提供登录工具，不接受密码/令牌作为 tool 参数，不保存或自动刷新 refresh token。令牌到期后在宿主安全配置中替换，并重启 MCP。不要把令牌放进对话、版本库、URL 或启动参数。
+首次管理员初始化沿用 [Admin 文档](../admin/README.md)。通过现有 Supabase Auth 登录取得短期会话；stdio 不提供登录工具，不接受密码/令牌作为 tool 参数，不保存或自动刷新 refresh token。stdio 令牌到期后在宿主安全配置中替换，并重启 MCP；远程服务使用下文的逐用户凭据流程。不要把令牌放进对话、版本库、URL 或启动参数。
 
 通用 MCP 客户端配置示意（占位符需由宿主安全配置替换，不会自动展开）：
 
@@ -138,15 +164,17 @@
 | 6 | 身份、店铺设置与运营 | 账户身份查询及既有角色/匿名化流程、单店名称/展示时区版本化设置、受限账本收退款汇总、下单区间运营概览、订单 JSON 分页导出、全店未对账资金及分组件区间运维概览已接入；待补设置消费端、快照文件导出。不让 MCP 写 Supabase 项目密钥/Auth 配置，不提供基础设施健康保证 |
 | 7 | HTTP 与生产接入 | Streamable HTTP、受保护资源元数据、OAuth issuer/audience/resource/scope 校验、用户授权撤销、限流/请求预算/日志脱敏、部署测试与客户端兼容验收 |
 
-HTTP 必须先解决 **MCP 专用访问令牌 → 当前管理员数据库身份** 的受信映射/令牌交换。普通 Supabase session JWT 不能直接作为 MCP HTTP 的 bearer token；也不能先验证外部 OAuth，再用无用户约束的 service role 代执行。当前没有实现或启用此链路，不开放占位 HTTP endpoint。
+HTTP 已实现 **MCP 专用访问令牌 → 当前管理员数据库身份** 的受信映射。普通 Supabase session JWT 不能直接作为 MCP HTTP 的 bearer token；也不能先验证外部 OAuth，再用无用户约束的 service role 代执行。网络入口逐请求读取对应用户凭据，店铺业务仍由用户 JWT 执行。
 
-远程接入设计已记录在 [ADR-027](../docs/architecture-decisions.md#adr-027远程-mcp-使用独立授权与逐用户下游身份)：选择独立 MCP 授权记录与逐用户下游会话，固定单项目 resource，在线检查撤销，逐工具执行 scope 校验；只读权限也包含管理端敏感信息。read/write 与资金、访问控制、隐私附加 scopes 分开批准。授权服务选型、凭据加密存储及显式刷新已落实；真实登录/同意的完整关联、生产授权服务和 HTTP transport **尚未实现**，不将局部验证计入生产可用性。
+远程接入设计见 [ADR-027](../docs/architecture-decisions.md#adr-027远程-mcp-使用独立授权与逐用户下游身份)：独立 MCP 授权记录与逐用户下游会话，固定单项目 resource，在线检查撤销，逐工具执行 scope 校验；只读权限也包含管理端敏感信息。read/write 与资金、访问控制、隐私附加 scopes 分开批准。真实登录与 JSON 同意协议、凭据加密存储／刷新、授权服务及 HTTP transport 已接入；用户授权页面与完整远程交付仍按上方清单验收。
 
 以下能力是**未实现的新业务**，不是可以靠 MCP 包装补齐的功能：后台代客下单、通用 Order Edit、客户合并/账户重关联、换货补发、退货面单、复杂税制、多币种。其中后台代客下单与 [ADR-023](../docs/architecture-decisions.md#adr-023游客复用匿名-auth-与线上交易权限) 的仅客户线上下单决策冲突，不能作为本轮开发默认项。完整覆盖现有 Admin 管理域不意味着这些新业务已经实现；新增时需先确认业务范围，再设计数据库不变量与审核流程。
 
 Worker 的 claim/complete、Inbox ingest/retry、原始渠道资金处理始终属于受信服务，不进入管理员 MCP。管理员 Outbox 重投已经可用，不扩张为 Worker 身份模拟。
 
-### 2026-09-21 覆盖核对与下一阶段
+### 历史覆盖核对：2026-09-21
+
+本节保留业务覆盖核对的来源和当时验证结果；其中阶段性计划不再作为当前待办，当前开发顺序以上方首版交付清单为准。
 
 核对来源是六个 SQL 基线中的 public 函数、执行授权、实际函数体、Edge/Storage 边界及 MCP 注册，不以 SPA 页面或函数名作为唯一判断。P0 复核时共 104 个工具（51 只读、53 写入），均有显式输出合同；其中 101 个直接对应 SQL RPC，另 3 个是媒体上传、媒体核验与 PayPal 退款适配。149 个 public 函数中未直接注册的 48 个按下表区分客户/公开接口、服务端入口、内部设施和刻意排除或替代的旧接口，未发现管理员专用业务 RPC 漏接。**这不等于完整 Admin 或生产就绪**：底表能力、尚无受控命令的业务和远程认证仍有缺口；工具数量不是业务完成率。
 
@@ -172,7 +200,9 @@ P0 验证基于媒体发现提交 `e4a409d` 的代码：`bun run test` 重建可
 
 此前 715 项通过是输出合同收尾时的历史记录，不是固定测试数量。未重建、积累多轮测试数据的库曾触发客户分页测试的第一页假设；本次干净库全量通过不代表该历史测试隔离问题已修复，也不证明生产数据规模下的性能或稳定性。
 
-## 验证
+## 分层验证与实现沿革
+
+以下按实现顺序保留原语、实验和集成场景。段落中的“当前／尚未／下一步”若描述早期实验，均限定于该实验阶段，不代表现有服务缺少后续已接入的能力；当前总体状态以上方交付清单为准。Keycloak 仅是历史选型实验，交付方案使用 oidc-provider。每项测试的夹具、运行时和未覆盖范围仍须分别看待。
 
 独立服务实验：`bun scripts/mcp-keycloak-compat.ts`（需要 Docker，首次下载固定版本及 digest 的 Keycloak 26.7.0 镜像）。只创建临时容器/realm，监听随机回环端口，结束删除容器和临时配置；不操作现有 Supabase。已验证 S256、Code/Refresh resource 绑定、scope 不升级、轮换重放、撤销与在线 introspection，以及两用户/两客户端的顺序隔离场景：同一用户跨客户端共享 sid，但权限分离，针对一组的撤销不影响另外三组。resource-indicators 仍是实验性 feature，sid 不等于本项目 grant_id；真实同意、并发、持久化及双身份关联尚未实现，不直接用于生产。脚本不包含在默认单测中。
 
@@ -260,7 +290,7 @@ Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并
 
 provider 禁用开发登录、userinfo 和动态注册，忽略数据库残留的非预注册 Client；只有指定 resource 客户端可 introspect 目标资源的 AccessToken，业务客户端只能撤销自己的 token。固定 Code/S256、opaque access token、刷新轮换与 grant 撤销；期限为 code 60 秒、access/ID token/interaction 300 秒、SSO session 8 小时、grant/refresh 30 天。新实例重复加载相同配置的 JWKS 已验证稳定，但这不是完整进程重启或密钥轮换验收。构造器不读取环境、不启动监听、不配置代理；**provider 的 endpoint URL 仍依赖请求 authority，服务入口必须先验证 Host/TLS 和受信代理，不能只设置 issuer 就直接开放 callback**。服务入口、秘密装载和进程生命周期仍是下一步。
 
-远程版本后续按以下依赖顺序推进：
+## 远程 MCP HTTP 入口与验证边界
 
 Streamable HTTP 第一层已实现：[createAdminHttpHandler](src/http.ts) 使用 SDK 2.0.0 WebStandard transport，每个 POST 独立 server、JSON 响应、无 MCP session／GET SSE／DELETE；逐请求在线授权并读取该用户的加密凭据，工具执行仍复查权限。凭据剩余不超过 30 秒时调用已有 claim-refresh 协议一次，再重新读取；回执不明返回 503，不重放刷新或业务请求。只接收 Authorization Bearer，不接受 URL token，拒绝错误 Host／跨源 Origin，流式读取请求体并限制 1 MiB，响应 no-store。提供 resource 路径对应的 RFC 9728 元数据和 401 resource_metadata challenge。写工具仍须宿主显式 allowWrites，且受 token／grant／部署 scopes 交集限制。
 
@@ -274,11 +304,9 @@ Bun 入口已提供：[remote.ts](src/remote.ts)／[startAdminHttpService](src/h
 
 授权检查阻塞回归在本地 introspection 后端收到请求后保持响应未完成。保持客户端连接时，约 10 秒触发授权请求自身的截止时间，MCP 返回 no-store 的 401 unauthorized（未验证身份，不进入后续操作），后端观察到连接取消；客户端主动断连时，取消传递到后端并在 3 秒测试上限内完成服务关闭，不等待 10 秒截止时间。两种分支均只发起一次 introspection，不读取 grant／凭据，未释放后端响应屏障也能完成关闭。此处只证明授权检查阶段的连接取消，不证明数据库写入回滚；凭据刷新和业务调用阶段的阻塞仍需分别验收。
 
-1. 固定 Node 授权服务配置与入口：预注册客户端、签名/Cookie/加密密钥、最小数据库权限、TTL、受信 TLS 代理及启动校验；把真实 Supabase 联合场景带入 Node，并验证服务重启与密钥恢复。
-2. 用户登录/同意页面：展示真实 client/resource/scopes 和离线刷新，同源 Cookie/CSRF、拒绝/到期/失败状态；只用于用户授权，不用于 Agent 操作 Admin SPA。补真实浏览器验收。
-3. 跨存储失败恢复：持久化批准进度或等价的可验证补偿，覆盖在途退出、创建回执未知、未完成交互与孤立密文清理；明确单实例限制及敏感 payload 保留期。
-4. Bun Streamable HTTP 与 RFC 9728 元数据：逐请求在线校验、逐用户凭据读取/刷新、会话隔离与 scope 变化，不复用进程级管理员 JWT，不重放结果不明的写操作。
-5. 真实远程客户端和部署验收：预注册兼容性、断线/并发/撤销/降级、限流、日志脱敏、容器健康/退出、备份和运维手册。完成这些才能称远程 MCP 可交付；部署本身另需明确授权。
+后续任务统一维护在上方首版交付清单，不把已完成的服务入口、批准日志／启动恢复和 HTTP transport 重列为未实现功能。
+
+## 验证命令
 
 ```bash
 bun run typecheck
@@ -324,7 +352,7 @@ bun run docs:check
 
 `createOidcTlsHandler` 包住 interaction 与 provider callback，首版仅直接 TLS、精确 Host，拒绝重复 Host、absolute-form 地址和所有 Forwarded/X-Forwarded-*；provider.proxy 必须始终为 false。无 TLS 的 HTTP 即使伪造正确 Host 也不能进入业务处理器。此函数不启动服务、不装载 TLS 证书、不管理数据库或进程退出；下面的服务入口负责装配。
 
-授权服务入口：[auth.ts](src/auth.ts) 仅支持 Node 22 LTS，拒绝 Bun 运行时，只接受一个私有配置文件的绝对路径参数；[startOidcService](src/oidc-service.ts) 先校验配置、证书域名/有效期/私钥配对、加密密钥及数据库权限，最后监听直接 HTTPS。失败统一报 OIDC_SERVICE_START_FAILED，不打印秘密或底层错误。SIGINT/SIGTERM 停止接收连接，等待处理器后关闭连接池；在途批准保持连接及发送前断连的正常退出已按上文验证，其他登录阶段及崩溃恢复仍待验证。
+授权服务入口：[auth.ts](src/auth.ts) 仅支持 Node 22 LTS，拒绝 Bun 运行时，只接受一个私有配置文件的绝对路径参数；[startOidcService](src/oidc-service.ts) 校验配置、证书域名/有效期/私钥配对、加密密钥及数据库权限，取得单实例锁并完成 pending 批准恢复后才监听直接 HTTPS。失败统一报 OIDC_SERVICE_START_FAILED，不打印秘密或底层错误。SIGINT/SIGTERM 停止接收连接，等待处理器后关闭连接池；正常退出、批准断连及部分强杀恢复场景已按上文验证，不涵盖所有登录阶段或网络分区接管。
 
 配置是严格 JSON，必填字段如下（不提供默认秘密）：
 
@@ -336,4 +364,4 @@ bun run docs:check
 
 使用 Bun 将入口编译为 Node ESM，外置 oidc-provider 与 postgres，并随产物提供锁定版本依赖：`bun build mcp/src/auth.ts --target=node --format=esm --external=oidc-provider --external=postgres --outfile=dist/auth.mjs`。在受支持 Node 容器中执行 `node dist/auth.mjs /run/private/issuer.json`；这是入口用法，不是生产部署清单。
 
-`bun scripts/mcp-oidc-compat.ts --with-storage` 现另用一次性 OpenSSL 证书和私有 tmpfs 配置验证真实 Node TLS discovery/JWKS、错误 Host、缺失加密密钥、只读角色、证书域名不匹配、端口冲突清理、重复 close，以及真实 CLI 同配置重启/JWKS 稳定和 SIGTERM 退出。Node 与临时 PostgreSQL 共享隔离网络命名空间，不发布端口。此服务烟测未调用真实下游账号，不证明旧 token/在途交互重启恢复；真实 Node 下游验收使用上文 test:current 命令。后续仍需登录/同意 UI、在途关闭及崩溃补偿、Streamable HTTP/RFC9728 和真实远程客户端验收。
+`bun scripts/mcp-oidc-compat.ts --with-storage` 现另用一次性 OpenSSL 证书和私有 tmpfs 配置验证真实 Node TLS discovery/JWKS、错误 Host、缺失加密密钥、只读角色、证书域名不匹配、端口冲突清理、重复 close，以及真实 CLI 同配置重启/JWKS 稳定和 SIGTERM 退出。Node 与临时 PostgreSQL 共享隔离网络命名空间，不发布端口。此服务烟测未调用真实下游账号，不证明旧 token/在途交互重启恢复；真实 Node 下游验收使用上文 test:current 命令。登录/同意 UI、完整 HTTPS 联合链路、运行防护和目标客户端仍按首版交付清单验收。
