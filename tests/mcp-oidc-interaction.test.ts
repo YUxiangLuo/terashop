@@ -16,7 +16,7 @@ import { GrantAuthorizer } from '../mcp/src/authorization';
 import { AdminBackend } from '../mcp/src/backend';
 import { API, ANON_KEY, SERVICE_KEY, api, checked, signup, makeAdmin } from './helpers';
 import { authMail, authMessages } from './support/mail';
-import { testDatabase } from './database-concurrency';
+import { heldTransactionRace, testDatabase } from './database-concurrency';
 import { mcpSession, toolData } from './support/mcp';
 import { nodeOidcService } from './support/oidc-node-service';
 
@@ -660,6 +660,57 @@ for (const runtime of ['bun', 'node'] as const)
         const allowed = await networkCall(tokens[1]);
         expect(allowed.status).toBe(200);
         expect(allowed.body.result.structuredContent.data.currency).toBe('USD');
+        // Advance only encrypted expiry metadata to exercise the near-expiry
+        // branch without waiting an hour. Auth tokens and rotation stay real.
+        const original = await authorizer.readCredentials(tokens[1], cipher);
+        const [binding] = await db`select downstream_session_id from private.mcp_grants
+          where id=${original.grantId}::uuid`;
+        const [issuedBefore] = await db`select count(*)::integer as count from auth.refresh_tokens
+          where session_id=${binding.downstream_session_id}::uuid`;
+        await authorizer.writeCredentials(tokens[1], cipher, {
+          expectedRevision: original.revision,
+          credentials: { ...original.credentials!, expiresAt: Math.floor(Date.now() / 1000) + 20 },
+          anonKey: ANON_KEY,
+        });
+        const refreshed = await heldTransactionRace(
+          db,
+          async (tx) => {
+            await tx`lock table auth.refresh_tokens in share mode`;
+            const rows = await tx`select id from auth.refresh_tokens
+              where token=${original.credentials!.refreshToken}`;
+            expect(rows).toHaveLength(1);
+          },
+          () => networkCall(tokens[1]),
+          async () => {
+            // The first real Auth refresh has reached the held table. A second
+            // HTTPS request must fail closed while its durable claim is pending.
+            const [pending] = await db`select revision,refresh_id from private.mcp_credentials
+              where grant_id=${original.grantId}::uuid`;
+            expect(Number(pending.revision)).toBe(2);
+            expect(pending.refresh_id).not.toBeNull();
+            const competing = await networkCall(tokens[1]);
+            expect(competing).toEqual({ status: 503, body: { error: 'authorization_unavailable' } });
+            const [stillPending] = await db`select revision,refresh_id from private.mcp_credentials
+              where grant_id=${original.grantId}::uuid`;
+            expect(stillPending).toEqual(pending);
+          },
+        );
+        expect(refreshed.status).toBe(200);
+        expect(refreshed.body.result.structuredContent.data.currency).toBe('USD');
+        const renewed = await authorizer.readCredentials(tokens[1], cipher);
+        expect(renewed.revision).toBe(3);
+        expect(renewed.expectedUserId).toBe(users[1].userId);
+        expect(renewed.credentials!.refreshToken).not.toBe(original.credentials!.refreshToken);
+        expect(renewed.credentials!.expiresAt).toBeGreaterThan(Math.floor(Date.now() / 1000) + 30);
+        const [settled] = await db`select c.refresh_id,g.downstream_session_id
+          from private.mcp_credentials c join private.mcp_grants g on g.id=c.grant_id
+          where g.id=${original.grantId}::uuid`;
+        expect(settled).toEqual({ refresh_id: null, downstream_session_id: binding.downstream_session_id });
+        const [issuedAfter] = await db`select count(*)::integer as count from auth.refresh_tokens
+          where session_id=${binding.downstream_session_id}::uuid`;
+        expect(issuedAfter.count).toBe(issuedBefore.count + 1);
+        expect((await networkCall(tokens[1])).status).toBe(200);
+        expect((await authorizer.readCredentials(tokens[1], cipher)).revision).toBe(3);
         const refresh = async (token: string) => {
           const response = await local('/token', {
             method: 'POST',
@@ -684,7 +735,7 @@ for (const runtime of ['bun', 'node'] as const)
         expect((await authorizer.authorize(tokens[1])).expectedUserId).toBe(users[1].userId);
         const restored = await authorizer.readCredentials(rotated.data.access_token, cipher);
         expect(restored.expectedUserId).toBe(users[1].userId);
-        expect(restored.revision).toBe(1);
+        expect(restored.revision).toBe(3);
         expect(restored.credentials).not.toBeNull();
         expect((await authorizer.authorize(rotated.data.access_token)).grantId).toBe(before.grantId);
         expect(
