@@ -3246,6 +3246,7 @@ CREATE FUNCTION public.mcp_grant_command(p_action text, p_binding jsonb,
 declare
   v_grant private.mcp_grants;
   v_scopes text[];
+  v_revoked boolean;
   v_keys text[] := array['issuer','subject','client_id','resource','project','session_id'];
 begin
   if auth.role() is distinct from 'service_role' then
@@ -3274,18 +3275,35 @@ begin
       raise exception using errcode='42501', message='admin identity required';
     end if;
     select coalesce(array_agg(distinct s order by s),'{}'::text[]) into v_scopes from unnest(p_scopes) s;
-    insert into private.mcp_grants(binding,user_id,scopes) values (p_binding,p_user_id,v_scopes)
-      on conflict (binding) do nothing;
   elsif p_user_id is not null or p_scopes is not null
       or (p_action in ('resolve','revoke_binding') and p_grant_id is not null)
       or (p_action='revoke' and p_grant_id is null) then
     raise exception using errcode='22023', message='invalid grant lookup';
   end if;
 
+  if p_action in ('create','revoke_binding') then
+    insert into private.mcp_grant_fences(binding) values (p_binding) on conflict do nothing;
+    select revoked into v_revoked from private.mcp_grant_fences where binding=p_binding for update;
+    -- Unique insertion and row locking reject obsolete RR snapshots as well.
+    if not found then raise exception using errcode='40001', message='retry grant fence'; end if;
+    if p_action='create' then
+      if v_revoked then
+        raise exception using errcode='PT409', message='grant binding cannot be reused or changed';
+      end if;
+      insert into private.mcp_grants(binding,user_id,scopes) values (p_binding,p_user_id,v_scopes)
+        on conflict (binding) do nothing;
+    else
+      update private.mcp_grant_fences set revoked=true where binding=p_binding;
+    end if;
+  end if;
+
   -- Lock even resolution: a stale RR snapshot must fail rather than authorize
   -- against a row revoked after that snapshot. Admission is not business rollback.
   select * into v_grant from private.mcp_grants where binding=p_binding for update;
   if not found then
+    if p_action='revoke_binding' then
+      return jsonb_build_object('id',null,'user_id',null,'scopes','[]'::jsonb,'state','revoked','version',2);
+    end if;
     if p_action='create' then raise exception using errcode='40001', message='retry grant creation'; end if;
     raise exception using errcode='PT404', message='grant not found';
   end if;
@@ -3293,7 +3311,7 @@ begin
     raise exception using errcode='PT409', message='grant binding cannot be reused or changed';
   elsif p_action in ('revoke','revoke_binding') then
     -- Recovery can lose the create receipt; the journal retains the full binding.
-    -- Missing rows still return PT404, never proof that a concurrent create cannot commit.
+    -- The fence above prevents a late create even when no grant existed.
     if p_action='revoke' and v_grant.id<>p_grant_id then
       raise exception using errcode='PT404', message='grant not found';
     end if;

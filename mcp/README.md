@@ -248,6 +248,8 @@ Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并
 
 这不是跨数据库写入的隔离保证：网络分区的断连检测可能滞后，已进入处理器的下游 HTTP 写入也不会因 advisory lock 丢失而自动取消。不能据此断言新旧实例的在途写入绝不重叠，或安全地自动撤销全部 pending 日志；自动恢复仍未启用。部署必须直连支持 session 锁的数据库，不支持事务池代理，并为专用连接预留一个额外连接配额。
 
+下游恢复撤销已增加永久 binding fence：`revoke_binding` 与 create 使用同一数据库行锁，即使 grant 尚未创建也封禁该完整绑定。并发在途 create 先提交则恢复随后撤销，恢复先提交则迟到 create 被拒绝；旧 RR 快照不能绕过标记。缺失 grant 的成功回执使用 null 身份，批准宿主仅在未知 grant ID 时接受它；404、超时或错误仍不能证明清理完成。真实 PostgreSQL 测试覆盖双向锁竞争和 RC/RR 快照。该能力不取消已获准的业务调用，也未自动启用日志扫描恢复。已有部署须停写排空旧函数调用后，审核添加私有 fence 表并替换函数，不能混用旧创建协议；本轮仅更新本地一次性测试库。
+
 固定服务配置已集中到 [createOidcProvider](src/oidc-provider.ts)，真实数据库联合测试及 Node PostgreSQL 交互场景现使用它。输入为 `issuer/resource/scopes/signingKey/cookieKeys/clients/introspectionClient`，另由宿主传入持久化 adapter。要求 HTTPS 根 issuer、固定 HTTPS resource、完整 ES256/P-256 私有 JWK（含 kid/alg/use，并验证公私钥匹配）、1–3 个有序 Cookie 签名密钥和独立 introspection secret；后两类值均为 32 字节的规范 base64url，不生成默认密钥。clients 项为 `id/applicationType/redirectUris`：web 仅 HTTPS，native 首版仅 HTTP 字面 loopback（127.0.0.1/::1），不支持自定义 scheme、localhost、query/fragment 回调。native 端口匹配遵循 provider 的 loopback 规则。未知字段、重复 ID/范围/密钥/回调、缺失或不匹配的密钥统一拒绝为 INVALID_OIDC_PROVIDER_CONFIGURATION，不返回配置详情。
 
 provider 禁用开发登录、userinfo 和动态注册，忽略数据库残留的非预注册 Client；只有指定 resource 客户端可 introspect 目标资源的 AccessToken，业务客户端只能撤销自己的 token。固定 Code/S256、opaque access token、刷新轮换与 grant 撤销；期限为 code 60 秒、access/ID token/interaction 300 秒、SSO session 8 小时、grant/refresh 30 天。新实例重复加载相同配置的 JWKS 已验证稳定，但这不是完整进程重启或密钥轮换验收。构造器不读取环境、不启动监听、不配置代理；**provider 的 endpoint URL 仍依赖请求 authority，服务入口必须先验证 Host/TLS 和受信代理，不能只设置 issuer 就直接开放 callback**。服务入口、秘密装载和进程生命周期仍是下一步。

@@ -69,6 +69,15 @@ CREATE TABLE private.mcp_grants (
 ALTER TABLE private.mcp_grants ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.mcp_grants FROM PUBLIC, anon, authenticated, service_role;
 
+-- Creation/recovery rendezvous, including bindings whose grant never committed.
+-- Retain forever: deleting a revoked fence would permit a late create.
+CREATE TABLE private.mcp_grant_fences (
+  binding jsonb PRIMARY KEY CHECK (jsonb_typeof(binding)='object' AND octet_length(binding::text)<=1800),
+  revoked boolean NOT NULL DEFAULT false
+);
+ALTER TABLE private.mcp_grant_fences ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON private.mcp_grant_fences FROM PUBLIC, anon, authenticated, service_role;
+
 -- Ciphertext only; keys live outside PostgreSQL. Grant revocation erases this
 -- payload while retaining the immutable authorization tombstone.
 CREATE TABLE private.mcp_credentials (

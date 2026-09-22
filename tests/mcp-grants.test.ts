@@ -21,8 +21,10 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   try {
-    for (const binding of bindings)
+    for (const binding of bindings) {
       await db`delete from private.mcp_grants where binding=${JSON.stringify(binding)}::text::jsonb`;
+      await db`delete from private.mcp_grant_fences where binding=${JSON.stringify(binding)}::text::jsonb`;
+    }
   } finally {
     await db.close();
   }
@@ -139,7 +141,14 @@ test('recovery revokes by exact binding without a create receipt, even after dem
     expect((await call('revoke_binding', identity, extra)).data).toMatchObject({ code: '22023' });
   for (const key of Object.keys(identity)) {
     const changed = { ...identity, [key]: `${identity[key as keyof typeof identity]}-recovery` };
-    expect((await call('revoke_binding', changed)).data).toMatchObject({ code: 'PT404' });
+    bindings.push(changed);
+    expect((await call('revoke_binding', changed)).data).toEqual({
+      id: null,
+      user_id: null,
+      scopes: [],
+      state: 'revoked',
+      version: 2,
+    });
   }
   // A real stored ciphertext row is erased in the same transaction as revocation.
   await db`insert into private.mcp_credentials(grant_id,revision,envelope)
@@ -162,7 +171,7 @@ test('recovery revokes by exact binding without a create receipt, even after dem
   ).toMatchObject({ code: 'PT409' });
 });
 
-test('recovery serializes with existing grant writes; not-found is not a creation fence', async () => {
+test('recovery serializes with existing grant writes and uncommitted creates', async () => {
   const identity = binding();
   const grant = await create(identity);
   const revoked = await heldTransactionRace(
@@ -176,16 +185,50 @@ test('recovery serializes with existing grant writes; not-found is not a creatio
   );
   expect(revoked).toEqual({ ...grant, state: 'revoked', version: 2 });
   expect(await db`select 1 from private.mcp_credentials where grant_id=${grant.id}::uuid`).toHaveLength(0);
-  // An uncommitted INSERT is invisible to recovery. Its PT404 must remain an
-  // unresolved journal item, not a success that permits forgetting the binding.
   const late = binding();
-  await db.begin(async (sql) => {
-    await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
-    await sql`select public.mcp_grant_command('create',${JSON.stringify(late)}::text::jsonb,${admin.userId}::uuid,array['store:read'])`;
-    expect((await call('revoke_binding', late)).data).toMatchObject({ code: 'PT404' });
-  });
-  expect((await call('resolve', late)).data).toMatchObject({ state: 'active' });
-  expect((await call('revoke_binding', late)).data).toMatchObject({ state: 'revoked', version: 2 });
+  const recovered = await heldTransactionRace(
+    db,
+    async (sql) => {
+      await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+      await sql`select public.mcp_grant_command('create',${JSON.stringify(late)}::text::jsonb,${admin.userId}::uuid,array['store:read'])`;
+    },
+    () => checked<Grant>(call('revoke_binding', late)),
+  );
+  expect(recovered).toMatchObject({ user_id: admin.userId, state: 'revoked', version: 2 });
+  expect((await call('resolve', late)).data).toMatchObject({ code: '42501' });
+});
+
+test('recovery fences absent bindings against late creation and stale snapshots', async () => {
+  for (const isolation of ['read committed', 'repeatable read'] as const) {
+    const identity = binding();
+    const stale = await staleAfterCommit(
+      db,
+      async (sql) => {
+        await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+        return sql`select public.mcp_grant_command('create',${JSON.stringify(identity)}::text::jsonb,${admin.userId}::uuid,array['store:read'])`;
+      },
+      async () => {
+        const receipt = { id: null, user_id: null, scopes: [], state: 'revoked', version: 2 };
+        expect((await call('revoke_binding', identity)).data).toEqual(receipt);
+        expect((await call('revoke_binding', identity)).data).toEqual(receipt);
+      },
+      isolation,
+    );
+    expect(stale.error).toMatchObject({ errno: isolation === 'repeatable read' ? '40001' : 'PT409' });
+    expect(
+      await db`select 1 from private.mcp_grants where binding=${JSON.stringify(identity)}::text::jsonb`,
+    ).toHaveLength(0);
+  }
+  const identity = binding();
+  const late = await heldTransactionRace(
+    db,
+    async (sql) => {
+      await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+      await sql`select public.mcp_grant_command('revoke_binding',${JSON.stringify(identity)}::text::jsonb)`;
+    },
+    () => call('create', identity, { p_user_id: admin.userId, p_scopes: ['store:read'] }),
+  );
+  expect(late.data).toMatchObject({ code: 'PT409' });
 });
 
 test('every identity dimension isolates grants and role removal denies resolution but not revocation', async () => {

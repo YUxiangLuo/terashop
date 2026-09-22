@@ -11,6 +11,7 @@ async function fixture(
     | 'session'
     | 'create'
     | 'create-missing'
+    | 'create-fenced'
     | 'write'
     | 'revoke'
     | 'resolve'
@@ -81,12 +82,15 @@ async function fixture(
     if (name === 'mcp_grant_command') {
       if (body.p_action === 'create') {
         binding = body.p_binding;
-        if (fail === 'create' || fail === 'create-missing') throw new Error('lost secret creation response');
+        if (fail === 'create' || fail === 'create-missing' || fail === 'create-fenced')
+          throw new Error('lost secret creation response');
       }
       if (body.p_action === 'revoke_binding') {
         expect(body.p_grant_id).toBeUndefined();
         expect(body.p_binding).toEqual(binding);
         if (fail === 'create-missing') return new Response(null, { status: 404 });
+        if (fail === 'create-fenced')
+          return Response.json({ id: null, user_id: null, scopes: [], state: 'revoked', version: 2 });
       }
       if (body.p_action === 'revoke' || body.p_action === 'revoke_binding') {
         if (fail === 'revoke' || fail === 'completion-revoke') throw new Error('lost secret revoke response');
@@ -165,7 +169,7 @@ test('changed admin or same-user different session is rejected before any grant 
 });
 
 test('lost receipts never retry; known grants are revoked and unknown cleanup is explicit', async () => {
-  for (const fail of ['create', 'create-missing', 'write', 'revoke', 'resolve'] as const) {
+  for (const fail of ['create', 'create-missing', 'create-fenced', 'write', 'revoke', 'resolve'] as const) {
     const f = await fixture(fail);
     await expect(f.approval.approve(f.identity)).rejects.toThrow(
       fail === 'create-missing' || fail === 'revoke'
@@ -175,7 +179,7 @@ test('lost receipts never retry; known grants are revoked and unknown cleanup is
     expect(await f.provider.Grant.find(f.state().binding!.session_id)).toBeUndefined();
     expect(f.calls.filter((x) => x === 'mcp_grant_command:create')).toHaveLength(1);
     expect(f.calls.filter((x) => x === 'mcp_credential_command:write').length).toBe(
-      fail === 'create' || fail === 'create-missing' ? 0 : 1,
+      fail === 'create' || fail === 'create-missing' || fail === 'create-fenced' ? 0 : 1,
     );
     if (fail === 'create' || fail === 'write' || fail === 'resolve')
       expect(f.state()).toMatchObject({ revoked: true, stored: undefined });

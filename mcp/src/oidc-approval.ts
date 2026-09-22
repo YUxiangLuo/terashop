@@ -97,10 +97,17 @@ export function createOidcApproval(
               p_binding: binding,
               ...(grantId ? { p_grant_id: grantId } : {}),
             });
+            const fencedAbsent =
+              !grantId &&
+              revoked.id === null &&
+              revoked.user_id === null &&
+              Array.isArray(revoked.scopes) &&
+              revoked.scopes.length === 0;
             if (
-              !z.uuid().safeParse(revoked.id).success ||
-              (grantId && revoked.id !== grantId) ||
-              revoked.user_id !== input.userId ||
+              (!fencedAbsent &&
+                (!z.uuid().safeParse(revoked.id).success ||
+                  (grantId && revoked.id !== grantId) ||
+                  revoked.user_id !== input.userId)) ||
               revoked.state !== 'revoked' ||
               revoked.version !== 2
             )

@@ -862,11 +862,11 @@ ready 只代表时间和预算条件，不检查行锁、Worker、网络或渠�
 | `create` | 必须传当前非匿名管理员的 Supabase Auth UUID `p_user_id` 和非 null 的 `p_scopes` 数组，不传 grant ID；scope 仅接受五个 store:* 权限，最多 5 项，排序去重后保存。ID 由数据库生成；相同 binding、用户与批准权限的重放返回原记录，不修改身份或权限 |
 | `resolve` | 只传 binding；返回 active 且绑定用户当前仍为非匿名管理员的记录。每次锁定记录读取，不使用应用内缓存作为撤销依据 |
 | `revoke` | 必须同时传完整 binding 与 `p_grant_id`，不传用户/scopes；active → revoked，version 1 → 2。重复撤销保持 version 和撤销时间，不要求绑定用户仍是管理员 |
-| `revoke_binding` | 受信恢复专用，只传完整 binding，不传 grant ID、用户或 scopes。用于创建回执丢失后撤销已存在的记录；同样删除密文并保留终态，不依赖用户仍是管理员。不能用部分身份、客户端提供的绑定或 resolve 代替 |
+| `revoke_binding` | 受信恢复专用，只传完整 binding，不传 grant ID、用户或 scopes。撤销已存在的记录或永久封禁尚未创建的绑定；删除密文并保留终态，不依赖用户仍是管理员。不能用部分身份、客户端提供的绑定或 resolve 代替 |
 
-返回 `{id,user_id,scopes,state,version}`，仅供受信 host 使用。不存在或撤销身份不匹配为 `PT404`；创建内容冲突、尝试改绑/改 scopes、复用 revoked binding 为 `PT409`；无权限、resolve 已撤销或用户已降权/删除为 `42501`；非法输入为 `22023`。并发插入或旧 Repeatable Read 快照冲突可能为 `40001`，调用方重读，不自动重新授权。resolve 与 revoke 通过行锁串行；不保证撤销取消已获准、正在执行的业务调用。
+返回 `{id,user_id,scopes,state,version}`，仅供受信 host 使用。resolve/revoke 不存在或撤销身份不匹配为 `PT404`；创建内容冲突、尝试改绑/改 scopes、复用 revoked binding 为 `PT409`；无权限、resolve 已撤销或用户已降权/删除为 `42501`；非法输入为 `22023`。并发插入或旧 Repeatable Read 快照冲突可能为 `40001`，调用方重读，不自动重新授权。resolve 与 revoke 通过行锁串行；不保证撤销取消已获准、正在执行的业务调用。
 
-`revoke_binding` 的 `PT404` **不是清理完成证明**：尚未提交的并发 create 对查询不可见，之后仍可能提交。该操作不创建缺失绑定的撤销标记；恢复器须保留待处理日志，并先解决与存活批准进程的互斥。对已存在记录，撤销与凭据写入通过 grant 行锁串行，重复撤销不恢复授权。批准宿主丢失 create 回执时可调用一次此操作；仅在返回合法 grant UUID、原用户 UUID、revoked/version=2 且上游撤销确认后认为清理已确认，否则返回 APPROVAL_CLEANUP_UNCONFIRMED。
+`revoke_binding` 先在私有 `mcp_grant_fences` 表永久记录完整 binding 的撤销标记，与 create 按 fence→grant 锁顺序串行。不存在 grant 时返回 `{id:null,user_id:null,scopes:[],state:"revoked",version:2}`，表示该绑定已被封禁，不虚构用户或 grant UUID；迟到的 create 返回 PT409。未提交的 create 必须先完成，恢复才能撤销它；旧 Repeatable Read 快照可能返回 40001，不能视为清理成功。已存在记录仍返回原 UUID／用户并原子删除密文。批准宿主只在未知 grant ID 时接受上述空身份回执；已知 grant 必须匹配原 UUID 和用户，且两种情况均须确认上游撤销，否则返回 APPROVAL_CLEANUP_UNCONFIRMED。旧部署升级必须暂停并排空旧函数调用，再原子添加 fence 表及替换函数；不可假定旧版在途 create 遵守新锁协议，也不可删除撤销标记或直接重跑建库基线。尚未升级任何共享部署。
 
 `private.mcp_grants` 不向任何 API 角色开放直接读写，不保存 access/refresh token、密码或邮箱；撤销记录不删除。用户 UUID 无级联删除关系，防止删除账户同时丢失阻止旧绑定复用的记录。授权元数据仅支持不可变批准及终态撤销，不支持 scope 原地升级/降级、恢复或批量撤销；凭据密文使用下述独立接口。SQL 仍为可重建开发基线，不是已有部署的升级脚本。
 
