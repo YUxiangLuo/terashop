@@ -45,12 +45,94 @@ export interface ProductDetail {
   vendor: string;
   product_type: string;
   images: ProductImage[];
-  variants: Array<{ id: string; sku: string | null; price: number }>;
+  variants: ProductVariant[];
+  options: Array<{
+    id: string;
+    name: string;
+    values: Array<{ id: string; value: string }>;
+  }>;
+}
+export interface ProductVariant {
+  id: string;
+  sku: string | null;
+  price: number;
+  is_active: boolean;
+  track_inventory: boolean;
+  option_value_ids: string[];
+}
+export interface Location {
+  id: string;
+  name: string;
+  code: string;
+  is_default: boolean;
+}
+export interface Inventory {
+  variant_id: string;
+  location_id: string;
+  on_hand: number;
+  reserved: number;
+  available: number;
+}
+export interface OrderSummary {
+  id: string;
+  order_number: string;
+  email: string;
+  status: string;
+  financial_status: string;
+  fulfillment_status: string;
+  total: number;
+  created_at: string;
+}
+export interface OrderPage {
+  items: OrderSummary[];
+  next_cursor: string | null;
+}
+export interface OrderDetail extends OrderSummary {
+  admin_note: string | null;
+  customer_note: string | null;
+  shipping_address: Record<string, Json>;
+  shipping_method_name: string | null;
+  subtotal: number;
+  discount_total: number;
+  shipping_total: number;
+  tax_total: number;
+  pricing: {
+    lines: Array<{
+      id: string;
+      name: string;
+      sku: string | null;
+      variant_title: string;
+      quantity: number;
+      unit_price: number;
+      line_total: number;
+    }>;
+  };
+  fulfillments: Array<{
+    id: string;
+    status: string;
+    carrier: string;
+    tracking_number: string;
+    created_at: string;
+    lines: Array<{ order_item_id: string; quantity: number }>;
+  }>;
+}
+export interface FulfillmentBalance {
+  is_fulfillable: boolean;
+  payment_hold: boolean;
+  lines: Array<{ order_item_id: string; available_quantity: number }>;
 }
 export interface ProductPage {
   items: ProductSummary[];
   next_cursor: { updated_at: string; id: string } | null;
 }
+export const money = (value: number) =>
+  new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(value);
+export const dateTime = (value: string) => new Date(value).toLocaleString();
+export const statusLabel = (value: string) => value.replaceAll("_", " ");
+
 export async function getProduct(id: string): Promise<ProductDetail | null> {
   const { data, error } = await supabase.rpc("get_admin_product", {
     product_id: id,
@@ -81,7 +163,7 @@ export function message(error: unknown): string {
     "code" in error &&
     error.code === "PT409"
   )
-    return "Another edit changed this product. Reload the saved version and review it before saving again.";
+    return "Another edit changed this record. Reload the saved version and review it before saving again.";
   return error &&
     typeof error === "object" &&
     "message" in error &&

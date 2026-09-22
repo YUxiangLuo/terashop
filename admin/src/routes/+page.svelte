@@ -70,7 +70,7 @@
   <div>
     <p class="eyebrow">Catalog</p>
     <h1>Products</h1>
-    <p class="muted small">A place for every piece in your collection.</p>
+    <p class="muted small">Manage your collection, pricing and stock.</p>
   </div>
   <button
     class="primary"
@@ -107,7 +107,7 @@
         ><tr
           ><th scope="col">Product</th><th scope="col">Status</th><th
             scope="col">Price · USD</th
-          ><th scope="col">Variants</th></tr
+          ><th scope="col">Variants</th><th scope="col">Inventory</th></tr
         ></thead
       ><tbody>
         {#each products as product (product.id)}
@@ -136,7 +136,10 @@
                     style: "currency",
                     currency: "USD",
                   }).format(product.price_from)}</td
-            ><td>{product.variant_count}</td></tr
+            ><td>{product.variant_count}</td><td
+              ><a href={`/products/${product.id}#inventory`}>Manage stock</a
+              ></td
+            ></tr
           >
         {/each}
       </tbody>

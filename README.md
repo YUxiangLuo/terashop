@@ -32,7 +32,7 @@ bun run storefront:dev   # 打开终端显示的前台地址
 
 ```text
 storefront/             SvelteKit 静态女装站
-admin/                  SvelteKit SPA：登录、商品列表、草稿编辑及图片上传
+admin/                  SvelteKit CSR MVP：商品发布/图片、SKU/价格、库存调整、订单/备注/发货
 mcp/                    Admin MCP：独立 stdio 客户端层，领域覆盖持续补齐
 supabase/migrations/   六个初始化基线文件；开发期可直接修改并重建
 supabase/functions/    支付入口与共享适配代码

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, type Snippet } from "svelte";
+  import { page } from "$app/state";
   import type { Session } from "@supabase/supabase-js";
   import { supabase, message } from "$lib/api";
   import "../app.css";
@@ -103,14 +104,27 @@
 
 {#if phase === "admin"}
   <div class="workspace">
-    <aside class="sidebar">
+    <aside class="sidebar" aria-label="Store navigation">
       <a class="brand" href="/">tera<span>ADMIN</span></a>
       <p class="eyebrow">Store management</p>
       <nav aria-label="Main navigation">
-        <a class="nav-active" href="/">▦ <span>Products</span></a>
+        <a
+          class:nav-active={!page.url.pathname.startsWith("/orders")}
+          aria-current={!page.url.pathname.startsWith("/orders")
+            ? "page"
+            : undefined}
+          href="/">▦ <span>Products</span></a
+        >
+        <a
+          class:nav-active={page.url.pathname.startsWith("/orders")}
+          aria-current={page.url.pathname.startsWith("/orders")
+            ? "page"
+            : undefined}
+          href="/orders">▤ <span>Orders</span></a
+        >
       </nav>
       <div class="sidebar-note">
-        Your catalog, thoughtfully managed.<br /><small>USD · Supabase</small>
+        Products, stock and shipments.<br /><small>Single store · USD</small>
       </div>
     </aside>
     <div class="content">
@@ -144,7 +158,7 @@
         <p class="eyebrow">Welcome back</p>
         <h1>Sign in to your store</h1>
         <p class="muted">
-          Use your administrator account to manage the catalog.
+          Use your administrator account to manage your store.
         </p>
         <form onsubmit={login}>
           <label

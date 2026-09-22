@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { beforeNavigate } from "$app/navigation";
+  import InventoryEditor from "./InventoryEditor.svelte";
   import {
     getProduct,
     saveProduct,
@@ -9,6 +10,8 @@
     imageUrl,
     type ProductDetail,
     type ProductImage,
+    type ProductStatus,
+    type ProductVariant,
   } from "./api";
   let { id, creating }: { id: string; creating: boolean } = $props();
   let product = $state.raw<ProductDetail | null>(null);
@@ -20,6 +23,8 @@
     product_type: "",
   });
   let images = $state<ProductImage[]>([]);
+  let status = $state<ProductStatus>("draft");
+  let variants = $state<ProductVariant[]>([]);
   let loaded = $state(false);
   let busy = $state(false);
   let error = $state("");
@@ -27,11 +32,9 @@
   let uncertain = $state(false);
   let baseline = $state("");
   let alive = true;
-  let editable = $derived(
-    loaded && (product ? product.status === "draft" : creating),
-  );
+  let editable = $derived(loaded && (!!product || creating));
   let dirty = $derived(
-    loaded && JSON.stringify({ fields, images }) !== baseline,
+    loaded && JSON.stringify({ fields, images, status, variants }) !== baseline,
   );
 
   onMount(() => {
@@ -59,7 +62,9 @@
       product_type: value?.product_type ?? "",
     };
     images = value?.images.map((image) => ({ ...image })) ?? [];
-    baseline = JSON.stringify({ fields, images });
+    status = value?.status ?? "draft";
+    variants = value?.variants.map((variant) => ({ ...variant })) ?? [];
+    baseline = JSON.stringify({ fields, images, status, variants });
     loaded = true;
     uncertain = false;
   }
@@ -91,13 +96,27 @@
   async function save(event: SubmitEvent) {
     event.preventDefault();
     if (!editable || busy || uncertain) return;
+    if (
+      status !== (product?.status ?? "draft") &&
+      !window.confirm(
+        `Change this product to ${status}? Public API visibility changes immediately. The static storefront needs a rebuild.`,
+      )
+    )
+      return;
     busy = true;
     error = "";
     notice = "";
     try {
       // The URL retains this UUID across refreshes and uncertain create responses.
       const saved = await saveProduct(id, product?.revision ?? null, {
-        product: { ...fields },
+        product: { ...fields, status },
+        // PATCH only the fields this editor owns; preserve options, cost and metadata.
+        variants: variants.map(({ id, sku, price, is_active }) => ({
+          id,
+          sku,
+          price,
+          is_active,
+        })),
         images: [
           ...images.map((image) => ({
             id: image.id,
@@ -113,7 +132,10 @@
       });
       if (!alive) return;
       install(saved);
-      notice = "Draft saved. It is not visible in the storefront.";
+      notice =
+        saved.status === "active"
+          ? "Product saved and published to the catalog API. Rebuild the static storefront to update its pages."
+          : `Product saved as ${saved.status}. It is not visible in the public catalog.`;
     } catch (cause) {
       if (alive) {
         error = `${message(cause)} Reload the saved version before another save; the previous request may have succeeded.`;
@@ -162,7 +184,7 @@
         position: Math.max(0, ...images.map((image) => image.position)) + 1,
         variant_id: null,
       });
-      notice = "Image uploaded. Save the draft to attach it to this product.";
+      notice = "Image uploaded. Save the product to attach it.";
     } catch (cause) {
       if (alive)
         error = `${message(cause)} No image record was added. If the upload reached Storage, the retained object is ${path}.`;
@@ -182,6 +204,11 @@
 <svelte:head
   ><title>{product?.name ?? "New draft"} · Tera Admin</title></svelte:head
 >
+<svelte:window
+  onbeforeunload={(event) => {
+    if (busy || dirty) event.preventDefault();
+  }}
+/>
 <div class="page-heading">
   <div>
     <a class="small" href="/">← Products</a>
@@ -199,7 +226,7 @@
         type="submit"
         form="product-form"
         disabled={busy || uncertain || !dirty}
-        >{busy ? "Working…" : "Save draft"}</button
+        >{busy ? "Working…" : "Save product"}</button
       >{/if}
   </div>
 </div>
@@ -208,10 +235,6 @@
 {#if !loaded}<p role="status">
     {busy ? "Loading product…" : "Unable to open product."}
   </p>{:else}
-  {#if !editable}<p class="notice">
-      This {product?.status} product is read-only here. This first version edits drafts
-      only.
-    </p>{/if}
   <form id="product-form" onsubmit={save}>
     <fieldset disabled={busy || !editable || uncertain}>
       <div class="editor-grid">
@@ -262,6 +285,74 @@
             </div>
           </section>
           <section class="card">
+            <div class="section-heading">
+              <h2>Variants & pricing</h2>
+              {#if !product?.options.length && !variants.length}
+                <button
+                  type="button"
+                  onclick={() =>
+                    variants.push({
+                      id: crypto.randomUUID(),
+                      sku: null,
+                      price: 0,
+                      is_active: true,
+                      track_inventory: true,
+                      option_value_ids: [],
+                    })}>Add standard variant</button
+                >
+              {/if}
+            </div>
+            <p class="small muted">
+              Prices are in USD. Existing sizes and colors are preserved; option
+              creation is outside this MVP.
+            </p>
+            {#each variants as variant, index (variant.id)}
+              <div class="variant-row">
+                <p class="small">
+                  <strong
+                    >{product?.options
+                      .flatMap((option) =>
+                        option.values
+                          .filter((value) =>
+                            variant.option_value_ids.includes(value.id),
+                          )
+                          .map((value) => value.value),
+                      )
+                      .join(" / ") || "Standard variant"}</strong
+                  >
+                </p>
+                <div class="fields two">
+                  <label
+                    >SKU<input
+                      aria-label={`Variant ${index + 1} SKU`}
+                      bind:value={variant.sku}
+                      maxlength="200"
+                    /></label
+                  >
+                  <label
+                    >Price · USD<input
+                      aria-label={`Variant ${index + 1} price`}
+                      type="number"
+                      min="0"
+                      max="9999999999.99"
+                      step="0.01"
+                      required
+                      bind:value={variant.price}
+                    /></label
+                  >
+                </div>
+                <label class="check-label"
+                  ><input
+                    type="checkbox"
+                    bind:checked={variant.is_active}
+                  />Available for sale</label
+                >
+              </div>
+            {:else}<p class="empty">
+                Add a variant before publishing this product.
+              </p>{/each}
+          </section>
+          <section class="card">
             <h2>Product images</h2>
             <p class="small muted">
               The first image is the primary image. Uploaded files are public,
@@ -279,7 +370,7 @@
                 <p class="small muted">
                   {product
                     ? "JPEG, PNG or WebP · Up to 5 MiB · Save to attach"
-                    : "Save the draft first to enable uploads."}
+                    : "Save the product first to enable uploads."}
                 </p>
               </div>{/if}
             {#each images as image, index (image.id)}
@@ -326,12 +417,17 @@
         </div>
         <aside class="card">
           <h2>Product status</h2>
-          <span class={["badge", product?.status ?? "draft"]}
-            >{product?.status ?? "Draft"}</span
+          <label
+            >Visibility<select bind:value={status}>
+              <option value="draft">Draft</option><option value="active"
+                >Active</option
+              ><option value="archived">Archived</option>
+            </select></label
           >
           <p class="small muted">
-            Drafts stay out of the public catalog. Publishing, variants and
-            inventory editing are not included yet.
+            Draft and archived products stay out of the public catalog.
+            Publishing requires a valid variant. Static storefront pages need a
+            rebuild after catalog changes.
           </p>
           <hr />
           <p class="small muted">
@@ -345,4 +441,12 @@
       </div>
     </fieldset>
   </form>
+  {#if product}
+    <div class="inventory-section" id="inventory">
+      {#key product.revision}<InventoryEditor
+          {product}
+          disabled={busy || dirty || uncertain}
+        />{/key}
+    </div>
+  {/if}
 {/if}

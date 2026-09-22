@@ -86,7 +86,7 @@ p {
   line-height: 1.6;
 }
 .muted {
-  color: #6b756d;
+  color: #5f6a61;
 }
 .small {
   font-size: 0.8rem;
@@ -95,7 +95,7 @@ p {
   text-transform: uppercase;
   letter-spacing: 0.12em;
   font-size: 0.66rem;
-  color: #778178;
+  color: #626e63;
   font-weight: 600;
 }
 .brand {
@@ -136,19 +136,23 @@ p {
   display: flex;
   gap: 0.75rem;
   padding: 0.8rem;
-  background: #dbe5d9;
+  margin-bottom: 0.3rem;
   color: #2d4735;
   text-decoration: none;
   border-radius: 5px;
   font-size: 0.88rem;
   font-weight: 600;
 }
+.sidebar nav a:hover,
+.sidebar nav a.nav-active {
+  background: #dbe5d9;
+}
 .sidebar-note {
   margin-top: auto;
   padding: 3rem 0.6rem 0;
   font-size: 0.75rem;
   line-height: 1.8;
-  color: #798478;
+  color: #626e63;
 }
 .sidebar-note small {
   display: block;
@@ -269,7 +273,7 @@ table {
 }
 th {
   font-size: 0.72rem;
-  color: #788172;
+  color: #626e63;
   font-weight: 500;
   padding: 1rem;
   border-bottom: 1px solid #e0e4db;
@@ -303,7 +307,7 @@ tbody tr:last-child td {
 .product-cell small {
   display: block;
   margin-top: 0.4rem;
-  color: #82897e;
+  color: #626e63;
 }
 .badge {
   display: inline-block;
@@ -325,7 +329,7 @@ tbody tr:last-child td {
 .empty {
   text-align: center;
   padding: 3rem 1rem;
-  color: #707b6b;
+  color: #626e63;
 }
 .list-footer {
   padding-top: 1rem;
@@ -396,6 +400,133 @@ tbody tr:last-child td {
   width: 100%;
   margin-top: 1.5rem;
 }
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.section-heading h2 {
+  margin-bottom: 0;
+}
+.variant-row,
+.shipment {
+  border-top: 1px solid #edf0e9;
+  padding: 1rem 0;
+}
+.check-label {
+  display: flex;
+  align-items: center;
+  margin-top: 1rem;
+}
+.check-label input {
+  width: auto;
+  accent-color: #284d3b;
+}
+.inventory-section {
+  margin-top: 1.5rem;
+  scroll-margin-top: 1.5rem;
+}
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+.metrics > div {
+  border: 1px solid #e0e4dc;
+  border-radius: 6px;
+  padding: 1rem;
+  background: #fafbf8;
+}
+.metrics dt {
+  color: #667062;
+  font-size: 0.8rem;
+}
+.metrics dd {
+  margin: 0.5rem 0 0;
+  font-size: 1.8rem;
+  font-variant-numeric: tabular-nums;
+}
+.form-action {
+  margin-top: 1rem;
+}
+.status-strip {
+  margin: -0.5rem 0 1.5rem;
+}
+.cell-detail {
+  display: block;
+  color: #6b756d;
+  margin: 0.4rem 0;
+}
+.record-link {
+  font-weight: 600;
+  text-decoration: none;
+}
+.numeric {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.break-word,
+address,
+.notice {
+  overflow-wrap: anywhere;
+}
+.preserve-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+address {
+  font-style: normal;
+  font-size: 0.9rem;
+  line-height: 1.7;
+}
+.totals {
+  margin: 1.5rem 0 0 auto;
+  max-width: 320px;
+  font-size: 0.88rem;
+}
+.totals > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.55rem 0;
+}
+.totals dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.totals .total {
+  border-top: 1px solid #dfe4dc;
+  margin-top: 0.5rem;
+  padding-top: 1rem;
+  font-weight: 600;
+}
+.shipment-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 75px;
+  align-items: center;
+  margin: 0 0 1rem;
+  gap: 0.75rem;
+}
+.badge.paid,
+.badge.fulfilled,
+.badge.delivered {
+  background: #e4efdf;
+  color: #396137;
+}
+.badge.pending,
+.badge.partially_fulfilled {
+  background: #f4eeda;
+  color: #766329;
+}
+.badge.cancelled,
+.badge.refunded {
+  background: #f4e9e4;
+  color: #813e27;
+}
 @media (max-width: 950px) {
   .editor-grid {
     grid-template-columns: 1fr;
@@ -439,6 +570,29 @@ tbody tr:last-child td {
   }
   .sidebar nav a {
     padding: 0.55rem 0.8rem;
+  }
+  .sidebar nav {
+    display: flex;
+    gap: 0.25rem;
+  }
+  .sidebar .brand span {
+    display: none;
+  }
+  .metrics {
+    gap: 0.5rem;
+  }
+  .metrics > div {
+    padding: 0.75rem;
+  }
+  .shipment-line {
+    grid-template-columns: minmax(0, 1fr) 70px;
+  }
+  .shipment-line .muted {
+    grid-column: 1;
+  }
+  .shipment-line input {
+    grid-column: 2;
+    grid-row: 1 / 3;
   }
   .topbar {
     height: 54px;
