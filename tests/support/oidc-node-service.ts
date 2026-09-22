@@ -73,62 +73,75 @@ export async function nodeOidcService(configuration: Record<string, unknown>) {
       await chown(directory, 1000, 1000);
       await chown(path, 1000, 1000);
     }
-    const child = Bun.spawn(
-      [
-        'docker',
-        'run',
-        '--rm',
-        '--name',
-        name,
-        '--network',
-        'host',
-        '--read-only',
-        '--user',
-        user,
-        '--cap-drop',
-        'ALL',
-        '--security-opt',
-        'no-new-privileges',
-        '--memory',
-        '512m',
-        '--cpus',
-        '1',
-        '--pids-limit',
-        '64',
-        '--mount',
-        `type=bind,src=${directory},dst=/check,readonly`,
-        '--mount',
-        `type=bind,src=${join(root, 'node_modules')},dst=/check/node_modules,readonly`,
-        'node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9',
-        'node',
-        '/check/auth.mjs',
-        '/check/config.json',
-      ],
-      { stdout: 'pipe', stderr: 'ignore' },
-    );
-    const ready = async () => {
-      const reader = child.stdout.getReader();
+    const start = async () => {
+      const child = Bun.spawn(
+        [
+          'docker',
+          'run',
+          '--rm',
+          '--name',
+          name,
+          '--network',
+          'host',
+          '--read-only',
+          '--user',
+          user,
+          '--cap-drop',
+          'ALL',
+          '--security-opt',
+          'no-new-privileges',
+          '--memory',
+          '512m',
+          '--cpus',
+          '1',
+          '--pids-limit',
+          '64',
+          '--mount',
+          `type=bind,src=${directory},dst=/check,readonly`,
+          '--mount',
+          `type=bind,src=${join(root, 'node_modules')},dst=/check/node_modules,readonly`,
+          'node:22-bookworm-slim@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9',
+          'node',
+          '/check/auth.mjs',
+          '/check/config.json',
+        ],
+        { stdout: 'pipe', stderr: 'ignore' },
+      );
+      const ready = async () => {
+        const reader = child.stdout.getReader();
+        try {
+          const first = await reader.read();
+          if (new TextDecoder().decode(first.value) !== 'OIDC_SERVICE_READY\n')
+            throw new Error('Node service did not become ready');
+        } finally {
+          reader.releaseLock();
+        }
+      };
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const first = await reader.read();
-        if (new TextDecoder().decode(first.value) !== 'OIDC_SERVICE_READY\n')
-          throw new Error('Node service did not become ready');
+        await Promise.race([
+          ready(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error('Node startup timeout')), 15000);
+          }),
+        ]);
       } finally {
-        reader.releaseLock();
+        clearTimeout(timer);
       }
+      return child;
     };
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        ready(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Node startup timeout')), 15000);
-        }),
-      ]);
-    } finally {
-      clearTimeout(timer);
-    }
+    let child = await start();
     return {
       close,
+      restart: async () => {
+        const stop = Bun.spawn(['docker', 'stop', '--time', '10', name], {
+          stdout: 'ignore',
+          stderr: 'ignore',
+        });
+        if ((await stop.exited) !== 0 || (await child.exited) !== 0)
+          throw new Error('Node service did not shut down cleanly');
+        child = await start();
+      },
       request: (path: string, init: RequestInit = {}) =>
         fetch(`https://127.0.0.1:${address.port}${path}`, {
           ...init,

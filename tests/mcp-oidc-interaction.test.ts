@@ -142,6 +142,7 @@ for (const runtime of ['bun', 'node'] as const)
           url === `${origin}/token/introspection` ? local('/token/introspection', init) : fetch(url, init),
       );
       const tokens: string[] = [];
+      const refreshTokens: string[] = [];
       for (let index = 0; index < (runtime === 'node' ? 2 : 3); index++) {
         const user = await signup();
         users.push(user);
@@ -243,7 +244,10 @@ for (const runtime of ['bun', 'node'] as const)
           }),
         });
         expect(response.status).toBe(200);
-        const token = (await response.json()).access_token;
+        const issued = await response.json();
+        const token = issued.access_token;
+        expect(typeof issued.refresh_token).toBe('string');
+        refreshTokens.push(issued.refresh_token);
         tokens.push(token);
         const context = await authorizer.authorize(token);
         expect(context.expectedUserId).toBe(user.userId);
@@ -287,6 +291,59 @@ for (const runtime of ['bun', 'node'] as const)
       expect(
         (await toolData<{ currency: string }>(sessions[1].client, 'get_admin_shop_settings')).currency,
       ).toBe('USD');
+      if (node) {
+        const refresh = async (token: string) => {
+          const response = await local('/token', {
+            method: 'POST',
+            body: new URLSearchParams({
+              client_id: 'agent',
+              grant_type: 'refresh_token',
+              refresh_token: token,
+              resource,
+            }),
+          });
+          return { status: response.status, data: await response.json() };
+        };
+        // Consume B's original refresh token before shutdown. The replacement
+        // must survive; the consumed token must never become usable again.
+        const rotated = await refresh(refreshTokens[1]);
+        expect(rotated.status).toBe(200);
+        expect(typeof rotated.data.refresh_token).toBe('string');
+        expect(rotated.data.refresh_token).not.toBe(refreshTokens[1]);
+        const before = await authorizer.authorize(rotated.data.access_token);
+        await node.restart();
+        await expect(authorizer.authorize(tokens[0])).rejects.toThrow('AUTHORIZATION_DENIED');
+        expect((await authorizer.authorize(tokens[1])).expectedUserId).toBe(users[1].userId);
+        const restored = await authorizer.readCredentials(rotated.data.access_token, cipher);
+        expect(restored.expectedUserId).toBe(users[1].userId);
+        expect(restored.revision).toBe(1);
+        expect(restored.credentials).not.toBeNull();
+        expect((await authorizer.authorize(rotated.data.access_token)).grantId).toBe(before.grantId);
+        expect(
+          (await toolData<{ currency: string }>(sessions[1].client, 'get_admin_shop_settings')).currency,
+        ).toBe('USD');
+        const next = await refresh(rotated.data.refresh_token);
+        expect(next.status).toBe(200);
+        expect(next.data.refresh_token).not.toBe(rotated.data.refresh_token);
+        expect((await authorizer.authorize(next.data.access_token)).authorization.scopes).toEqual([
+          'store:read',
+          'store:write',
+        ]);
+        const replay = await refresh(refreshTokens[1]);
+        expect(replay.status).toBe(400);
+        expect(replay.data.error).toBe('invalid_grant');
+        await expect(authorizer.authorize(next.data.access_token)).rejects.toThrow('AUTHORIZATION_DENIED');
+        // The grant-wide replay revocation must also survive a second process.
+        await node.restart();
+        await expect(authorizer.authorize(rotated.data.access_token)).rejects.toThrow('AUTHORIZATION_DENIED');
+        await expect(authorizer.authorize(next.data.access_token)).rejects.toThrow('AUTHORIZATION_DENIED');
+        const revoked = await refresh(next.data.refresh_token);
+        expect(revoked.status).toBe(400);
+        expect(revoked.data.error).toBe('invalid_grant');
+        expect(
+          (await sessions[1].client.callTool({ name: 'get_admin_shop_settings', arguments: {} })).isError,
+        ).toBe(true);
+      }
     } finally {
       try {
         try {
