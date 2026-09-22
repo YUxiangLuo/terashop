@@ -13,8 +13,8 @@ const bootstrap = () =>
     method: 'POST',
     headers: { origin, 'x-tera-login': 'start' },
   });
-async function browser(host: ReturnType<typeof createLoginHttpHandler>) {
-  const response = await host.handle(bootstrap());
+async function browser(host: ReturnType<typeof createLoginHttpHandler>, interactionId?: string) {
+  const response = await host.handle(bootstrap(), interactionId);
   expect(response.status).toBe(201);
   const cookie = response.headers.get('set-cookie')!.split(';')[0];
   const { csrfToken } = (await response.json()) as { csrfToken: string };
@@ -27,7 +27,7 @@ async function browser(host: ReturnType<typeof createLoginHttpHandler>) {
     });
   return { get, post, cookie, csrfToken };
 }
-async function fixture() {
+async function fixture(interactionId?: string) {
   const user = crypto.randomUUID(),
     session = crypto.randomUUID();
   const calls: string[] = [];
@@ -62,7 +62,7 @@ async function fixture() {
       return Response.json({ user_id: user, session_id: session });
     throw new Error('Unexpected endpoint');
   });
-  return { host, calls, state, user, session, b: await browser(host) };
+  return { host, calls, state, user, session, b: await browser(host, interactionId) };
 }
 const emailBody = JSON.stringify({ email: 'admin@example.com' });
 
@@ -217,4 +217,24 @@ test('streaming body limit uses actual bytes rather than a forged Content-Length
   expect((await f.host.handle(req)).status).toBe(403);
   expect(cancelled).toBe(true);
   expect(f.calls).toHaveLength(0);
+});
+
+test('provider interaction is pinned at bootstrap and cannot be swapped or omitted during handoff', async () => {
+  const f = await fixture('interaction-A');
+  expect(f.host.interactionId(f.b.get('/login/status'))).toBe('interaction-A');
+  await f.host.handle(f.b.post('/login/email', emailBody), 'interaction-B');
+  await f.host.handle(f.b.get(f.state.callback));
+  for (const id of [undefined, 'interaction-B'])
+    expect(() => f.host.takeIdentity(f.b.post('/login/approve'), id)).toThrow('LOGIN_INTERACTION_MISMATCH');
+  expect(() =>
+    f.host.interactionId(
+      new Request(`${origin}/login/approve`, { method: 'POST', headers: { cookie: f.b.cookie } }),
+    ),
+  ).toThrow();
+  expect(f.host.takeIdentity(f.b.post('/login/approve'), 'interaction-A').userId).toBe(f.user);
+  expect((await f.host.handle(f.b.post('/login/cancel'))).status).toBe(409);
+  expect(f.host.interactionId(f.b.get('/login/status'))).toBe('interaction-A');
+  const cancelled = await browser(f.host, 'interaction-C');
+  expect((await f.host.handle(cancelled.post('/login/cancel'))).status).toBe(200);
+  expect(() => f.host.interactionId(cancelled.get('/login/status'))).toThrow();
 });

@@ -7,6 +7,7 @@ type Attempt = Awaited<ReturnType<typeof createDownstreamLogin>>;
 type Identity = Awaited<ReturnType<Attempt['exchange']>>;
 type Transaction = {
   expiresAt: number;
+  interactionId?: string;
   status: 'issued' | 'sending' | 'awaiting_callback' | 'exchanging' | 'authenticated' | 'consumed' | 'failed';
   attempt?: Attempt;
   identity?: Identity;
@@ -86,13 +87,17 @@ export function createLoginHttpHandler(
   }
 
   return {
-    async handle(req: Request): Promise<Response> {
+    // interactionId comes ONLY from the host's verified provider interaction.
+    // It is accepted at bootstrap, never from request query/body or later rebinding.
+    async handle(req: Request, interactionId?: string): Promise<Response> {
       try {
         const url = new URL(req.url);
         if (url.origin !== origin || url.username || url.password || url.hash)
           return json({ error: 'LOGIN_REQUEST_REJECTED' }, 403);
         if (url.pathname === '/login/session') {
           exact(req, '/login/session');
+          if (interactionId !== undefined && !/^[A-Za-z0-9_-]{1,256}$/.test(interactionId))
+            return json({ error: 'LOGIN_REQUEST_REJECTED' }, 403);
           // A cross-site navigation or form cannot bootstrap/reset this cookie.
           if (
             req.method !== 'POST' ||
@@ -112,7 +117,7 @@ export function createLoginHttpHandler(
           const result = sessions.issue();
           const cookie = result.setCookie.split(';')[0];
           const id = sessions.read(new Request(`${origin}/login/status`, { headers: { cookie } }), false);
-          transactions.set(key(id), { expiresAt: now + 300_000, status: 'issued' });
+          transactions.set(key(id), { expiresAt: now + 300_000, status: 'issued', interactionId });
           return json({ csrfToken: result.csrfToken }, 201, { 'Set-Cookie': result.setCookie });
         }
         if (url.pathname === '/login/email') {
@@ -183,7 +188,9 @@ export function createLoginHttpHandler(
         }
         if (url.pathname === '/login/cancel') {
           exact(req, '/login/cancel');
-          const { id } = current(req, true);
+          const { id, transaction: tx } = current(req, true);
+          // Once the host has claimed approval, cancellation cannot pretend to undo it.
+          if (tx.status === 'consumed') return json({ error: 'LOGIN_ALREADY_CONSUMED' }, 409);
           const cookie = sessions.revoke(req);
           transactions.delete(key(id));
           return json({ status: 'cancelled' }, 200, { 'Set-Cookie': cookie });
@@ -195,9 +202,13 @@ export function createLoginHttpHandler(
     },
     // Internal handoff only. The caller MUST separately prove/bind upstream identity
     // and obtain consent. This path is deliberately NOT served by handle().
-    takeIdentity(req: Request): Identity {
+    interactionId(req: Request): string | undefined {
+      return current(req, req.method === 'POST').transaction.interactionId;
+    },
+    takeIdentity(req: Request, expectedInteractionId?: string): Identity {
       exact(req, '/login/approve');
       const { transaction: tx } = current(req, true);
+      if (tx.interactionId !== expectedInteractionId) throw new Error('LOGIN_INTERACTION_MISMATCH');
       if (tx.status !== 'authenticated' || !tx.identity) throw new Error('LOGIN_IDENTITY_UNAVAILABLE');
       const identity = tx.identity;
       tx.identity = undefined;
