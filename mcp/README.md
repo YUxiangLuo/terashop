@@ -230,6 +230,10 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 真实数据库联合验收：`bun run test:current tests/mcp-oidc-interaction.test.ts`。临时独立 issuer 数据库与真实本地 Supabase/Auth/SMTP，走完整 HTTP 授权请求、邮件 PKCE、同意 POST、发码和兑换；在线 introspection + 本地授权解析后解密下游凭据，经实际 MCP SDK 内存 transport 调用店铺工具。两名管理员分别批准只读/读写，检查工具发现范围、精确 UUID/Auth session、撤销 A 阻断旧工具上下文而 B 仍可调用；第三次模拟 provider result 已保存但完成回执丢失，确认两端授权撤销、密文删除。结束删除临时账号、grant 和 issuer 数据库。此检查在 Bun 运行，不替代 Node 部署或远程 MCP transport 验收。
 
+固定服务配置已集中到 [createOidcProvider](src/oidc-provider.ts)，真实数据库联合测试及 Node PostgreSQL 交互场景现使用它。输入为 `issuer/resource/scopes/signingKey/cookieKeys/clients/introspectionClient`，另由宿主传入持久化 adapter。要求 HTTPS 根 issuer、固定 HTTPS resource、完整 ES256/P-256 私有 JWK（含 kid/alg/use，并验证公私钥匹配）、1–3 个有序 Cookie 签名密钥和独立 introspection secret；后两类值均为 32 字节的规范 base64url，不生成默认密钥。clients 项为 `id/applicationType/redirectUris`：web 仅 HTTPS，native 首版仅 HTTP 字面 loopback（127.0.0.1/::1），不支持自定义 scheme、localhost、query/fragment 回调。native 端口匹配遵循 provider 的 loopback 规则。未知字段、重复 ID/范围/密钥/回调、缺失或不匹配的密钥统一拒绝为 INVALID_OIDC_PROVIDER_CONFIGURATION，不返回配置详情。
+
+provider 禁用开发登录、userinfo 和动态注册，忽略数据库残留的非预注册 Client；只有指定 resource 客户端可 introspect 目标资源的 AccessToken，业务客户端只能撤销自己的 token。固定 Code/S256、opaque access token、刷新轮换与 grant 撤销；期限为 code 60 秒、access/ID token/interaction 300 秒、SSO session 8 小时、grant/refresh 30 天。新实例重复加载相同配置的 JWKS 已验证稳定，但这不是完整进程重启或密钥轮换验收。构造器不读取环境、不启动监听、不配置代理；**provider 的 endpoint URL 仍依赖请求 authority，服务入口必须先验证 Host/TLS 和受信代理，不能只设置 issuer 就直接开放 callback**。服务入口、秘密装载和进程生命周期仍是下一步。
+
 远程版本后续按以下依赖顺序推进：
 
 1. 固定 Node 授权服务配置与入口：预注册客户端、签名/Cookie/加密密钥、最小数据库权限、TTL、受信 TLS 代理及启动校验；把真实 Supabase 联合场景带入 Node，并验证服务重启与密钥恢复。

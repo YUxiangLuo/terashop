@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { createServer } from 'node:http';
 import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import postgres from 'postgres';
-import Provider, { errors } from 'oidc-provider';
+import { createOidcProvider } from '../mcp/src/oidc-provider';
 import { createOidcAdapter } from '../mcp/src/oidc-adapter';
 import { createOidcInteractionHandler } from '../mcp/src/oidc-interaction';
 import { createCredentialCipher } from '../mcp/src/credentials';
@@ -37,50 +37,18 @@ test('durable provider + real email consent isolates administrators and cleans u
     databaseUrl.pathname = `/${name}`;
     store = postgres(databaseUrl.href, { max: 3 });
     await store.unsafe(await Bun.file('mcp/auth/storage.sql').text());
-    const provider = new Provider(origin, {
-      adapter: createOidcAdapter(store),
-      jwks: { keys: [{ ...privateKey.export({ format: 'jwk' }), kid: 'test', alg: 'ES256', use: 'sig' }] },
-      cookies: { keys: [randomBytes(32).toString('hex')] },
-      clients: [
-        {
-          client_id: 'agent',
-          redirect_uris: [redirect],
-          token_endpoint_auth_method: 'none',
-          id_token_signed_response_alg: 'ES256',
-          response_types: ['code'],
-          grant_types: ['authorization_code', 'refresh_token'],
-        },
-        {
-          client_id: 'resource',
-          client_secret: secret,
-          token_endpoint_auth_method: 'client_secret_post',
-          id_token_signed_response_alg: 'ES256',
-          redirect_uris: [],
-          response_types: [],
-          grant_types: [],
-        },
-      ],
-      scopes: ['openid', 'offline_access'],
-      features: {
-        devInteractions: { enabled: false },
-        introspection: {
-          enabled: true,
-          allowedPolicy: (_ctx, client, token) =>
-            client.clientId === 'resource' && token.kind === 'AccessToken' && token.aud === resource,
-        },
-        resourceIndicators: {
-          enabled: true,
-          getResourceServerInfo(_ctx, target) {
-            if (target !== resource) throw new errors.InvalidTarget();
-            return { scope: 'store:read store:write', audience: resource, accessTokenFormat: 'opaque' };
-          },
-        },
+    const provider = createOidcProvider(
+      {
+        issuer: origin,
+        resource,
+        scopes: ['store:read', 'store:write'],
+        signingKey: { ...privateKey.export({ format: 'jwk' }), kid: 'test', alg: 'ES256', use: 'sig' },
+        cookieKeys: [randomBytes(32).toString('base64url')],
+        clients: [{ id: 'agent', applicationType: 'web', redirectUris: [redirect] }],
+        introspectionClient: { id: 'resource', secret },
       },
-      pkce: { required: () => true },
-      extraTokenClaims: (_ctx, token) =>
-        token.kind === 'AccessToken' ? { grant_id: token.grantId, token_kind: 'AccessToken' } : {},
-      findAccount: async (_ctx, id) => ({ accountId: id, claims: async () => ({ sub: id }) }),
-    });
+      createOidcAdapter(store),
+    );
     provider.proxy = true; // Isolated fixture only; production must restrict its trusted proxy.
     let failCompletion = false;
     const complete = provider.interactionResult.bind(provider);

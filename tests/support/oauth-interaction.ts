@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import Provider, { errors, type AdapterConstructor } from 'oidc-provider';
 import { createOidcInteractionHandler } from '../../mcp/src/oidc-interaction';
 import { createCredentialCipher, type CredentialEnvelope } from '../../mcp/src/credentials';
+import { createOidcProvider } from '../../mcp/src/oidc-provider';
 
 // Real provider HTTP/cookies/code/token, synthetic Supabase HTTP responses.
 // The loopback fixture impersonates a trusted TLS proxy; NOT a deployment entrypoint.
@@ -27,37 +28,50 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor) {
     }
   >();
   let onWrite = async () => {};
-  const provider = new Provider(origin, {
-    adapter,
-    jwks: { keys: [{ ...privateKey.export({ format: 'jwk' }), kid: 'test', alg: 'ES256', use: 'sig' }] },
-    cookies: { keys: [randomBytes(32).toString('hex')] },
-    clients: [
-      {
-        client_id: 'agent',
-        redirect_uris: [redirect],
-        token_endpoint_auth_method: 'none',
-        id_token_signed_response_alg: 'ES256',
-        response_types: ['code'],
-        grant_types: ['authorization_code', 'refresh_token'],
-      },
-    ],
-    scopes: ['openid', 'offline_access'],
-    features: {
-      devInteractions: { enabled: false },
-      resourceIndicators: {
-        enabled: true,
-        getResourceServerInfo(_ctx, target) {
-          if (target !== resource) throw new errors.InvalidTarget();
-          return { scope: 'store:read store:write', audience: resource, accessTokenFormat: 'opaque' };
+  const provider = adapter
+    ? createOidcProvider(
+        {
+          issuer: origin,
+          resource,
+          scopes: ['store:read', 'store:write'],
+          signingKey: { ...privateKey.export({ format: 'jwk' }), kid: 'test', alg: 'ES256', use: 'sig' },
+          cookieKeys: [randomBytes(32).toString('base64url')],
+          clients: [{ id: 'agent', applicationType: 'web', redirectUris: [redirect] }],
+          introspectionClient: { id: 'resource', secret: randomBytes(32).toString('base64url') },
         },
-      },
-    },
-    pkce: { required: () => true },
-    findAccount: async (_ctx, id) => ({ accountId: id, claims: async () => ({ sub: id }) }),
-    renderError: (ctx, output) => {
-      ctx.body = output;
-    },
-  });
+        adapter,
+      )
+    : new Provider(origin, {
+        adapter,
+        jwks: { keys: [{ ...privateKey.export({ format: 'jwk' }), kid: 'test', alg: 'ES256', use: 'sig' }] },
+        cookies: { keys: [randomBytes(32).toString('hex')] },
+        clients: [
+          {
+            client_id: 'agent',
+            redirect_uris: [redirect],
+            token_endpoint_auth_method: 'none',
+            id_token_signed_response_alg: 'ES256',
+            response_types: ['code'],
+            grant_types: ['authorization_code', 'refresh_token'],
+          },
+        ],
+        scopes: ['openid', 'offline_access'],
+        features: {
+          devInteractions: { enabled: false },
+          resourceIndicators: {
+            enabled: true,
+            getResourceServerInfo(_ctx, target) {
+              if (target !== resource) throw new errors.InvalidTarget();
+              return { scope: 'store:read store:write', audience: resource, accessTokenFormat: 'opaque' };
+            },
+          },
+        },
+        pkce: { required: () => true },
+        findAccount: async (_ctx, id) => ({ accountId: id, claims: async () => ({ sub: id }) }),
+        renderError: (ctx, output) => {
+          ctx.body = output;
+        },
+      });
   provider.proxy = true; // Loopback-only fixture with a fixed, synthetic TLS authority.
   let failCompletion = false;
   let completions = 0;
@@ -366,6 +380,7 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor) {
     const tokens = await token.json();
     assert.equal(token.status, 200, JSON.stringify({ error: tokens.error }));
     assert.equal(typeof tokens.refresh_token, 'string');
+    if (adapter) assert.equal(tokens.expires_in, 300); // Fixed service policy, not library defaults.
     const access = await provider.AccessToken.find(tokens.access_token);
     assert.equal(access?.accountId, identity.userId);
     assert.equal(access?.scope, 'store:read');
