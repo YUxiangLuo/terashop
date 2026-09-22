@@ -180,8 +180,8 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
       await save(config);
     }
 
-    // Kill two independent CLI processes after upstream revocation and while the
-    // downstream receipt is blocked. A third process must finish the same entry.
+    // Interrupt recovery through two SIGKILLs and loss of the ownership session.
+    // The final independent CLI process must finish the same pending entry.
     const interrupted = {
       ...entry,
       interactionId: 'service-killed-recovery',
@@ -215,7 +215,7 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
         ...config,
         downstream: { ...config.downstream, supabaseUrl: `http://127.0.0.1:${address.port}` },
       });
-      for (const phase of ['kill', 'kill-again', 'complete']) {
+      for (const phase of ['kill', 'kill-again', 'ownership-timeout', 'ownership', 'complete']) {
         gate = Promise.withResolvers<void>();
         observed = Promise.withResolvers<void>();
         const child = spawn(process.execPath, ['/check/auth.mjs', path], {
@@ -249,7 +249,28 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
           const revoked =
             await observer`select id from oidc.revoked_grants where id=${interrupted.binding.session_id}`;
           assert.equal(revoked.length, 1);
-          if (phase !== 'complete') {
+          if (phase.startsWith('ownership')) {
+            const rows = await observer`select pg_terminate_backend(pid) as terminated from pg_locks
+              where locktype='advisory' and granted and classid=1952805473 and objid=1869177956
+                and database=(select oid from pg_database where datname=current_database())`;
+            assert.equal(rows.length, 1);
+            assert.equal(rows[0].terminated, true);
+            // Even a successful downstream receipt cannot grant permission to listen.
+            if (phase === 'ownership') gate.resolve();
+            assert.deepEqual(await exited, { code: 1, signal: null });
+            assert.equal(stdout, '');
+            const [finished] = await observer`select state from oidc.approval_attempts
+              where interaction_id=${interrupted.interactionId}`;
+            assert.equal(finished.state, phase === 'ownership' ? 'revoked' : 'pending');
+            await assert.rejects(get(port, '/jwks'));
+            // A successor must also recover remaining work, not just start on an empty journal.
+            if (phase === 'ownership') {
+              await observer`delete from oidc.approval_attempts where interaction_id=${interrupted.interactionId}`;
+              interrupted.interactionId += '-successor';
+              interrupted.binding.session_id += '-successor';
+              await journal.begin(interrupted);
+            }
+          } else if (phase !== 'complete') {
             child.kill('SIGKILL');
             assert.deepEqual(await exited, { code: null, signal: 'SIGKILL' });
             assert.equal(stdout, '');
@@ -265,7 +286,7 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
             child.kill('SIGTERM');
             assert.deepEqual(await exited, { code: 0, signal: null });
           }
-          assert.equal(stderr, '');
+          assert.equal(stderr, phase.startsWith('ownership') ? 'OIDC_SERVICE_START_FAILED\n' : '');
         } finally {
           clearTimeout(timer);
           gate.resolve();
@@ -273,7 +294,7 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
           await exited;
         }
       }
-      assert.equal(calls, 3);
+      assert.equal(calls, 5);
     } finally {
       gate.resolve();
       recoveryBackend.closeAllConnections();
