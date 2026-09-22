@@ -19,6 +19,7 @@ async function fixture(
     | 'envelope'
     | 'revoke-receipt'
     | 'completion-revoke',
+  journal?: Parameters<typeof createOidcApproval>[4],
 ) {
   const provider = new Provider('https://auth.example', {
     jwks: { keys: [{ ...privateKey.export({ format: 'jwk' }), kid: 'test', alg: 'ES256', use: 'sig' }] },
@@ -125,7 +126,7 @@ async function fixture(
     config,
     calls,
     id,
-    approval: createOidcApproval(provider, config, cipher, request),
+    approval: createOidcApproval(provider, config, cipher, request, journal),
     state: () => ({ binding, stored, revoked }),
   };
 }
@@ -203,6 +204,50 @@ test('mismatched persistence receipts cannot complete approval or falsely confir
     expect(f.state().revoked).toBe(true);
     if (fail === 'scope' || fail === 'binding')
       expect(f.calls.filter((x) => x === 'mcp_credential_command:write')).toHaveLength(0);
+  }
+});
+
+test('journal admission precedes local writes; uncertain admission and cleanup retain recovery work', async () => {
+  for (const fault of ['none', 'begin', 'finish', 'cleanup'] as const) {
+    let f: Awaited<ReturnType<typeof fixture>>;
+    let binding: Record<string, string> | undefined;
+    const endings: string[] = [];
+    const journal: NonNullable<Parameters<typeof createOidcApproval>[4]> = {
+      interactionId: 'interaction-test',
+      store: {
+        async begin(entry) {
+          expect(entry.interactionId).toBe('interaction-test');
+          expect(f.calls).not.toContain('mcp_grant_command:create');
+          expect(await f.provider.Grant.find(entry.binding.session_id)).toBeDefined();
+          binding = entry.binding;
+          if (fault === 'begin') throw new Error('Lost journal receipt');
+        },
+        async finish(id, state) {
+          expect(id).toBe('interaction-test');
+          expect(state).toBe('revoked');
+          expect(f.state().revoked).toBe(true);
+          expect(await f.provider.Grant.find(binding!.session_id)).toBeUndefined();
+          endings.push(state);
+          if (fault === 'finish') throw new Error('Lost terminal receipt');
+        },
+        async pending() {
+          return [];
+        },
+      },
+    };
+    f = await fixture(fault === 'cleanup' ? 'revoke' : undefined, journal);
+    if (fault === 'begin' || fault === 'cleanup') {
+      await expect(f.approval.approve(f.identity)).rejects.toThrow('APPROVAL_CLEANUP_UNCONFIRMED');
+      expect(endings).toEqual([]);
+      if (fault === 'begin') expect(f.calls).not.toContain('mcp_grant_command:create');
+    } else {
+      await f.approval.approve(f.identity);
+      expect(endings).toEqual([]); // Only the interaction host may mark completion.
+      if (fault === 'finish')
+        await expect(f.approval.revoke()).rejects.toThrow('APPROVAL_CLEANUP_UNCONFIRMED');
+      else await f.approval.revoke();
+      expect(endings).toEqual(['revoked']);
+    }
   }
 });
 

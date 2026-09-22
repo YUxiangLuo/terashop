@@ -8,6 +8,7 @@ import { createOidcAdapter } from './oidc-adapter';
 import { createOidcInteractionHandler } from './oidc-interaction';
 import { createOidcTlsHandler, readOidcProviderConfiguration } from './oidc-host';
 import { createCredentialCipher } from './credentials';
+import { createOidcApprovalJournal } from './oidc-journal';
 
 const secret = z
   .string()
@@ -111,6 +112,8 @@ export async function startOidcService(path: string) {
         scopes: c.provider.scopes,
       },
       cipher,
+      fetch,
+      createOidcApprovalJournal(database),
     );
     const handler = createOidcTlsHandler(provider, interaction);
     // Constructing HTTPS validates the certificate/private-key pair before any DB IO.
@@ -128,7 +131,8 @@ export async function startOidcService(path: string) {
       has_schema_privilege(current_user,'oidc','CREATE') as schema_create,
       not exists(select 1 from unnest(array['SELECT','INSERT','UPDATE','DELETE']) as p(privilege)
         where not has_table_privilege(current_user,'oidc.artifacts',privilege)
-          or not has_table_privilege(current_user,'oidc.revoked_grants',privilege)) as dml
+          or not has_table_privilege(current_user,'oidc.revoked_grants',privilege)
+          or not has_table_privilege(current_user,'oidc.approval_attempts',privilege)) as dml
       from pg_roles where rolname=current_user`;
     if (
       !role ||
@@ -143,6 +147,7 @@ export async function startOidcService(path: string) {
     // Verify expected columns without reading identity/token payloads.
     await database`select model,id,payload,expires_at,grant_id,uid,user_code,consumed,destroyed from oidc.artifacts limit 0`;
     await database`select id,revoked_at from oidc.revoked_grants limit 0`;
+    await database`select interaction_id,binding,state,created_at from oidc.approval_attempts limit 0`;
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject);
       server!.listen(c.listen.port, c.listen.host, () => {

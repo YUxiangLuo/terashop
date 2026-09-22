@@ -17,8 +17,8 @@ const binding = z.strictObject({
 });
 const attempt = z.strictObject({ interactionId: id, binding });
 
-// Dedicated issuer DB only. Not yet wired to approval or automatic recovery.
-// The future host must persist begin before local grant creation, and only mark
+// Dedicated issuer DB only. Automatic crash recovery is not yet enabled.
+// The host must persist begin before local grant creation, and only mark
 // a terminal state after confirmed completion or confirmed two-sided revocation.
 // A pending record is recovery work, NOT permission to retry issuing a code.
 export function createOidcApprovalJournal(database: postgres.Sql) {

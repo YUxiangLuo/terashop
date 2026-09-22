@@ -340,6 +340,20 @@ for (const runtime of ['bun', 'node'] as const)
         const tools = await mcp.client.listTools();
         expect(tools.tools.some((t) => t.name === 'update_shop_settings')).toBe(index === 1);
       }
+      if (node) {
+        // The disconnect scenario above restarted the process, so all preceding
+        // terminal writes must have completed and survived that restart.
+        const attempts = await store`select binding->>'subject' as subject,state
+          from oidc.approval_attempts where binding->>'project'=${project} order by binding->>'subject'`;
+        expect([...attempts]).toEqual(
+          users
+            .map((user, index) => ({
+              subject: user.userId,
+              state: index === 2 ? 'revoked' : 'completed',
+            }))
+            .sort((a, b) => a.subject.localeCompare(b.subject)),
+        );
+      }
       // Revoking A cannot break B or let the old A context keep using its token.
       const [first] =
         await db`select id,binding from private.mcp_grants where binding->>'project'=${project} and user_id=${users[0].userId}::uuid`;

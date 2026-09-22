@@ -4,6 +4,7 @@ import { AdminBackend } from './backend';
 import type { createCredentialCipher } from './credentials';
 import type { createDownstreamLogin } from './login';
 import type { AdminScope } from './permissions';
+import type { createOidcApprovalJournal } from './oidc-journal';
 
 type Identity = Awaited<ReturnType<Awaited<ReturnType<typeof createDownstreamLogin>>['exchange']>>;
 type Cipher = Awaited<ReturnType<typeof createCredentialCipher>>;
@@ -29,6 +30,7 @@ export function createOidcApproval(
   },
   cipher: Cipher,
   request: (url: string, init: RequestInit) => Promise<Response> = fetch,
+  journal?: { interactionId: string; store: ReturnType<typeof createOidcApprovalJournal> },
 ) {
   const c = { ...config, scopes: [...new Set(scopesSchema.parse(config.scopes))].sort() };
   for (const value of [c.project, c.clientId, c.anonKey, c.serviceRoleKey])
@@ -78,6 +80,9 @@ export function createOidcApproval(
       let upstream: InstanceType<Provider['Grant']> | undefined;
       let binding: Record<string, string> | undefined;
       let grantId: string | undefined;
+      let localCreateAttempted = false;
+      let journalAttempted = false;
+      let journalStarted = false;
       async function cleanup() {
         let failed = false;
         try {
@@ -85,7 +90,7 @@ export function createOidcApproval(
         } catch {
           failed = true;
         }
-        if (binding) {
+        if (binding && localCreateAttempted) {
           try {
             const revoked = await rpc('mcp_grant_command', {
               p_action: grantId ? 'revoke' : 'revoke_binding',
@@ -100,6 +105,14 @@ export function createOidcApproval(
               revoked.version !== 2
             )
               throw new Error('Invalid revocation receipt');
+          } catch {
+            failed = true;
+          }
+        }
+        if (!failed && journalAttempted) {
+          try {
+            if (!journalStarted) throw new Error('Unconfirmed journal creation');
+            await journal!.store.finish(journal!.interactionId, 'revoked');
           } catch {
             failed = true;
           }
@@ -133,7 +146,7 @@ export function createOidcApproval(
         // OIDC protocol scopes are not store permissions. This flow supports offline refresh.
         upstream.addOIDCScope('openid offline_access');
         const providerGrantId = await upstream.save();
-        binding = {
+        const approvedBinding = {
           issuer: provider.issuer,
           subject: userId,
           client_id: c.clientId,
@@ -141,6 +154,13 @@ export function createOidcApproval(
           project: c.project,
           session_id: providerGrantId,
         };
+        binding = approvedBinding;
+        if (journal) {
+          journalAttempted = true;
+          await journal.store.begin({ interactionId: journal.interactionId, binding: approvedBinding });
+          journalStarted = true;
+        }
+        localCreateAttempted = true;
         const approved = z
           .object({
             id: z.uuid(),

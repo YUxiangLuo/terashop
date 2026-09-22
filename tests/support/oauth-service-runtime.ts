@@ -72,9 +72,12 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
   try {
     const readonly = new URL(databaseUrl);
     readonly.username = 'oidc_readonly';
+    const legacy = new URL(databaseUrl);
+    legacy.username = 'oidc_legacy';
     for (const invalid of [
       { ...config, activeCredentialKey: 'missing' },
       { ...config, databaseUrl: readonly.href },
+      { ...config, databaseUrl: legacy.href }, // Old two-table role cannot bypass journaling.
       { ...config, provider: { ...config.provider, issuer: 'https://wrong.example' } },
     ]) {
       await save(invalid);

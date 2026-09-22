@@ -74,7 +74,10 @@ try {
        grant select, insert, update, delete on all tables in schema oidc to oidc_runtime;
        create role oidc_readonly login password '${password}';
        grant usage on schema oidc to oidc_readonly;
-       grant select on all tables in schema oidc to oidc_readonly;`,
+       grant select on all tables in schema oidc to oidc_readonly;
+       create role oidc_legacy login password '${password}';
+       grant usage on schema oidc to oidc_legacy;
+       grant select, insert, update, delete on oidc.artifacts, oidc.revoked_grants to oidc_legacy;`,
     );
     await Bun.write(join(directory, 'database-url'), `postgres://oidc_runtime:${password}@oidc-db/postgres`);
     await chmod(join(directory, 'database-url'), 0o644); // Disposable credential, readable by container uid 1000.

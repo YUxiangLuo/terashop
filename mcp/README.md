@@ -240,7 +240,9 @@ Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并
 
 崩溃恢复的日志基础：[createOidcApprovalJournal](src/oidc-journal.ts) 与独立 issuer 库的 `oidc.approval_attempts` 保存 interaction ID、完整 grant binding、创建时间及 pending/completed/revoked 状态，不保存登录凭据或 provider payload。日志 API 允许重复记录完全相同的 pending 项，拒绝换绑、同一上游 grant 归属另一 interaction、终态重开及终态互换；完成／撤销并发只允许一个结果。pending 使用 C 排序和 ID 游标，每页最多 100 条，不因时间经过就删除。Node 独立进程测试验证 pending 和终态跨进程保留，Bun/Node 真实 PostgreSQL 测试覆盖冲突和 103 条大小写混合 ID 分页。
 
-**日志尚未接入批准路径或启动恢复，不代表崩溃补偿已经可用。** 后续须在首次下游授权写入前登记，在确认完成或双端撤销后收尾。丢失本地 grant ID 的撤销原语已提供，但 PT404 不能证明没有在途创建；仍须解决与存活服务实例的互斥，不能自动对所有 pending 项执行撤销或重试发码。日志 DDL 只加入新建独立数据库的 storage.sql，旧授权服务也不要求此表。后续启用日志前需单独审核已有库升级及运行角色权限；新的 revoke_binding 使用修改后的 SQL 开发基线，部署旧数据库须先审核升级，不能仅更新授权服务。
+**Node 服务已接入批准日志，但启动恢复／自动补偿尚未启用。** 保存 provider Grant 后、首次下游 grant create 前，必须先确认 pending 日志登记；日志登记失败不调用下游 create，也不擅自修改结果不明或冲突的旧日志。批准失败只有在双端清理确认后才标记 revoked，清理或日志回执不明保持显式错误。interaction result 保存且发送响应后再标记 completed；标记失败尝试撤销授权。响应发送与日志落盘不是原子事务，completed 不是送达证明，也不是授权有效性依据；日志标记提交但回执丢失时，可能出现 completed 日志对应已撤销授权，在线授权检查仍以两端 grant 为准。
+
+真实 Node 登录／断连重启测试验证两条 completed 与一条 revoked 记录持久化，单测验证登记前无下游创建、登记回执丢失不错误收尾、清理失败不写终态。上游 Grant 保存到日志登记之间仍可能留下无下游授权的孤立 provider Grant；恢复还须解决该窗口及与存活服务实例的互斥，不能自动对所有 pending 项撤销或重试发码。新入口要求日志表和 DML 权限，旧两表角色将被启动校验拒绝；已有 issuer 数据库须先显式审核添加 storage.sql 中的 approval_attempts 表／索引及权限，不可重跑整份建库基线。下游也须支持 revoke_binding。尚未执行任何已有部署的升级。
 
 固定服务配置已集中到 [createOidcProvider](src/oidc-provider.ts)，真实数据库联合测试及 Node PostgreSQL 交互场景现使用它。输入为 `issuer/resource/scopes/signingKey/cookieKeys/clients/introspectionClient`，另由宿主传入持久化 adapter。要求 HTTPS 根 issuer、固定 HTTPS resource、完整 ES256/P-256 私有 JWK（含 kid/alg/use，并验证公私钥匹配）、1–3 个有序 Cookie 签名密钥和独立 introspection secret；后两类值均为 32 字节的规范 base64url，不生成默认密钥。clients 项为 `id/applicationType/redirectUris`：web 仅 HTTPS，native 首版仅 HTTP 字面 loopback（127.0.0.1/::1），不支持自定义 scheme、localhost、query/fragment 回调。native 端口匹配遵循 provider 的 loopback 规则。未知字段、重复 ID/范围/密钥/回调、缺失或不匹配的密钥统一拒绝为 INVALID_OIDC_PROVIDER_CONFIGURATION，不返回配置详情。
 
@@ -303,7 +305,7 @@ bun run docs:check
 配置是严格 JSON，必填字段如下（不提供默认秘密）：
 
 - `provider`：上文 createOidcProvider 的完整配置。
-- `databaseUrl`：独立 issuer PostgreSQL URL，含账号、密码和数据库，不接受查询参数；仅 localhost/字面回环允许明文，其余强制 verify-full TLS。提前显式应用 auth/storage.sql；运行角色必须拥有两表 SELECT/INSERT/UPDATE/DELETE，不得是超级用户、CREATEDB、CREATEROLE、BYPASSRLS 或有 oidc schema CREATE 权限。启动不建表、不执行迁移。
+- `databaseUrl`：独立 issuer PostgreSQL URL，含账号、密码和数据库，不接受查询参数；仅 localhost/字面回环允许明文，其余强制 verify-full TLS。新库提前显式应用 auth/storage.sql；运行角色必须拥有 artifacts、revoked_grants、approval_attempts 三表 SELECT/INSERT/UPDATE/DELETE，不得是超级用户、CREATEDB、CREATEROLE、BYPASSRLS 或有 oidc schema CREATE 权限。启动不建表、不执行迁移。
 - `downstream`：`project/supabaseUrl/anonKey/serviceRoleKey/callbackUrl`，callback 必须符合现有登录宿主同源合同；service-role 仅用于内部授权与凭据保存，不用于店铺业务工具。
 - `credentialKeys`：key ID 到规范 base64url AES-256 密钥的映射，最多八个；`activeCredentialKey` 指定当前写入密钥，旧密钥用于解密，不自动轮换。
 - `tls`：`key/cert` 为 PEM 内容（保留换行），与其他秘密一起置于私有文件；`listen` 为 `host/port`，host 限 127.0.0.1、::1 或 0.0.0.0，port 为 0–65535（0 仅用于临时端口测试）。生产 issuer 必须与实际访问 authority 一致，不能接未经验证的 TLS 终止代理。

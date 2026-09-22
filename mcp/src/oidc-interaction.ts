@@ -4,6 +4,7 @@ import type Provider from 'oidc-provider';
 import { createLoginHttpHandler } from './login-http';
 import { createOidcApproval } from './oidc-approval';
 import type { AdminScope } from './permissions';
+import type { createOidcApprovalJournal } from './oidc-journal';
 
 type Config = Omit<Parameters<typeof createOidcApproval>[1], 'clientId' | 'scopes'> & {
   publicOrigin: string;
@@ -21,6 +22,7 @@ export function createOidcInteractionHandler(
   config: Config,
   cipher: Parameters<typeof createOidcApproval>[2],
   request: (url: string, init: RequestInit) => Promise<Response> = fetch,
+  journal?: ReturnType<typeof createOidcApprovalJournal>,
 ) {
   const c = { ...config, scopes: [...config.scopes] };
   const origin = new URL(c.publicOrigin).origin;
@@ -191,7 +193,13 @@ export function createOidcInteractionHandler(
       }
       const identity = login.takeIdentity(rewrite('/login/approve'), uid);
       tx.state = 'completing'; // Claim synchronously before any persistence/completion await.
-      const approval = createOidcApproval(provider, { ...c, ...verified.consent }, cipher, request);
+      const approval = createOidcApproval(
+        provider,
+        { ...c, ...verified.consent },
+        cipher,
+        request,
+        journal ? { interactionId: uid, store: journal } : undefined,
+      );
       let persisted = false;
       try {
         if (verified.session?.accountId && verified.session.accountId !== identity.userId)
@@ -213,6 +221,7 @@ export function createOidcInteractionHandler(
         if (identity.credentials.expiresAt <= Math.floor(Date.now() / 1000))
           throw new Error('Login expired during completion');
         await send(res, new Response(null, { status: 303, headers: { Location: location } }));
+        await journal?.finish(uid, 'completed');
       } catch (error) {
         if (persisted) await approval.revoke();
         throw error;
