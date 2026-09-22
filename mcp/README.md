@@ -281,3 +281,7 @@ bun run docs:check
 ```
 
 单测覆盖工具发现与写开关、schema 拒绝、禁止入口、凭据/错误处理、大整数与微秒游标。集成测试覆盖真实 stdio、商品版本冲突、库存/收款幂等、履约、退货/回库与资金分离、客户匿名化重试、运维 DTO 和角色撤销。未声称完成真实 PayPal Sandbox、HTTP OAuth 或所有后续管理域验收。
+
+宿主边界原语见 [oidc-host](src/oidc-host.ts)：`readOidcProviderConfiguration` 仅读取绝对路径、非符号链接、组/其他用户无任何权限的普通文件（例如 0600/0400），限制 1–65536 字节、严格 UTF-8/JSON；读取后仍须交给 createOidcProvider 做语义校验。父目录也须由部署方保护；不支持通过符号链接装载的 Secret 卷，不保证在 JS 中擦除已解析字符串。
+
+`createOidcTlsHandler` 包住 interaction 与 provider callback，首版仅直接 TLS、精确 Host，拒绝重复 Host、absolute-form 地址和所有 Forwarded/X-Forwarded-*；provider.proxy 必须始终为 false。无 TLS 的 HTTP 即使伪造正确 Host 也不能进入业务处理器。此函数不启动服务、不装载 TLS 证书、不管理数据库或进程退出；上述服务装配与 Node 容器验收仍待完成。本批测试用 OpenSSL 生成一次性证书，在 Bun 中验证真实 TLS 与明文拒绝；不等于生产 TLS 或完整 provider 端到端验收。
