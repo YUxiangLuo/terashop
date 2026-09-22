@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { mkdtemp, writeFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { request as httpsRequest } from 'node:https';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { startAdminHttpService } from '../../mcp/src/http-service';
 import { createCredentialCipher } from '../../mcp/src/credentials';
@@ -52,7 +53,10 @@ test('real Bun TLS service enforces private configuration and serves an authenti
       },
     );
     let active = true;
+    let credentialReads = 0;
     let hold = false;
+    let slowBody = false;
+    const slowArrived = Promise.withResolvers<void>();
     const arrived = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     backend = Bun.serve({
@@ -61,6 +65,7 @@ test('real Bun TLS service enforces private configuration and serves an authenti
       async fetch(req) {
         const path = new URL(req.url).pathname;
         if (path === '/introspect') {
+          if (slowBody) slowArrived.resolve();
           if (hold) {
             arrived.resolve();
             await release.promise;
@@ -86,7 +91,10 @@ test('real Bun TLS service enforces private configuration and serves an authenti
             state: 'active',
             version: 1,
           });
-        if (path.endsWith('/mcp_credential_command')) return Response.json({ revision: 1, envelope });
+        if (path.endsWith('/mcp_credential_command')) {
+          credentialReads++;
+          return Response.json({ revision: 1, envelope });
+        }
         return new Response(null, { status: 404 });
       },
     });
@@ -162,6 +170,66 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     await denied.body?.cancel();
     await client.close();
     active = true;
+    // Keep the socket active but never finish the chunked body. The total
+    // request deadline, not the idle timer, must terminate this request.
+    const readsBefore = credentialReads;
+    const started = performance.now();
+    slowBody = true;
+    const slow = httpsRequest({
+      hostname: '127.0.0.1',
+      port: service.port,
+      path: '/mcp',
+      method: 'POST',
+      ca: cert,
+      agent: false,
+      headers: {
+        host: '127.0.0.1',
+        authorization: 'Bearer opaque',
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+    });
+    const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      slow.on('error', reject);
+      slow.on('response', (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('error', reject);
+        res.on('end', () => resolve({ status: res.statusCode!, body }));
+      });
+    });
+    slow.write('{');
+    const trickle = setInterval(() => slow.write(' '), 500);
+    const watchdog = setTimeout(() => slow.destroy(new Error('Deadline not enforced')), 38_000);
+    try {
+      await Promise.race([
+        slowArrived.promise,
+        response.then(() => {
+          throw new Error('Missing slow-request barrier');
+        }),
+      ]);
+      let stopped = false;
+      const stopping = service.close().then(() => {
+        stopped = true;
+      });
+      await expect(local('/mcp', { headers: { connection: 'close' } })).rejects.toThrow();
+      expect(stopped).toBe(false);
+      const timedOut = await response;
+      expect(timedOut.status).toBe(504);
+      expect(JSON.parse(timedOut.body)).toEqual({ error: 'request_timeout' });
+      expect(performance.now() - started).toBeGreaterThan(28_000);
+      expect(credentialReads).toBe(readsBefore);
+      await stopping;
+    } finally {
+      clearInterval(trickle);
+      clearTimeout(watchdog);
+      slow.destroy();
+    }
+    slowBody = false;
+    service = await startAdminHttpService(path);
     hold = true;
     const pending = local('/mcp', {
       method: 'POST',
@@ -223,4 +291,4 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     await backend?.stop(true);
     await rm(directory, { recursive: true, force: true });
   }
-}, 15000);
+}, 45000);
