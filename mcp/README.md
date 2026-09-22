@@ -228,7 +228,9 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 `bun test tests/unit/mcp-oidc-interaction.test.ts` 及两种 `mcp-oidc-compat.ts` 模式均运行真实 provider HTTP/Cookie/发码/兑换，覆盖跨 interaction/Cookie 拼接、CSRF、scope 替换、到期、批准与取消竞争和完成回执丢失清理。Docker 持久化模式使用真实 provider PostgreSQL adapter，但此交互场景的 Supabase 响应仍为合成夹具；不是全链路真实数据库或 UI 验收。当前仅有 JSON 同意协议，没有用户可操作的登录/同意页；内存登录/交互状态限单实例，重启须重新登录，进程崩溃补偿、生产 TLS/proxy/密钥配置、Streamable HTTP 和真实客户端验收仍未完成。
 
-真实数据库联合验收：`bun run test:current tests/mcp-oidc-interaction.test.ts`。临时独立 issuer 数据库与真实本地 Supabase/Auth/SMTP，走完整 HTTP 授权请求、邮件 PKCE、同意 POST、发码和兑换；在线 introspection + 本地授权解析后解密下游凭据，经实际 MCP SDK 内存 transport 调用店铺工具。两名管理员分别批准只读/读写，检查工具发现范围、精确 UUID/Auth session、撤销 A 阻断旧工具上下文而 B 仍可调用；第三次模拟 provider result 已保存但完成回执丢失，确认两端授权撤销、密文删除。结束删除临时账号、grant 和 issuer 数据库。此检查在 Bun 运行，不替代 Node 部署或远程 MCP transport 验收。
+真实数据库联合验收：`bun run test:current tests/mcp-oidc-interaction.test.ts`。临时独立 issuer 数据库与真实本地 Supabase/Auth/SMTP，走完整授权请求、邮件 PKCE、同意 POST、发码和兑换；在线 introspection + 本地授权解析后解密下游凭据，经实际 MCP SDK 内存 transport 调用店铺工具。两名管理员分别批准只读/读写，检查工具发现范围、精确 UUID/Auth session、撤销 A 阻断旧工具上下文而 B 仍可调用。Bun 模式另模拟 provider result 已保存但完成回执丢失，确认两端授权撤销、密文删除。
+
+同一命令现在还运行 Node 服务模式：Linux Docker 中固定 digest 的 Node 22 LTS 执行真实 auth.ts 入口，非 root、只读文件系统、私有 0600 配置、临时最小权限数据库角色，经验证一次性证书的直接 HTTPS 请求，不模拟下游响应、不启用 provider.proxy。需要 Docker、OpenSSL 和本地 Supabase；容器使用 host 网络访问本机回环服务，授权监听仅绑定 127.0.0.1。测试客户端将 allowlist 中的固定 issuer authority 映射到随机本地端口，不测试公网 DNS/证书。结束删除容器、临时配置、账号、grant、issuer 数据库和角色。测试驱动及 MCP SDK 内存 transport 仍在 Bun；Node 模式未注入完成故障，未验证浏览器 UI、进程崩溃恢复或远程 MCP transport。
 
 固定服务配置已集中到 [createOidcProvider](src/oidc-provider.ts)，真实数据库联合测试及 Node PostgreSQL 交互场景现使用它。输入为 `issuer/resource/scopes/signingKey/cookieKeys/clients/introspectionClient`，另由宿主传入持久化 adapter。要求 HTTPS 根 issuer、固定 HTTPS resource、完整 ES256/P-256 私有 JWK（含 kid/alg/use，并验证公私钥匹配）、1–3 个有序 Cookie 签名密钥和独立 introspection secret；后两类值均为 32 字节的规范 base64url，不生成默认密钥。clients 项为 `id/applicationType/redirectUris`：web 仅 HTTPS，native 首版仅 HTTP 字面 loopback（127.0.0.1/::1），不支持自定义 scheme、localhost、query/fragment 回调。native 端口匹配遵循 provider 的 loopback 规则。未知字段、重复 ID/范围/密钥/回调、缺失或不匹配的密钥统一拒绝为 INVALID_OIDC_PROVIDER_CONFIGURATION，不返回配置详情。
 
@@ -298,4 +300,4 @@ bun run docs:check
 
 使用 Bun 将入口编译为 Node ESM，外置 oidc-provider 与 postgres，并随产物提供锁定版本依赖：`bun build mcp/src/auth.ts --target=node --format=esm --external=oidc-provider --external=postgres --outfile=dist/auth.mjs`。在受支持 Node 容器中执行 `node dist/auth.mjs /run/private/issuer.json`；这是入口用法，不是生产部署清单。
 
-`bun scripts/mcp-oidc-compat.ts --with-storage` 现另用一次性 OpenSSL 证书和私有 tmpfs 配置验证真实 Node TLS discovery/JWKS、错误 Host、缺失加密密钥、只读角色、证书域名不匹配、端口冲突清理、重复 close，以及真实 CLI 同配置重启/JWKS 稳定和 SIGTERM 退出。Node 与临时 PostgreSQL 共享隔离网络命名空间，不发布端口。此服务烟测未调用真实下游账号，不证明旧 token/在途交互重启恢复；下一步仍需 Node 真实 Supabase 联合验收、登录/同意 UI、崩溃补偿、Streamable HTTP/RFC9728 和真实远程客户端验收。
+`bun scripts/mcp-oidc-compat.ts --with-storage` 现另用一次性 OpenSSL 证书和私有 tmpfs 配置验证真实 Node TLS discovery/JWKS、错误 Host、缺失加密密钥、只读角色、证书域名不匹配、端口冲突清理、重复 close，以及真实 CLI 同配置重启/JWKS 稳定和 SIGTERM 退出。Node 与临时 PostgreSQL 共享隔离网络命名空间，不发布端口。此服务烟测未调用真实下游账号，不证明旧 token/在途交互重启恢复；真实 Node 下游验收使用上文 test:current 命令。后续仍需登录/同意 UI、在途关闭及崩溃补偿、Streamable HTTP/RFC9728 和真实远程客户端验收。
