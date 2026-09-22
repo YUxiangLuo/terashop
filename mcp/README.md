@@ -17,7 +17,7 @@
 | 业务工具 | [工具测试](../tests/unit/mcp.test.ts) 断言 112 个工具及只读 53 个；业务合同见下表 | 工具数不代表全部新业务；真实 PayPal Sandbox 另需外部配置 |
 | 授权与用户隔离 | [授权入口](src/auth.ts)、[宿主](src/oidc-service.ts)、逐用户加密凭据、在线撤销／scope 检查、刷新准入；[联合测试](../tests/mcp-oidc-interaction.test.ts) 使用真实本地 Auth／SMTP／数据库 | 用户可操作的登录／同意页、目标客户端兼容性 |
 | 持久化与恢复 | [批准日志](src/oidc-journal.ts)、[启动恢复](src/oidc-recovery.ts)、单实例锁；已有正常退出、强杀和迟到凭据写入回归 | 其他批准阶段故障、密钥轮换与备份恢复演练；不承诺网络分区接管 |
-| MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新；真实 HTTPS 店铺读写、版本冲突、降权／撤销及刷新 pending 竞争已验证 | 同时领取刷新资格、刷新回执丢失、断连与结果未知的网络验收 |
+| MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新；真实 HTTPS 店铺读写、版本冲突、降权／撤销、刷新 pending 竞争及刷新断连后重启拒绝已验证 | 同时领取刷新资格、刷新完成回执丢失、业务写入断连与结果未知的网络验收 |
 | 网络故障边界 | [TLS 测试](../tests/unit/mcp-http-service.test.ts) 覆盖慢请求体、introspection 超时／断连、排空及 CLI SIGTERM | 凭据／刷新／业务调用阶段阻塞与断连、握手和请求头慢连接防护、并发与资源预算 |
 
 真实 Supabase 联合测试的 Bun 场景仍直接转发到 handler；Node 场景已通过独立 Bun MCP CLI 的真实 HTTPS 入口连接真实 Node 授权服务和本地 Supabase，验证店铺读写、只读令牌越权拒绝、版本冲突、管理员降权、撤销隔离及授权服务重启后的有效／失效令牌。独立 TCP／TLS 单测仍用本地授权后端夹具验证故障边界。**上述联合场景通过不等于整批端到端或公网验收完成。** 下方记录保留各场景范围，不作为生产就绪证明。
@@ -266,7 +266,9 @@ Node HTTPS 联合场景另验证实际写权限：只读令牌直接调用隐藏
 
 HTTPS 下游刷新 pending 竞争已接入同一 Node 场景：通过可信凭据写入方法仅将加密的 expiresAt 提前到 20 秒内（revision 1→2），不伪造 Auth token 或响应。可丢弃本地库对 auth.refresh_tokens 加 SHARE 表锁，pg_blocking_pids 确认首个真实 Auth 刷新到达写入屏障；刷新资格已持久化时，第二个 HTTPS 读取返回 503 authorization_unavailable，revision／refresh_id 保持不变。释放锁后首请求读取成功，密文 revision 变为 3、refresh_id 清空、refresh token 更换、用户及独占 Auth session 不变，Auth 仅新增一条该 session 的刷新令牌记录。后续读取不再次推进版本，Node 授权服务重启后仍可读取该密文并通过 HTTPS 调用。本场景验证已领取期间的竞争，不等于两个请求同时领取、HTTP 刷新请求次数审计、回执丢失或自然过期验收；表锁仅用于串行本地测试，不可用于共享部署。
 
-Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并要求退出码 0，重新使用同一私有配置和数据库启动真实入口。先消费 B 的原刷新令牌并撤销 A 的本地授权；第一次重启后 A 仍被拒绝，B 的旧访问令牌、grant 绑定、加密凭据及店铺调用仍有效，替代刷新令牌可继续轮换且权限不变。随后重放原刷新令牌返回 invalid_grant，整组授权失效；第二次重启后先检查访问令牌仍不可用，再确认最新刷新令牌被拒绝，旧 MCP 上下文也无法调用。此测试不重启数据库，不覆盖强制崩溃、SSO Cookie 恢复或密钥轮换。
+HTTPS 刷新断连回归沿用真实 Auth 写入屏障：再次提前加密过期时间（revision 3→4），观察刷新已领取且 Auth 被锁阻塞后中止客户端请求，并在释放数据库锁之前向 MCP 发送 SIGTERM。MCP 必须在 5 秒看门狗内退出码 0；然后释放锁、以相同私有配置启动新的 Bun MCP 进程。连续两次 HTTPS 读取均须返回 503，revision=4 及同一个 refresh_id 保持不变，不重置或接管未知结果的刷新。此结果证明本地等待结束和 pending 状态跨 MCP 重启保留，不证明 Auth 在途事务已回滚，也未统计底层 HTTP 重试次数；此类 pending 仍须撤销并重新授权，不提供自动恢复令牌的后门。
+
+Node 联合场景另验证两次正常授权服务进程重建：用 SIGTERM 停止容器并要求退出码 0，重新使用同一私有配置和数据库启动真实入口。先消费 B 的原刷新令牌并撤销 A 的本地授权；第一次重启后 A 仍被拒绝，B 的旧访问令牌、grant 绑定、加密凭据及店铺调用仍有效，替代刷新令牌可继续轮换且权限不变。随后执行上述下游刷新断连场景，再重放原上游刷新令牌，返回 invalid_grant，整组授权失效；第二次重启后先检查访问令牌仍不可用，再确认最新刷新令牌被拒绝，旧 MCP 上下文也无法调用。此测试不重启数据库，不覆盖强制崩溃、SSO Cookie 恢复或密钥轮换。
 
 在途批准退出验收复用上述 Node 场景：持有 issuer adapter 的写入 advisory lock，通过 pg_blocking_pids 确认批准已阻塞后发送 SIGTERM；观察监听器停止接收，同时数据库写入仍在等待，才释放屏障。保持连接的批准须返回 303，服务退出码须为 0，重启后用原 Cookie 和 resume 地址继续兑换授权码，验证本地 grant、加密凭据及店铺调用。
 

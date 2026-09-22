@@ -42,6 +42,7 @@ for (const runtime of ['bun', 'node'] as const)
     let provider: ReturnType<typeof createOidcProvider> | undefined;
     let mcpDirectory: string | undefined;
     let mcpProcess: ReturnType<typeof Bun.spawn> | undefined;
+    let startMcp: (() => Promise<void>) | undefined;
     const sessions: Awaited<ReturnType<typeof mcpSession>>[] = [];
     const users: Awaited<ReturnType<typeof signup>>[] = [];
     try {
@@ -149,23 +150,26 @@ for (const runtime of ['bun', 'node'] as const)
           }),
           { mode: 0o600 },
         );
-        const child = Bun.spawn([process.execPath, 'mcp/src/remote.ts', configPath], {
-          env: { ...process.env, NODE_EXTRA_CA_CERTS: node.caPath },
-          stdout: 'pipe',
-          stderr: 'pipe',
-        });
-        mcpProcess = child;
-        const watchdog = setTimeout(() => child.kill('SIGKILL'), 10_000);
-        try {
-          const reader = child.stdout.getReader();
+        startMcp = async () => {
+          const child = Bun.spawn([process.execPath, 'mcp/src/remote.ts', configPath], {
+            env: { ...process.env, NODE_EXTRA_CA_CERTS: node!.caPath },
+            stdout: 'pipe',
+            stderr: 'pipe',
+          });
+          mcpProcess = child;
+          const watchdog = setTimeout(() => child.kill('SIGKILL'), 10_000);
           try {
-            expect(new TextDecoder().decode((await reader.read()).value)).toBe('MCP_HTTP_READY\n');
+            const reader = child.stdout.getReader();
+            try {
+              expect(new TextDecoder().decode((await reader.read()).value)).toBe('MCP_HTTP_READY\n');
+            } finally {
+              reader.releaseLock();
+            }
           } finally {
-            reader.releaseLock();
+            clearTimeout(watchdog);
           }
-        } finally {
-          clearTimeout(watchdog);
-        }
+        };
+        await startMcp();
       } else {
         provider = createOidcProvider(providerConfig, createOidcAdapter(store));
         provider.proxy = true; // Isolated Bun fixture only, never the Node service.
@@ -637,11 +641,11 @@ for (const runtime of ['bun', 'node'] as const)
         (await toolData<{ currency: string }>(sessions[1].client, 'get_admin_shop_settings')).currency,
       ).toBe('USD');
       if (node) {
-        const networkCall = async (token: string) => {
+        const networkCall = async (token: string, signal?: AbortSignal) => {
           const response = await fetch(resource, {
             method: 'POST',
             tls: { ca: node!.tls.cert },
-            signal: AbortSignal.timeout(10_000),
+            signal: AbortSignal.any([AbortSignal.timeout(10_000), ...(signal ? [signal] : [])]),
             headers: {
               authorization: `Bearer ${token}`,
               'content-type': 'application/json',
@@ -751,6 +755,54 @@ for (const runtime of ['bun', 'node'] as const)
           'store:read',
           'store:write',
         ]);
+        // Abort after real Auth refresh starts, before it can complete. A lost
+        // result must leave a durable pending claim, not permission to retry.
+        await authorizer.writeCredentials(next.data.access_token, cipher, {
+          expectedRevision: renewed.revision,
+          credentials: { ...renewed.credentials!, expiresAt: Math.floor(Date.now() / 1000) + 20 },
+          anonKey: ANON_KEY,
+        });
+        const abort = new AbortController();
+        let pendingRefreshId: string | undefined;
+        const disconnected = await heldTransactionRace(
+          db,
+          (tx) => tx`lock table auth.refresh_tokens in share mode`,
+          () =>
+            networkCall(next.data.access_token, abort.signal).then(
+              () => 'responded',
+              () => 'disconnected',
+            ),
+          async () => {
+            const [pending] = await db`select revision,refresh_id from private.mcp_credentials
+              where grant_id=${original.grantId}::uuid`;
+            expect(Number(pending.revision)).toBe(4);
+            expect(pending.refresh_id).not.toBeNull();
+            pendingRefreshId = pending.refresh_id;
+            abort.abort();
+            // Stop before releasing Auth's DB barrier. Successful drain proves
+            // the local refresh wait ended; it does not prove Auth rolled back.
+            const child = mcpProcess!;
+            child.kill('SIGTERM');
+            const watchdog = setTimeout(() => child.kill('SIGKILL'), 5000);
+            try {
+              expect(await child.exited).toBe(0);
+            } finally {
+              clearTimeout(watchdog);
+            }
+          },
+        );
+        expect(disconnected).toBe('disconnected');
+        await startMcp!();
+        for (let attempt = 0; attempt < 2; attempt++) {
+          expect(await networkCall(next.data.access_token)).toEqual({
+            status: 503,
+            body: { error: 'authorization_unavailable' },
+          });
+          const [pending] = await db`select revision,refresh_id from private.mcp_credentials
+            where grant_id=${original.grantId}::uuid`;
+          expect(Number(pending.revision)).toBe(4);
+          expect(pending.refresh_id).toBe(pendingRefreshId);
+        }
         const replay = await refresh(refreshTokens[1]);
         expect(replay.status).toBe(400);
         expect(replay.data.error).toBe('invalid_grant');
