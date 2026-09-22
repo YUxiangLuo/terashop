@@ -556,3 +556,13 @@ approve 在首次 await 前消耗本次尝试，重查下游真实管理员 UUID
 失败保守返回 APPROVAL_UNCONFIRMED，尝试撤销新上游与已知本地 grant；本地撤销沿用事务删除密文。上游撤销不依赖取得本地 ID。若创建回执丢失而未知本地 ID、清理调用失败或回执畸形，则返回 APPROVAL_CLEANUP_UNCONFIRMED；禁止继续发码，不能声称全部回滚。两套存储不是分布式事务，进程崩溃、完成回执丢失、成功后宿主未完成交互等情况仍需持久化恢复/清理设计，不复用原登录会话自动重新批准。
 
 验证包括真实库 Grant 的单测，以及真实本地邮件 PKCE → Cookie/CSRF 内部身份交接 → grant/session/密文数据库保存的集成；模拟数据库写成功但响应丢失后确认两端 grant 撤销、密文删除且只写一次。此批在 Bun 执行，上游用内存 adapter，未模拟用户在真实 consent 页点击，也未完成 provider interaction 到浏览器事务的不可替换绑定。下一步实现该绑定与同意流程，再做 Node 持久化全链路验收；当前仍无远程 MCP listener。
+
+### 原生交互绑定、明确同意及真实登录联合验收
+
+后续 [createOidcInteractionHandler](../mcp/src/oidc-interaction.ts) 已把 provider interaction 与下游登录绑定。原生 Node 请求先通过 provider 签名 Cookie/Session 校验，再比较路由 UID；登录 bootstrap 仅接受宿主验证后的 UID，不能从请求正文取得身份或批准范围。每次交互操作核对固定 resource、Code/S256、openid/offline_access 与允许的 store scopes；启动时保存 client/redirect/resource/scopes 指纹，批准时重新比较，不接受权限替换。POST 同意/拒绝要求独立决策头、同源 Origin 与 CSRF；provider 已有结果的 interaction 拒绝重开。
+
+这是 JSON 同意协议，尚非用户可操作的页面。五分钟内一次批准，内存状态限定单实例；批准进入存储后再次批准或取消均拒绝。只有两端 grant/凭据保存成功，才用 provider interactionResult 写入 login+consent 并跳转到 resume，由库继续发码；完成异常调用批准原语的 revoke，清理不明明确返回 503。没有以业务 service-role 代替用户权限。进程崩溃与未知本地 grant ID 仍没有持久化补偿，不能把此次异常处理当作分布式事务或多节点保证。
+
+验证分两层：Node LTS Docker 的内存/真实 PostgreSQL 场景覆盖原生 HTTP、签名 Cookie、明确批准/拒绝、权限替换、超时、竞争和结果保存后异常；其中 Supabase 响应为合成。另有 [真实联合测试](../tests/mcp-oidc-interaction.test.ts) 在 Bun 使用真实本地 SMTP/Auth/店铺数据库及独立 issuer 数据库，完整经过邮件 PKCE、同意、发码、兑换、introspection、凭据解密和 MCP SDK 内存 transport。两管理员分别批准只读/读写，验证 UUID/session、工具发现与单方撤销隔离；完成回执丢失时确认上游撤销与本地密文删除。临时账号、授权与 issuer 数据库在测试结束清理。
+
+剩余交付条件：Node 服务配置和真实下游联合运行、稳定密钥/重启验收、用户登录同意页及浏览器检查、跨存储恢复/保留期、Streamable HTTP/资源元数据、真实远程客户端与生产运维验收；当前没有对外开放远程 MCP，测试用 loopback TLS 代理模拟不能作为生产代理配置。

@@ -228,6 +228,16 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 `bun test tests/unit/mcp-oidc-interaction.test.ts` 及两种 `mcp-oidc-compat.ts` 模式均运行真实 provider HTTP/Cookie/发码/兑换，覆盖跨 interaction/Cookie 拼接、CSRF、scope 替换、到期、批准与取消竞争和完成回执丢失清理。Docker 持久化模式使用真实 provider PostgreSQL adapter，但此交互场景的 Supabase 响应仍为合成夹具；不是全链路真实数据库或 UI 验收。当前仅有 JSON 同意协议，没有用户可操作的登录/同意页；内存登录/交互状态限单实例，重启须重新登录，进程崩溃补偿、生产 TLS/proxy/密钥配置、Streamable HTTP 和真实客户端验收仍未完成。
 
+真实数据库联合验收：`bun run test:current tests/mcp-oidc-interaction.test.ts`。临时独立 issuer 数据库与真实本地 Supabase/Auth/SMTP，走完整 HTTP 授权请求、邮件 PKCE、同意 POST、发码和兑换；在线 introspection + 本地授权解析后解密下游凭据，经实际 MCP SDK 内存 transport 调用店铺工具。两名管理员分别批准只读/读写，检查工具发现范围、精确 UUID/Auth session、撤销 A 阻断旧工具上下文而 B 仍可调用；第三次模拟 provider result 已保存但完成回执丢失，确认两端授权撤销、密文删除。结束删除临时账号、grant 和 issuer 数据库。此检查在 Bun 运行，不替代 Node 部署或远程 MCP transport 验收。
+
+远程版本后续按以下依赖顺序推进：
+
+1. 固定 Node 授权服务配置与入口：预注册客户端、签名/Cookie/加密密钥、最小数据库权限、TTL、受信 TLS 代理及启动校验；把真实 Supabase 联合场景带入 Node，并验证服务重启与密钥恢复。
+2. 用户登录/同意页面：展示真实 client/resource/scopes 和离线刷新，同源 Cookie/CSRF、拒绝/到期/失败状态；只用于用户授权，不用于 Agent 操作 Admin SPA。补真实浏览器验收。
+3. 跨存储失败恢复：持久化批准进度或等价的可验证补偿，覆盖在途退出、创建回执未知、未完成交互与孤立密文清理；明确单实例限制及敏感 payload 保留期。
+4. Bun Streamable HTTP 与 RFC 9728 元数据：逐请求在线校验、逐用户凭据读取/刷新、会话隔离与 scope 变化，不复用进程级管理员 JWT，不重放结果不明的写操作。
+5. 真实远程客户端和部署验收：预注册兼容性、断线/并发/撤销/降级、限流、日志脱敏、容器健康/退出、备份和运维手册。完成这些才能称远程 MCP 可交付；部署本身另需明确授权。
+
 ```bash
 bun run typecheck
 bun run test:unit
