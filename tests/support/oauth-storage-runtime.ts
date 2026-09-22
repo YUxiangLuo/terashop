@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 import { createOidcAdapter } from '../../mcp/src/oidc-adapter';
 import { verifyOAuthProvider } from './oauth-provider-compat';
+import { verifyOAuthInteraction } from './oauth-interaction';
 
 assert.equal(process.versions.bun, undefined);
 assert.equal(process.release.lts, 'Jod');
@@ -56,6 +57,8 @@ try {
     assert.equal(phase, undefined);
     await verifyOAuthProvider('opaque', Adapter, true);
     console.log('PASS: Node LTS PostgreSQL protocol and barrier-controlled HTTP code/refresh races');
+    await verifyOAuthInteraction(Adapter);
+    console.log('PASS: Node LTS PostgreSQL interaction binding, consent and completion cleanup');
   }
 } finally {
   await db.end({ timeout: 5 });

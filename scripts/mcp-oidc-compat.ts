@@ -77,26 +77,25 @@ try {
     await chmod(join(directory, 'database-url'), 0o644); // Disposable credential, readable by container uid 1000.
   }
   const build = await Bun.build({
-    entrypoints: [
-      join(
-        root,
-        storage ? 'tests/support/oauth-storage-runtime.ts' : 'tests/support/oauth-provider-compat.ts',
-      ),
-    ],
+    entrypoints: (storage
+      ? ['tests/support/oauth-storage-runtime.ts']
+      : ['tests/support/oauth-provider-compat.ts', 'tests/support/oauth-interaction.ts']
+    ).map((path) => join(root, path)),
     outdir: directory,
     target: 'node',
     external: ['oidc-provider', 'postgres'],
-    naming: 'scenario.mjs',
+    naming: '[name].mjs',
   });
   if (!build.success) throw new Error('Could not build OIDC compatibility scenario');
-  await chmod(join(directory, 'scenario.mjs'), 0o644);
+  for (const output of build.outputs) await chmod(output.path, 0o644);
   await Bun.write(
     join(directory, 'run.mjs'),
     storage
-      ? `import './scenario.mjs';`
+      ? `import './oauth-storage-runtime.mjs';`
       : `
 import assert from 'node:assert/strict';
-import { verifyOAuthProvider } from './scenario.mjs';
+import { verifyOAuthProvider } from './oauth-provider-compat.mjs';
+import { verifyOAuthInteraction } from './oauth-interaction.mjs';
 assert.equal(process.versions.bun, undefined);
 assert.equal(process.release.lts, 'Jod');
 console.log('Authorization runtime:', process.version, process.release.lts);
@@ -104,6 +103,8 @@ for (const format of ['jwt', 'opaque']) {
   await verifyOAuthProvider(format);
   console.log('PASS:', format, 'S256/resource/scope/introspection/rotation/revocation');
 }
+await verifyOAuthInteraction();
+console.log('PASS: interaction/login/explicit consent/code issuance/failed completion cleanup');
 `,
   );
   await chmod(join(directory, 'run.mjs'), 0o644);

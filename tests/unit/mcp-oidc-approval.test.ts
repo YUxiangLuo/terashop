@@ -16,7 +16,8 @@ async function fixture(
     | 'scope'
     | 'binding'
     | 'envelope'
-    | 'revoke-receipt',
+    | 'revoke-receipt'
+    | 'completion-revoke',
 ) {
   const provider = new Provider('https://auth.example', {
     jwks: { keys: [{ ...privateKey.export({ format: 'jwk' }), kid: 'test', alg: 'ES256', use: 'sig' }] },
@@ -81,7 +82,7 @@ async function fixture(
         if (fail === 'create') throw new Error('lost secret creation response');
       }
       if (body.p_action === 'revoke') {
-        if (fail === 'revoke') throw new Error('lost secret revoke response');
+        if (fail === 'revoke' || fail === 'completion-revoke') throw new Error('lost secret revoke response');
         revoked = true;
         stored = undefined;
         if (fail === 'revoke-receipt') return Response.json({ id, state: 'active', version: 1 });
@@ -194,5 +195,20 @@ test('mismatched persistence receipts cannot complete approval or falsely confir
     expect(f.state().revoked).toBe(true);
     if (fail === 'scope' || fail === 'binding')
       expect(f.calls.filter((x) => x === 'mcp_credential_command:write')).toHaveLength(0);
+  }
+});
+
+test('host can revoke a completed approval; a missing cleanup receipt is never called success', async () => {
+  for (const fail of [undefined, 'completion-revoke'] as const) {
+    const f = await fixture(fail);
+    await expect(f.approval.revoke()).rejects.toThrow('APPROVAL_NOT_COMPLETED');
+    const approved = await f.approval.approve(f.identity);
+    if (fail) await expect(f.approval.revoke()).rejects.toThrow('APPROVAL_CLEANUP_UNCONFIRMED');
+    else {
+      await f.approval.revoke();
+      expect(f.state()).toMatchObject({ revoked: true, stored: undefined });
+    }
+    expect(await f.provider.Grant.find(approved.providerGrantId)).toBeUndefined();
+    await expect(f.approval.approve(f.identity)).rejects.toThrow('APPROVAL_ALREADY_ATTEMPTED');
   }
 });

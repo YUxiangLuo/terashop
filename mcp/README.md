@@ -222,6 +222,12 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 任何失败均消耗本次批准，不自动重试。尽力撤销上游及已知 ID 的本地 grant，正常本地撤销删除密文；创建响应丢失而未知本地 ID、撤销失败或回执异常返回 APPROVAL_CLEANUP_UNCONFIRMED，不能声称回滚完成。不得继续发码或复用本次登录会话，需要后续受信清理；进程崩溃没有持久化补偿调度。单测覆盖身份/会话替换、并发、畸形回执、结果丢失；`tests/mcp-login.test.ts` 用真实邮件登录、Auth 与数据库验证首次保存和已提交写响应丢失后的撤销。该集成在 Bun 执行，上游 Grant 使用真实库的内存 adapter；尚未串联浏览器同意、provider interaction 与 Node 持久化部署，也不构成完整远程授权流程。
 
+后续已增加 [createOidcInteractionHandler](src/oidc-interaction.ts)：原生 Node HTTP handler，挂在 provider.callback 前，不启动监听器。`GET /interaction/:uid` 返回已验证的 client/redirect/resource/store scopes/offlineAccess；`POST .../start` 绑定登录 Cookie，`POST .../approve` 和 `POST .../cancel` 分别要求 `X-Tera-Consent: approve/deny`、同源 Origin 与登录 CSRF。start 另要求 `X-Tera-Login: start`，以上 POST 不接受正文。邮件与回调沿用 `/login/email`、配置的固定 callback、`/login/status`；独立 `/login/session`、`/login/approve`、`/login/cancel` 不对外开放。
+
+每次交互操作用原生请求验证 provider 的签名 Cookie/Session，并比较路由 UID；client/resource/scopes 只取 provider interaction，不从用户正文取值。登录 bootstrap 固定 UID，身份交接必须匹配；五分钟内单次批准，存储开始后取消/再次批准拒绝。先保存两端 grant/加密凭据，再提交 login+consent 结果并返回 provider resume 地址；完成失败时撤销已保存批准，清理结果不明返回 503/APPROVAL_CLEANUP_UNCONFIRMED。已写 provider result 的交互不能重新启动，固定 authority 检查不信任 Forwarded 生成 URL。
+
+`bun test tests/unit/mcp-oidc-interaction.test.ts` 及两种 `mcp-oidc-compat.ts` 模式均运行真实 provider HTTP/Cookie/发码/兑换，覆盖跨 interaction/Cookie 拼接、CSRF、scope 替换、到期、批准与取消竞争和完成回执丢失清理。Docker 持久化模式使用真实 provider PostgreSQL adapter，但此交互场景的 Supabase 响应仍为合成夹具；不是全链路真实数据库或 UI 验收。当前仅有 JSON 同意协议，没有用户可操作的登录/同意页；内存登录/交互状态限单实例，重启须重新登录，进程崩溃补偿、生产 TLS/proxy/密钥配置、Streamable HTTP 和真实客户端验收仍未完成。
+
 ```bash
 bun run typecheck
 bun run test:unit

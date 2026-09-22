@@ -64,13 +64,42 @@ export function createOidcApproval(
     return response.json();
   }
   let used = false;
+  let completedCleanup: (() => Promise<void>) | undefined;
   return {
+    // Host completion can fail after persistence succeeds. Never retry completion
+    // or reuse the identity; revoke both grants before reporting a failed attempt.
+    async revoke(): Promise<void> {
+      if (!completedCleanup) throw new Error('APPROVAL_NOT_COMPLETED');
+      await completedCleanup();
+    },
     async approve(input: Identity): Promise<{ providerGrantId: string; grantId: string }> {
       if (used) throw new Error('APPROVAL_ALREADY_ATTEMPTED');
       used = true; // Includes failed/unknown attempts; never reuse a login credential pair.
       let upstream: InstanceType<Provider['Grant']> | undefined;
       let binding: Record<string, string> | undefined;
       let grantId: string | undefined;
+      async function cleanup() {
+        let failed = Boolean(binding && !grantId);
+        try {
+          await upstream?.destroy();
+        } catch {
+          failed = true;
+        }
+        if (binding && grantId) {
+          try {
+            const revoked = await rpc('mcp_grant_command', {
+              p_action: 'revoke',
+              p_binding: binding,
+              p_grant_id: grantId,
+            });
+            if (revoked.id !== grantId || revoked.state !== 'revoked' || revoked.version !== 2)
+              throw new Error('Invalid revocation receipt');
+          } catch {
+            failed = true;
+          }
+        }
+        if (failed) throw new Error('APPROVAL_CLEANUP_UNCONFIRMED');
+      }
       try {
         const userId = z.uuid().parse(input.userId),
           sessionId = z.uuid().parse(input.sessionId);
@@ -163,30 +192,13 @@ export function createOidcApproval(
         assertFresh();
         if (!(await provider.Grant.find(providerGrantId))) throw new Error('Provider approval revoked');
         assertFresh();
+        completedCleanup = cleanup;
         return { providerGrantId, grantId };
       } catch {
         // No token/code has been issued by this module. Revoke upstream even when
         // local create committed but its ID was lost. Cleanup is best-effort, not rollback.
-        let cleanupFailed = Boolean(binding && !grantId);
-        try {
-          await upstream?.destroy();
-        } catch {
-          cleanupFailed = true;
-        }
-        if (binding && grantId) {
-          try {
-            const revoked = await rpc('mcp_grant_command', {
-              p_action: 'revoke',
-              p_binding: binding,
-              p_grant_id: grantId,
-            });
-            if (revoked.id !== grantId || revoked.state !== 'revoked' || revoked.version !== 2)
-              throw new Error('Invalid revocation receipt');
-          } catch {
-            cleanupFailed = true;
-          }
-        }
-        throw new Error(cleanupFailed ? 'APPROVAL_CLEANUP_UNCONFIRMED' : 'APPROVAL_UNCONFIRMED');
+        await cleanup();
+        throw new Error('APPROVAL_UNCONFIRMED');
       }
     },
   };
