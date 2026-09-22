@@ -56,6 +56,10 @@ export interface Location {
   name: string;
   code: string;
   is_default: boolean;
+  is_active: boolean;
+  revision: number;
+  address: import("../../../types/database").Json;
+  created_at: string;
 }
 export interface Inventory {
   variant_id: string;

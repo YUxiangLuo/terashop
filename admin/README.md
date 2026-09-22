@@ -41,7 +41,9 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 - 分类保存保留原始 `updated_at` 微秒令牌；循环、冲突或未知结果必须显式重读，不能换令牌覆盖。新建 UUID 保留在 URL，未知创建结果按同一 UUID 核对。父分类搜索/分页不会丢失当前选择。
 - 使用 `create_product` / `update_product` 原子保存商品、规格、变体、图片和分类，保留成本、条码及扩展等未编辑字段。更新携带读取时的 revision；冲突或失败不会自动换版本重试。先重新读取并核对保存结果，再编辑。创建 UUID 保留在 URL，刷新仍读取同一商品，不盲目生成新 UUID 重试。
 - `/inventory` 提供跨商品名称/SKU 子串搜索、商品分页和选中商品的库存操作，不一次加载全店变体或库存。商品详情下也提供同一库存区：按已保存的 tracked variant 和活跃仓库查询 on_hand / reserved / available，支持正负整数调整及备注，独立于商品保存。先保存或放弃商品编辑，再调整库存。
-- 库存流水按当前变体、仓库及原因查询，按原始字符串 ID 分页，支持刷新和订单跳转；调整成功后刷新库存及流水。历史 `on_hand_after` 不是当前可用量，预占/释放未必产生流水。库存页面与商品页面共用同一待决调整记录。不提供仓库创建、调拨或停用仓库流水查询 UI。
+- 库存流水按当前变体、仓库及原因查询，按原始字符串 ID 分页，支持刷新和订单跳转；调整成功后刷新库存及流水。历史 `on_hand_after` 不是当前可用量，预占/释放未必产生流水。库存页面与商品页面共用同一待决调整记录。不提供调拨或停用仓库流水查询 UI。
+- `/locations` 支持仓库名称/编码搜索、启停筛选、分页和 URL 筛选保留；可创建（默认停用）、编辑编码/名称/JSON 地址、启停和切换默认仓库。地址支持保留自定义字段及以 `null` 清空。库存页面重新进入时加载活跃仓库；仓库配置不搬移库存或清除预占，不提供删除。
+- 仓库更新携带读取时的 `revision`，切换默认还携带读取时的默认仓库 ID；冲突或未知结果锁定命令，要求显式重读，不自动换版本重试。默认仓库必须先切换才能停用，未保存或停用仓库不能设为默认。新建 UUID 留在 URL，刷新按同一 ID 核对创建结果。
 - `/orders` 按订单、支付和履约状态组合筛选，使用原始字符串订单号游标分页。详情展示历史价格、地址、客户备注和发货记录；内部备注按原值比较保存，支持单独清空。
 - 订单详情按后端返回的可履约余额记录部分或全部发货，可填写承运商和跟踪号。确认即记录 shipped，不购买面单、不发送邮件、不修改订单快照；付款未完成或资金对账 hold 时不可发货。不提供退款、支付捕获、订单取消、权限管理或报表 UI。
 - 未保存字段只在内存中，离开页面会提示；退出或丢失会话会清除编辑界面。不要把浏览器提示当作持久草稿。创建时先保存商品，再上传图片。
@@ -85,5 +87,7 @@ location / {
 构建只写入公开配置，不从数据库预取商品、管理员资料或会话。远程 Supabase 与图片 URL 必须可由浏览器访问，不能发布 localhost 构建。关闭索引的 meta 标记不是访问控制；实际授权依赖 Auth、数据库和 Storage RLS。
 
 分类浏览器回归：启动本地 Supabase 与 Admin 后运行 `bun scripts/admin-categories-smoke.ts`（需要 `agent-browser`；默认访问 `http://127.0.0.1:5174`，可用 `ADMIN_URL` 指定其他本地端口）。脚本验证创建、展开树、父级/状态/排序、URL 筛选、并发冲突锁定与显式重读、移至根级，以及商品分类选择跨搜索保留；只创建并清理本次临时账号和分类，不保存测试商品。桌面、移动端和列表截图写入 `/tmp/admin-category-*.png`。分类数据库回归：`bun run test:current tests/admin-categories.test.ts`。
+
+仓库浏览器回归：相同环境运行 `bun scripts/admin-locations-smoke.ts`，验证创建、JSON 地址校验/保留/清空、启停、旧版本默认切换和编辑拒绝、显式重读及 URL 筛选；只写入并清理临时仓库和账号，不切换现有默认仓库。截图写入 `/tmp/admin-warehouse-*.png`。默认切换成功、并发竞争、权限和分页由 `bun run test:current tests/admin-location-commands.test.ts tests/admin-inventory-reads.test.ts` 覆盖；该数据库测试会临时切换本地默认仓库并恢复选择。
 
 自动检查：`admin:check`、`admin:build`、`bun test tests/unit/admin-commands.test.ts tests/unit/admin-catalog.test.ts`；数据库回归可运行 `bun run test:current tests/product-edit.test.ts tests/admin-order-operations.test.ts tests/admin-retry.test.ts tests/storage-admin.test.ts`。浏览器验收应包含登录失败、普通客户拒绝、管理员恢复会话、创建/发布/归档、规格组合增删及原 ID 保留、图片上传和变体归属、分类跨搜索保留、库存搜索/流水分页、仓库/变体切换、备注冲突、部分发货、未知写结果刷新后原键重试，以及桌面/移动端与深链接刷新。整个回归套件会写入额外目录数据；恢复演示环境需重新 setup（会清空账号）并构建 Storefront。
