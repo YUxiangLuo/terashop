@@ -79,20 +79,26 @@ export function createOidcApproval(
       let binding: Record<string, string> | undefined;
       let grantId: string | undefined;
       async function cleanup() {
-        let failed = Boolean(binding && !grantId);
+        let failed = false;
         try {
           await upstream?.destroy();
         } catch {
           failed = true;
         }
-        if (binding && grantId) {
+        if (binding) {
           try {
             const revoked = await rpc('mcp_grant_command', {
-              p_action: 'revoke',
+              p_action: grantId ? 'revoke' : 'revoke_binding',
               p_binding: binding,
-              p_grant_id: grantId,
+              ...(grantId ? { p_grant_id: grantId } : {}),
             });
-            if (revoked.id !== grantId || revoked.state !== 'revoked' || revoked.version !== 2)
+            if (
+              !z.uuid().safeParse(revoked.id).success ||
+              (grantId && revoked.id !== grantId) ||
+              revoked.user_id !== input.userId ||
+              revoked.state !== 'revoked' ||
+              revoked.version !== 2
+            )
               throw new Error('Invalid revocation receipt');
           } catch {
             failed = true;

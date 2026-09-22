@@ -220,7 +220,7 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 
 首次批准原语 [createOidcApproval](src/oidc-approval.ts) 补齐“尚未签发 MCP token 时保存下游凭据”的路径。受信宿主为一个已验证 interaction 固定 client/resource/scopes，取得明确同意后将 `takeIdentity` 的结果交给一次性 approve：在线重查精确管理员 UUID/Auth session、新建 provider Grant、创建本地 grant、绑定独占 session、以 revision=1 加密保存，最后重查授权和凭据有效期。成功仅向内部宿主返回两个 grant ID，不返回凭据，不调用 interactionFinished 或签发授权码；宿主必须成功后才允许继续发码。本流程包含 openid/offline_access，宿主同意页须明确涵盖离线刷新，不得据此扩大 store scopes。
 
-任何失败均消耗本次批准，不自动重试。尽力撤销上游及已知 ID 的本地 grant，正常本地撤销删除密文；创建响应丢失而未知本地 ID、撤销失败或回执异常返回 APPROVAL_CLEANUP_UNCONFIRMED，不能声称回滚完成。不得继续发码或复用本次登录会话，需要后续受信清理；进程崩溃没有持久化补偿调度。单测覆盖身份/会话替换、并发、畸形回执、结果丢失；`tests/mcp-login.test.ts` 用真实邮件登录、Auth 与数据库验证首次保存和已提交写响应丢失后的撤销。该集成在 Bun 执行，上游 Grant 使用真实库的内存 adapter；尚未串联浏览器同意、provider interaction 与 Node 持久化部署，也不构成完整远程授权流程。
+任何失败均消耗本次批准，不自动重试。尽力撤销上游及本地 grant，正常本地撤销删除密文；已知 ID 使用 revoke，创建回执丢失时使用完整 binding 调用 service-only revoke_binding。核对撤销回执的 ID、用户及终态；未知 ID 的清理也必须获得合法 UUID 和原用户。查不到记录、撤销失败或回执异常仍返回 APPROVAL_CLEANUP_UNCONFIRMED，不能声称回滚完成。不得继续发码或复用本次登录会话；进程崩溃仍没有补偿调度。单测覆盖身份/会话替换、并发、畸形回执、结果丢失；`tests/mcp-login.test.ts` 用真实邮件登录、Auth 与数据库验证首次保存，以及已提交 create/凭据 write 回执丢失后的撤销。该集成在 Bun 执行，上游 Grant 使用真实库的内存 adapter，不构成完整远程授权流程。
 
 后续已增加 [createOidcInteractionHandler](src/oidc-interaction.ts)：原生 Node HTTP handler，挂在 provider.callback 前，不启动监听器。`GET /interaction/:uid` 返回已验证的 client/redirect/resource/store scopes/offlineAccess；`POST .../start` 绑定登录 Cookie，`POST .../approve` 和 `POST .../cancel` 分别要求 `X-Tera-Consent: approve/deny`、同源 Origin 与登录 CSRF。start 另要求 `X-Tera-Login: start`，以上 POST 不接受正文。邮件与回调沿用 `/login/email`、配置的固定 callback、`/login/status`；独立 `/login/session`、`/login/approve`、`/login/cancel` 不对外开放。
 
@@ -240,7 +240,7 @@ Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并
 
 崩溃恢复的日志基础：[createOidcApprovalJournal](src/oidc-journal.ts) 与独立 issuer 库的 `oidc.approval_attempts` 保存 interaction ID、完整 grant binding、创建时间及 pending/completed/revoked 状态，不保存登录凭据或 provider payload。日志 API 允许重复记录完全相同的 pending 项，拒绝换绑、同一上游 grant 归属另一 interaction、终态重开及终态互换；完成／撤销并发只允许一个结果。pending 使用 C 排序和 ID 游标，每页最多 100 条，不因时间经过就删除。Node 独立进程测试验证 pending 和终态跨进程保留，Bun/Node 真实 PostgreSQL 测试覆盖冲突和 103 条大小写混合 ID 分页。
 
-**日志尚未接入批准路径或启动恢复，不代表崩溃补偿已经可用。** 后续须在首次下游授权写入前登记，在确认完成或双端撤销后收尾；恢复还须解决丢失本地 grant ID 的撤销，以及与存活服务实例的互斥，不能自动对所有 pending 项执行撤销或重试发码。本批 DDL 只加入新建独立数据库的 storage.sql；未迁移任何已有数据库，旧授权服务也不要求此表。后续启用日志前需单独审核已有库升级及运行角色权限。
+**日志尚未接入批准路径或启动恢复，不代表崩溃补偿已经可用。** 后续须在首次下游授权写入前登记，在确认完成或双端撤销后收尾。丢失本地 grant ID 的撤销原语已提供，但 PT404 不能证明没有在途创建；仍须解决与存活服务实例的互斥，不能自动对所有 pending 项执行撤销或重试发码。日志 DDL 只加入新建独立数据库的 storage.sql，旧授权服务也不要求此表。后续启用日志前需单独审核已有库升级及运行角色权限；新的 revoke_binding 使用修改后的 SQL 开发基线，部署旧数据库须先审核升级，不能仅更新授权服务。
 
 固定服务配置已集中到 [createOidcProvider](src/oidc-provider.ts)，真实数据库联合测试及 Node PostgreSQL 交互场景现使用它。输入为 `issuer/resource/scopes/signingKey/cookieKeys/clients/introspectionClient`，另由宿主传入持久化 adapter。要求 HTTPS 根 issuer、固定 HTTPS resource、完整 ES256/P-256 私有 JWK（含 kid/alg/use，并验证公私钥匹配）、1–3 个有序 Cookie 签名密钥和独立 introspection secret；后两类值均为 32 字节的规范 base64url，不生成默认密钥。clients 项为 `id/applicationType/redirectUris`：web 仅 HTTPS，native 首版仅 HTTP 字面 loopback（127.0.0.1/::1），不支持自定义 scheme、localhost、query/fragment 回调。native 端口匹配遵循 provider 的 loopback 规则。未知字段、重复 ID/范围/密钥/回调、缺失或不匹配的密钥统一拒绝为 INVALID_OIDC_PROVIDER_CONFIGURATION，不返回配置详情。
 

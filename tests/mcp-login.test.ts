@@ -69,8 +69,8 @@ test('real email S256 flow returns a new administrator session only to its origi
   );
 });
 
-test.each([false, true])(
-  'email login hands off once and persists initial approval (lost write receipt=%s)',
+test.each(['none', 'create', 'write'] as const)(
+  'email login hands off once and persists initial approval (lost receipt=%s)',
   async (loseReceipt) => {
     const user = await signup();
     await makeAdmin(user.userId);
@@ -149,9 +149,18 @@ test.each([false, true])(
       cipher,
       async (url, init) => {
         const response = await fetch(url, init);
+        if (
+          loseReceipt === 'create' &&
+          url.endsWith('/mcp_grant_command') &&
+          JSON.parse(init.body as string).p_action === 'create' &&
+          response.ok
+        ) {
+          await response.body?.cancel();
+          throw new Error('Lost committed grant response');
+        }
         if (url.endsWith('/mcp_credential_command')) {
           writes++;
-          if (loseReceipt && response.ok) {
+          if (loseReceipt === 'write' && response.ok) {
             await response.body?.cancel();
             throw new Error('Lost committed credential response');
           }
@@ -160,7 +169,7 @@ test.each([false, true])(
       },
     );
     try {
-      if (loseReceipt) {
+      if (loseReceipt !== 'none') {
         await expect(approval.approve(result)).rejects.toThrow(/^APPROVAL_UNCONFIRMED$/);
         const [grant] =
           await db`select id,binding,state from private.mcp_grants where binding->>'project'=${project}`;
@@ -196,7 +205,7 @@ test.each([false, true])(
         ).toEqual(result.credentials);
         await provider.Grant.find(approved.providerGrantId).then((g) => g?.destroy());
       }
-      expect(writes).toBe(1);
+      expect(writes).toBe(loseReceipt === 'create' ? 0 : 1);
       await expect(approval.approve(result)).rejects.toThrow('APPROVAL_ALREADY_ATTEMPTED');
     } finally {
       try {

@@ -3251,7 +3251,7 @@ begin
   if auth.role() is distinct from 'service_role' then
     raise exception using errcode='42501', message='trusted authorization host required';
   end if;
-  if p_action is null or p_action not in ('create','resolve','revoke') then
+  if p_action is null or p_action not in ('create','resolve','revoke','revoke_binding') then
     raise exception using errcode='22023', message='invalid grant action';
   end if;
   if jsonb_typeof(p_binding) is distinct from 'object' then
@@ -3277,7 +3277,7 @@ begin
     insert into private.mcp_grants(binding,user_id,scopes) values (p_binding,p_user_id,v_scopes)
       on conflict (binding) do nothing;
   elsif p_user_id is not null or p_scopes is not null
-      or (p_action='resolve' and p_grant_id is not null)
+      or (p_action in ('resolve','revoke_binding') and p_grant_id is not null)
       or (p_action='revoke' and p_grant_id is null) then
     raise exception using errcode='22023', message='invalid grant lookup';
   end if;
@@ -3291,8 +3291,12 @@ begin
   end if;
   if p_action='create' and (v_grant.user_id<>p_user_id or v_grant.scopes<>v_scopes or v_grant.state<>'active') then
     raise exception using errcode='PT409', message='grant binding cannot be reused or changed';
-  elsif p_action='revoke' then
-    if v_grant.id<>p_grant_id then raise exception using errcode='PT404', message='grant not found'; end if;
+  elsif p_action in ('revoke','revoke_binding') then
+    -- Recovery can lose the create receipt; the journal retains the full binding.
+    -- Missing rows still return PT404, never proof that a concurrent create cannot commit.
+    if p_action='revoke' and v_grant.id<>p_grant_id then
+      raise exception using errcode='PT404', message='grant not found';
+    end if;
     delete from private.mcp_credentials where grant_id=v_grant.id;
     if v_grant.state='active' then
       update private.mcp_grants set state='revoked',version=2,revoked_at=clock_timestamp()

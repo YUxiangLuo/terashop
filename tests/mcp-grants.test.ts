@@ -129,6 +129,65 @@ test('immutable approvals survive new connections; revocation is terminal and id
   ).toMatchObject({ code: 'PT409' });
 });
 
+test('recovery revokes by exact binding without a create receipt, even after demotion', async () => {
+  const identity = binding();
+  const grant = await create(identity);
+  const args = { p_action: 'revoke_binding', p_binding: identity };
+  for (const token of [undefined, admin.token, customer.token])
+    expect((await rpc('mcp_grant_command', args, token)).data).toMatchObject({ code: '42501' });
+  for (const extra of [{ p_grant_id: grant.id }, { p_user_id: admin.userId }, { p_scopes: [] }])
+    expect((await call('revoke_binding', identity, extra)).data).toMatchObject({ code: '22023' });
+  for (const key of Object.keys(identity)) {
+    const changed = { ...identity, [key]: `${identity[key as keyof typeof identity]}-recovery` };
+    expect((await call('revoke_binding', changed)).data).toMatchObject({ code: 'PT404' });
+  }
+  // A real stored ciphertext row is erased in the same transaction as revocation.
+  await db`insert into private.mcp_credentials(grant_id,revision,envelope)
+    values (${grant.id}::uuid,1,'{"fixture":"ciphertext"}'::jsonb)`;
+  const unaffected = binding();
+  const otherGrant = await create(unaffected, other.userId);
+  await db`update public.profiles set role='customer' where id=${admin.userId}::uuid`;
+  try {
+    expect((await call('resolve', identity)).data).toMatchObject({ code: '42501' });
+    const revoked = await checked<Grant>(call('revoke_binding', identity));
+    expect(revoked).toEqual({ ...grant, state: 'revoked', version: 2 });
+    expect((await call('revoke_binding', identity)).data).toEqual(revoked);
+    expect(await db`select 1 from private.mcp_credentials where grant_id=${grant.id}::uuid`).toHaveLength(0);
+    expect((await call('resolve', unaffected)).data).toEqual(otherGrant);
+  } finally {
+    await makeAdmin(admin.userId);
+  }
+  expect(
+    (await call('create', identity, { p_user_id: admin.userId, p_scopes: ['store:read'] })).data,
+  ).toMatchObject({ code: 'PT409' });
+});
+
+test('recovery serializes with existing grant writes; not-found is not a creation fence', async () => {
+  const identity = binding();
+  const grant = await create(identity);
+  const revoked = await heldTransactionRace(
+    db,
+    async (sql) => {
+      await sql`select id from private.mcp_grants where id=${grant.id}::uuid for update`;
+      await sql`insert into private.mcp_credentials(grant_id,revision,envelope)
+      values (${grant.id}::uuid,1,'{}'::jsonb)`;
+    },
+    () => checked<Grant>(call('revoke_binding', identity)),
+  );
+  expect(revoked).toEqual({ ...grant, state: 'revoked', version: 2 });
+  expect(await db`select 1 from private.mcp_credentials where grant_id=${grant.id}::uuid`).toHaveLength(0);
+  // An uncommitted INSERT is invisible to recovery. Its PT404 must remain an
+  // unresolved journal item, not a success that permits forgetting the binding.
+  const late = binding();
+  await db.begin(async (sql) => {
+    await sql`select set_config('request.jwt.claims','{"role":"service_role"}',true)`;
+    await sql`select public.mcp_grant_command('create',${JSON.stringify(late)}::text::jsonb,${admin.userId}::uuid,array['store:read'])`;
+    expect((await call('revoke_binding', late)).data).toMatchObject({ code: 'PT404' });
+  });
+  expect((await call('resolve', late)).data).toMatchObject({ state: 'active' });
+  expect((await call('revoke_binding', late)).data).toMatchObject({ state: 'revoked', version: 2 });
+});
+
 test('every identity dimension isolates grants and role removal denies resolution but not revocation', async () => {
   const identity = binding();
   const grant = await create(identity);
