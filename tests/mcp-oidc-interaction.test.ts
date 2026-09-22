@@ -520,6 +520,81 @@ for (const runtime of ['bun', 'node'] as const)
           expect((await remote.listTools()).tools.some((t) => t.name === 'update_shop_settings')).toBe(
             index === 1,
           );
+          if (node) {
+            type Settings = { name: string; timezone: string; currency: string; revision: number };
+            const before = await toolData<Settings>(remote, 'get_admin_shop_settings');
+            const changedName = `HTTPS ${crypto.randomUUID()}`;
+            const args = { expected_revision: before.revision, changes: { name: changedName } };
+            try {
+              if (index === 0) {
+                // Try the hidden write tool directly: discovery alone is not authorization.
+                await expect(
+                  remote.callTool({ name: 'update_shop_settings', arguments: args }),
+                ).rejects.toMatchObject({ code: -32602, message: 'Tool update_shop_settings not found' });
+                expect(await toolData<Settings>(remote, 'get_admin_shop_settings')).toEqual(before);
+              } else {
+                const changed = await toolData<Settings>(remote, 'update_shop_settings', args);
+                expect(changed).toMatchObject({
+                  name: changedName,
+                  timezone: before.timezone,
+                  currency: before.currency,
+                  revision: before.revision + 1,
+                });
+                expect(await toolData<Settings>(remote, 'get_admin_shop_settings')).toEqual(changed);
+                expect(
+                  (await remote.callTool({ name: 'update_shop_settings', arguments: args })).isError,
+                ).toBe(true);
+                expect(await toolData<Settings>(remote, 'get_admin_shop_settings')).toEqual(changed);
+                await checked(
+                  api(`/rest/v1/profiles?id=eq.${user.userId}`, {
+                    service: true,
+                    method: 'PATCH',
+                    body: { role: 'customer' },
+                  }),
+                );
+                for (const name of ['get_admin_shop_settings', 'update_shop_settings']) {
+                  const denied = await fetch(resource, {
+                    method: 'POST',
+                    tls: { ca: node.tls.cert },
+                    signal: AbortSignal.timeout(10_000),
+                    headers: {
+                      authorization: `Bearer ${token}`,
+                      'content-type': 'application/json',
+                      accept: 'application/json, text/event-stream',
+                    },
+                    body: JSON.stringify({
+                      jsonrpc: '2.0',
+                      id: 9,
+                      method: 'tools/call',
+                      params: {
+                        name,
+                        arguments:
+                          name === 'update_shop_settings'
+                            ? { expected_revision: changed.revision, changes: { name: 'Forbidden' } }
+                            : {},
+                      },
+                    }),
+                  });
+                  expect(denied.status).toBe(401);
+                  expect(await denied.json()).toEqual({ error: 'unauthorized' });
+                }
+                // A different administrator's existing token remains usable.
+                const other = await authorizer.authorize(tokens[0]);
+                expect(other.expectedUserId).toBe(users[0].userId);
+              }
+            } finally {
+              if (index === 1) {
+                await makeAdmin(user.userId);
+                const current = await toolData<Settings>(remote, 'get_admin_shop_settings');
+                await toolData(remote, 'update_shop_settings', {
+                  expected_revision: current.revision,
+                  changes: { name: before.name },
+                });
+                expect(current.name).toBe(changedName);
+                expect(current.revision).toBe(before.revision + 1);
+              }
+            }
+          }
         } finally {
           await remote.close();
         }
