@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { request, createServer } from 'node:https';
+import { createServer as createHttpServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import postgres from 'postgres';
 import { startOidcService } from '../../mcp/src/oidc-service';
+import { createOidcApprovalJournal } from '../../mcp/src/oidc-journal';
 
 // Supported-runtime service smoke test. No real downstream accounts or public ports.
 export async function verifyOidcService(databaseUrl: string, tls: { key: string; cert: string }) {
@@ -115,6 +117,67 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
       await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
     } finally {
       await new Promise<void>((resolve) => occupied.close(() => resolve()));
+    }
+
+    // Recovery failure must not open TLS, and retry must retain the pending item.
+    const journal = createOidcApprovalJournal(observer);
+    const entry = {
+      interactionId: 'service-startup-recovery',
+      binding: {
+        issuer: config.provider.issuer,
+        resource: config.provider.resource,
+        project: config.downstream.project,
+        client_id: 'agent',
+        subject: '11111111-1111-4111-8111-111111111111',
+        session_id: 'service-recovery-grant',
+      },
+    };
+    await journal.begin(entry);
+    let recover = false;
+    const received = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const backend = createHttpServer(async (_req, res) => {
+      if (recover) {
+        received.resolve();
+        await release.promise;
+      }
+      res.writeHead(recover ? 200 : 503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id: null, user_id: null, scopes: [], state: 'revoked', version: 2 }));
+    });
+    await new Promise<void>((resolve) => backend.listen(0, '127.0.0.1', resolve));
+    try {
+      const address = backend.address();
+      assert(address && typeof address !== 'string');
+      await save({
+        ...config,
+        downstream: { ...config.downstream, supabaseUrl: `http://127.0.0.1:${address.port}` },
+      });
+      await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
+      await assert.rejects(get(port, '/jwks'));
+      assert.deepEqual(await journal.pending(), [entry]);
+      recover = true;
+      const starting = startOidcService(path);
+      try {
+        await Promise.race([
+          received.promise,
+          starting.then(() => {
+            throw new Error('Service started before recovery barrier');
+          }),
+        ]);
+        await assert.rejects(get(port, '/jwks')); // Actual blocked downstream request, no sleeps.
+      } finally {
+        release.resolve();
+        service = await starting;
+      }
+      assert.equal((await get(port, '/jwks')).status, 200);
+      assert.deepEqual(await journal.pending(), []);
+      await service.close();
+      service = undefined;
+    } finally {
+      release.resolve();
+      await new Promise<void>((resolve) => backend.close(() => resolve()));
+      await observer`delete from oidc.approval_attempts where interaction_id=${entry.interactionId}`;
+      await save(config);
     }
 
     // Separate real processes: graceful release, then physical lock-session loss.

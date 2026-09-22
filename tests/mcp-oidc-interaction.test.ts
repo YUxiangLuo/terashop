@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import postgres from 'postgres';
 import { createOidcProvider } from '../mcp/src/oidc-provider';
 import { createOidcAdapter } from '../mcp/src/oidc-adapter';
+import { createOidcApprovalJournal } from '../mcp/src/oidc-journal';
 import { createOidcInteractionHandler } from '../mcp/src/oidc-interaction';
 import { createCredentialCipher } from '../mcp/src/credentials';
 import { GrantAuthorizer } from '../mcp/src/authorization';
@@ -61,6 +62,20 @@ for (const runtime of ['bun', 'node'] as const)
         grant select,insert,update,delete on all tables in schema oidc to ${name}`);
         databaseUrl.username = name;
         databaseUrl.password = password;
+        const interrupted = {
+          interactionId: 'startup-interrupted',
+          binding: {
+            issuer: origin,
+            resource,
+            project,
+            client_id: 'agent',
+            subject: crypto.randomUUID(),
+            session_id: crypto.randomUUID(),
+          },
+        };
+        await createOidcApprovalJournal(store).begin(interrupted);
+        const Stored = createOidcAdapter(store);
+        await new Stored('Grant').upsert(interrupted.binding.session_id, {}, 300);
         node = await nodeOidcService({
           provider: providerConfig,
           databaseUrl: databaseUrl.href,
@@ -74,6 +89,13 @@ for (const runtime of ['bun', 'node'] as const)
           credentialKeys: { test: encryptionKey.toString('base64url') },
           activeCredentialKey: 'test',
         });
+        expect(await createOidcApprovalJournal(store).pending()).toEqual([]);
+        expect(await new Stored('Grant').find(interrupted.binding.session_id)).toBeUndefined();
+        const [fence] = await db`select revoked from private.mcp_grant_fences
+          where binding=${JSON.stringify(interrupted.binding)}::text::jsonb`;
+        expect(fence.revoked).toBe(true);
+        // Remove this synthetic journal fixture before the three real-user assertions.
+        await store`delete from oidc.approval_attempts where interaction_id=${interrupted.interactionId}`;
       } else {
         provider = createOidcProvider(providerConfig, createOidcAdapter(store));
         provider.proxy = true; // Isolated Bun fixture only, never the Node service.
@@ -438,6 +460,7 @@ for (const runtime of ['bun', 'node'] as const)
       } finally {
         try {
           await db`delete from private.mcp_grants where binding->>'project'=${project}`;
+          await db`delete from private.mcp_grant_fences where binding->>'project'=${project}`;
           for (const user of users)
             await checked(api(`/auth/v1/admin/users/${user.userId}`, { method: 'DELETE', service: true }));
         } finally {

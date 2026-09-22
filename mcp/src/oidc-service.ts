@@ -9,6 +9,7 @@ import { createOidcInteractionHandler } from './oidc-interaction';
 import { createOidcTlsHandler, readOidcProviderConfiguration } from './oidc-host';
 import { createCredentialCipher } from './credentials';
 import { createOidcApprovalJournal } from './oidc-journal';
+import { recoverOidcApprovals } from './oidc-recovery';
 
 const secret = z
   .string()
@@ -184,6 +185,27 @@ export async function startOidcService(path: string) {
     owner = await ownerDatabase.reserve();
     const [lease] = await owner`select pg_try_advisory_lock(1952805473,1869177956) as acquired`;
     if (!lease.acquired || ownerClosed || closing) throw new Error('Issuer ownership unavailable');
+    // No listener until persisted pending approvals are revoked. Track recovery
+    // as in-flight work so ownership loss cannot close its pool underneath it.
+    const recovery = recoverOidcApprovals(
+      database,
+      {
+        issuer: provider.issuer,
+        resource: c.provider.resource,
+        ...c.downstream,
+      },
+      async (url, init) => {
+        if (ownerClosed || closing) throw new Error('Issuer ownership lost');
+        return fetch(url, init);
+      },
+    ).then(() => {});
+    pending.add(recovery);
+    try {
+      await recovery;
+    } finally {
+      pending.delete(recovery);
+    }
+    if (ownerClosed || closing) throw new Error('Issuer ownership lost during recovery');
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject);
       server!.listen(c.listen.port, c.listen.host, () => {

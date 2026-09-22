@@ -20,7 +20,7 @@ const receipt = z.union([
   }),
 ]);
 
-// Internal maintenance primitive, not a tool/HTTP endpoint or automatic startup task.
+// Internal startup primitive, not a tool/HTTP endpoint.
 // Caller must exclude live approvals and hold issuer ownership for the entire run.
 // Never resume issuance: uncertain attempts are revoked on both sides. A failed run
 // may have committed either revocation; restart from the beginning, not a saved cursor.
