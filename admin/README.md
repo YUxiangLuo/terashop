@@ -44,6 +44,8 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 - 库存流水按当前变体、仓库及原因查询，按原始字符串 ID 分页，支持刷新和订单跳转；调整成功后刷新库存及流水。历史 `on_hand_after` 不是当前可用量，预占/释放未必产生流水。库存页面与商品页面共用同一待决调整记录。不提供调拨或停用仓库流水查询 UI。
 - `/locations` 支持仓库名称/编码搜索、启停筛选、分页和 URL 筛选保留；可创建（默认停用）、编辑编码/名称/JSON 地址、启停和切换默认仓库。地址支持保留自定义字段及以 `null` 清空。库存页面重新进入时加载活跃仓库；仓库配置不搬移库存或清除预占，不提供删除。
 - 仓库更新携带读取时的 `revision`，切换默认还携带读取时的默认仓库 ID；冲突或未知结果锁定命令，要求显式重读，不自动换版本重试。默认仓库必须先切换才能停用，未保存或停用仓库不能设为默认。新建 UUID 留在 URL，刷新按同一 ID 核对创建结果。
+- `/shipping` 支持配送方式名称/状态/目的地国家筛选、UUID 游标分页及 URL 筛选保留。可创建（默认停用）、编辑名称/描述/预计时效、适用国家、USD 运费/免邮门槛、展示排序及启停。列表按 ID 分页，不冒充 position 排序或结账报价。国家留空表示全球适用；代码格式校验不代表承运商覆盖。
+- 配送金额最多两位小数，不自动舍入；免邮门槛留空为 `null`（无门槛），0 为始终免邮，按折后商品净额达到门槛（含等号）计算，不含运费和税。活跃配置保存需确认，使用原 `revision`；冲突或未知结果锁定保存，须显式重读，新建 URL 保留同一 UUID。修改可能使旧报价失效，不重写历史订单金额。不提供删除、承运商接入或面单购买。
 - `/orders` 按订单、支付和履约状态组合筛选，使用原始字符串订单号游标分页。详情展示历史价格、地址、客户备注和发货记录；内部备注按原值比较保存，支持单独清空。
 - 订单详情按后端返回的可履约余额记录部分或全部发货，可填写承运商和跟踪号。确认即记录 shipped，不购买面单、不发送邮件、不修改订单快照；付款未完成或资金对账 hold 时不可发货。不提供退款、支付捕获、订单取消、权限管理或报表 UI。
 - 未保存字段只在内存中，离开页面会提示；退出或丢失会话会清除编辑界面。不要把浏览器提示当作持久草稿。创建时先保存商品，再上传图片。
@@ -89,5 +91,7 @@ location / {
 分类浏览器回归：启动本地 Supabase 与 Admin 后运行 `bun scripts/admin-categories-smoke.ts`（需要 `agent-browser`；默认访问 `http://127.0.0.1:5174`，可用 `ADMIN_URL` 指定其他本地端口）。脚本验证创建、展开树、父级/状态/排序、URL 筛选、并发冲突锁定与显式重读、移至根级，以及商品分类选择跨搜索保留；只创建并清理本次临时账号和分类，不保存测试商品。桌面、移动端和列表截图写入 `/tmp/admin-category-*.png`。分类数据库回归：`bun run test:current tests/admin-categories.test.ts`。
 
 仓库浏览器回归：相同环境运行 `bun scripts/admin-locations-smoke.ts`，验证创建、JSON 地址校验/保留/清空、启停、旧版本默认切换和编辑拒绝、显式重读及 URL 筛选；只写入并清理临时仓库和账号，不切换现有默认仓库。截图写入 `/tmp/admin-warehouse-*.png`。默认切换成功、并发竞争、权限和分页由 `bun run test:current tests/admin-location-commands.test.ts tests/admin-inventory-reads.test.ts` 覆盖；该数据库测试会临时切换本地默认仓库并恢复选择。
+
+配送浏览器回归：相同环境运行 `bun scripts/admin-shipping-smoke.ts`，验证金额拒绝、创建后原 URL 恢复、0/空免邮门槛、国家筛选及全球范围、启停、冲突锁定与重读；只写入并清理临时账号和配送方式。截图写入 `/tmp/admin-shipping-*.png`。解析单元测试：`bun test tests/unit/admin-shipping.test.ts`；数据库及报价/历史订单合同回归：`bun run test:current tests/admin-shipping-methods.test.ts`。
 
 自动检查：`admin:check`、`admin:build`、`bun test tests/unit/admin-commands.test.ts tests/unit/admin-catalog.test.ts`；数据库回归可运行 `bun run test:current tests/product-edit.test.ts tests/admin-order-operations.test.ts tests/admin-retry.test.ts tests/storage-admin.test.ts`。浏览器验收应包含登录失败、普通客户拒绝、管理员恢复会话、创建/发布/归档、规格组合增删及原 ID 保留、图片上传和变体归属、分类跨搜索保留、库存搜索/流水分页、仓库/变体切换、备注冲突、部分发货、未知写结果刷新后原键重试，以及桌面/移动端与深链接刷新。整个回归套件会写入额外目录数据；恢复演示环境需重新 setup（会清空账号）并构建 Storefront。

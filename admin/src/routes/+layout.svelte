@@ -137,6 +137,13 @@
           href="/locations">⌂ <span>Warehouses</span></a
         >
         <a
+          class:nav-active={page.url.pathname.startsWith("/shipping")}
+          aria-current={page.url.pathname.startsWith("/shipping")
+            ? "page"
+            : undefined}
+          href="/shipping">↗ <span>Shipping</span></a
+        >
+        <a
           class:nav-active={page.url.pathname.startsWith("/orders")}
           aria-current={page.url.pathname.startsWith("/orders")
             ? "page"
