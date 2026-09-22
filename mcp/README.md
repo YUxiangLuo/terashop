@@ -264,7 +264,11 @@ provider 禁用开发登录、userinfo 和动态注册，忽略数据库残留�
 
 Streamable HTTP 第一层已实现：[createAdminHttpHandler](src/http.ts) 使用 SDK 2.0.0 WebStandard transport，每个 POST 独立 server、JSON 响应、无 MCP session／GET SSE／DELETE；逐请求在线授权并读取该用户的加密凭据，工具执行仍复查权限。凭据剩余不超过 30 秒时调用已有 claim-refresh 协议一次，再重新读取；回执不明返回 503，不重放刷新或业务请求。只接收 Authorization Bearer，不接受 URL token，拒绝错误 Host／跨源 Origin，流式读取请求体并限制 1 MiB，响应 no-store。提供 resource 路径对应的 RFC 9728 元数据和 401 resource_metadata challenge。写工具仍须宿主显式 allowWrites，且受 token／grant／部署 scopes 交集限制。
 
-当前是 Web Request handler，**未提供可部署的 Bun HTTP/TLS 入口**，不信任代理头、不支持跨源浏览器 CORS。SDK StreamableHTTPClientTransport 测试覆盖初始化、列表、双用户权限隔离、降权／撤销、体积边界、凭据错绑与刷新回执丢失；真实 Node/Bun 授权服务＋Supabase 联合场景覆盖通过 handler 调用店铺工具。客户端 fetch 在测试中直接连接 handler，不是公网或实际 MCP TCP 监听验收。后续仍需私有配置、TLS／监听生命周期、请求时限与限流、真实网络客户端和刷新并发联合验收。
+SDK StreamableHTTPClientTransport 测试覆盖初始化、列表、双用户权限隔离、降权／撤销、体积边界、凭据错绑与刷新回执丢失；真实 Node/Bun 授权服务＋Supabase 联合场景覆盖通过 handler 调用店铺工具，该联合场景客户端 fetch 直接连接 handler。
+
+Bun 入口已提供：[remote.ts](src/remote.ts)／[startAdminHttpService](src/http-service.ts)。从仓库根目录执行 `bun mcp/src/remote.ts /absolute/path/to/mcp.json`；只接受配置文件绝对路径，文件须为私有普通文件（如 0600），禁止符号链接，上限 64 KiB。JSON 顶层为 `authorization`、`credentialKeys`、`activeCredentialKey`、`tls`、`listen`，拒绝未知字段。authorization 必填 issuer、resource、introspectionEndpoint、introspectionClientId、introspectionClientSecret、project、supabaseUrl、serviceRoleKey、anonKey、scopes、allowWrites；固定使用 oidc-provider profile。resource 必须是带非根路径的 HTTPS URL；credentialKeys 为 key ID→32 字节规范 base64url 密钥，须能解密授权服务存储的凭据；tls 为 PEM key/cert，启动检查有效期、resource 主机名及密钥配对；listen 为 host（127.0.0.1／::1／0.0.0.0）和 port。生产配置不得提交仓库。
+
+仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。请求体上限 1 MiB，连接空闲超时 30 秒，处理截止时间 30 秒；截止时中止本地读取／下游等待并返回超时，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。真实 TCP／TLS 测试使用一次性证书验证 SDK 初始化／列表、Host/Origin/代理头拒绝、鉴权失效、配置权限、排空及 CLI SIGTERM。该网络测试的授权后端为本地夹具，尚未覆盖完整网络入口＋真实 Supabase 联合部署；限流、慢请求截止时间边界、刷新并发及公网客户端验收仍待完成。启动成功仅表示配置与监听就绪，不证明后端凭据有效。
 
 1. 固定 Node 授权服务配置与入口：预注册客户端、签名/Cookie/加密密钥、最小数据库权限、TTL、受信 TLS 代理及启动校验；把真实 Supabase 联合场景带入 Node，并验证服务重启与密钥恢复。
 2. 用户登录/同意页面：展示真实 client/resource/scopes 和离线刷新，同源 Cookie/CSRF、拒绝/到期/失败状态；只用于用户授权，不用于 Agent 操作 Admin SPA。补真实浏览器验收。

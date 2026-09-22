@@ -58,9 +58,14 @@ export function createAdminHttpHandler(
     if (req.headers.has('mcp-session-id')) return reply(400, 'sessions_not_supported');
     // Bound the body even when Content-Length is missing or false.
     const reader = req.body?.getReader();
+    const abort = () => {
+      void reader?.cancel().catch(() => {});
+    };
+    req.signal.addEventListener('abort', abort, { once: true });
     const chunks: Uint8Array<ArrayBuffer>[] = [];
     let length = 0;
     try {
+      if (req.signal.aborted) return reply(408, 'request_aborted');
       if (reader)
         for (;;) {
           const part = await reader.read();
@@ -75,8 +80,10 @@ export function createAdminHttpHandler(
     } catch {
       return reply(400, 'invalid_request');
     } finally {
+      req.signal.removeEventListener('abort', abort);
       reader?.releaseLock();
     }
+    if (req.signal.aborted) return reply(408, 'request_aborted');
     let stored: Awaited<ReturnType<GrantAuthorizer['readCredentials']>>;
     try {
       stored = await authorizer.readCredentials(token, cipher);

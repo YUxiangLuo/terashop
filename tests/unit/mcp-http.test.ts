@@ -198,3 +198,33 @@ test('credential identity mismatch and uncertain refresh fail closed without ret
     expect(f.refreshClaims()).toBe(expired ? 1 : 0);
   }
 });
+
+test('aborting a stalled request body stops before reading downstream credentials', async () => {
+  const f = await fixture();
+  const reading = Promise.withResolvers<void>();
+  const controller = new AbortController();
+  let pulls = 0,
+    cancelled = false;
+  const body = new ReadableStream<Uint8Array>({
+    pull(stream) {
+      if (++pulls === 1) stream.enqueue(new TextEncoder().encode('{'));
+      else reading.resolve();
+    },
+    cancel() {
+      cancelled = true;
+    },
+  });
+  const operation = f.handler(
+    new Request(f.config.resource, {
+      method: 'POST',
+      headers: { authorization: 'Bearer a' },
+      body,
+      signal: controller.signal,
+    }),
+  );
+  await reading.promise;
+  controller.abort();
+  expect((await operation).status).toBe(408);
+  expect(cancelled).toBe(true);
+  expect(f.calls()).toBe(2);
+});
