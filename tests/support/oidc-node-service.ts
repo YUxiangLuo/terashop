@@ -133,11 +133,12 @@ export async function nodeOidcService(configuration: Record<string, unknown>) {
     let child = await start();
     return {
       close,
-      restart: async () => {
+      restart: async (whileStopping?: () => Promise<void>) => {
         const stop = Bun.spawn(['docker', 'stop', '--time', '10', name], {
           stdout: 'ignore',
           stderr: 'ignore',
         });
+        await whileStopping?.();
         if ((await stop.exited) !== 0 || (await child.exited) !== 0)
           throw new Error('Node service did not shut down cleanly');
         child = await start();

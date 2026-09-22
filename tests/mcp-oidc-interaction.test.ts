@@ -211,7 +211,57 @@ for (const runtime of ['bun', 'node'] as const)
         expect(callback.status).toBe(303);
         await callback.body?.cancel();
         failCompletion = index === 2;
-        const approved = await call(`${path}/approve`, 'approve');
+        let approved: Response;
+        if (node && index === 0) {
+          // Hold the issuer write lock, then observe the real approval blocked
+          // on it before sending SIGTERM. Do not infer ordering from a sleep.
+          const lock = await store.reserve();
+          let pending: Promise<Response> | undefined;
+          try {
+            await lock`select pg_advisory_lock(1952805473, 1869177955)`;
+            const [owner] = await lock`select pg_backend_pid() as pid`;
+            pending = call(`${path}/approve`, 'approve');
+            void pending.catch(() => {}); // Joined below, including failure paths.
+            const deadline = Date.now() + 2000;
+            for (;;) {
+              const [waiter] = await store`select exists(select 1 from pg_stat_activity
+                where datname=current_database() and ${owner.pid}::integer=any(pg_blocking_pids(pid))) as blocked`;
+              if (waiter.blocked) break;
+              if (Date.now() >= deadline) throw new Error('Approval did not reach issuer write barrier');
+              await Bun.sleep(10);
+            }
+            await node.restart(async () => {
+              const deadline = Date.now() + 2000;
+              for (;;) {
+                try {
+                  const probe = await local('/jwks', { headers: { connection: 'close' } });
+                  await probe.body?.cancel();
+                } catch {
+                  break; // Listener has stopped accepting, while approval is blocked.
+                }
+                if (Date.now() >= deadline) throw new Error('Shutdown did not stop accepting requests');
+                await Bun.sleep(10);
+              }
+              const [waiter] = await store!`select exists(select 1 from pg_stat_activity
+                where datname=current_database() and ${owner.pid}::integer=any(pg_blocking_pids(pid))) as blocked`;
+              expect(waiter.blocked).toBe(true);
+              await lock`select pg_advisory_unlock(1952805473, 1869177955)`;
+            });
+            approved = await pending;
+          } finally {
+            try {
+              await lock`select pg_advisory_unlock_all()`;
+            } finally {
+              lock.release();
+              await pending?.then(
+                (response) => response.body?.cancel(),
+                () => {},
+              );
+            }
+          }
+        } else {
+          approved = await call(`${path}/approve`, 'approve');
+        }
         const [grant] = await db`select id,binding,state,downstream_session_id from private.mcp_grants
         where binding->>'project'=${project} and user_id=${user.userId}::uuid`;
         expect(grant).toBeDefined();
