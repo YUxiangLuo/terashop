@@ -781,7 +781,7 @@ for (const runtime of ['bun', 'node'] as const)
         );
         expect(refreshed.status).toBe(200);
         expect(refreshed.body.result.structuredContent.data.currency).toBe('USD');
-        const renewed = await authorizer.readCredentials(tokens[1], cipher);
+        let renewed = await authorizer.readCredentials(tokens[1], cipher);
         expect(renewed.revision).toBe(3);
         expect(renewed.expectedUserId).toBe(users[1].userId);
         expect(renewed.credentials!.refreshToken).not.toBe(original.credentials!.refreshToken);
@@ -795,6 +795,82 @@ for (const runtime of ['bun', 'node'] as const)
         expect(issuedAfter.count).toBe(issuedBefore.count + 1);
         expect((await networkCall(tokens[1])).status).toBe(200);
         expect((await authorizer.readCredentials(tokens[1], cipher)).revision).toBe(3);
+        // Hold two real read receipts, not the DB locks, so both handlers see
+        // the same expired revision before either can claim the refresh.
+        await authorizer.writeCredentials(tokens[1], cipher, {
+          expectedRevision: 3,
+          credentials: { ...renewed.credentials!, expiresAt: Math.floor(Date.now() / 1000) + 20 },
+          anonKey: ANON_KEY,
+        });
+        const releaseReads = Promise.withResolvers<void>();
+        let readsHeld = 0;
+        let claims = 0;
+        let refreshRequests = 0;
+        const proxy = Bun.serve({
+          hostname: '127.0.0.1',
+          port: 0,
+          async fetch(req) {
+            const url = new URL(req.url);
+            const body = req.method === 'GET' ? undefined : await req.arrayBuffer();
+            const headers = new Headers(req.headers);
+            headers.delete('host');
+            if (url.pathname === '/auth/v1/token' && url.searchParams.get('grant_type') === 'refresh_token')
+              refreshRequests++;
+            const response = await fetch(`${API}${url.pathname}${url.search}`, {
+              method: req.method,
+              headers,
+              body,
+              signal: req.signal,
+              redirect: 'manual',
+            });
+            if (url.pathname.endsWith('/mcp_credential_command') && body) {
+              const args = JSON.parse(new TextDecoder().decode(body));
+              if (args.p_action === 'claim_refresh' && args.p_grant_id === original.grantId) claims++;
+              if (args.p_action === 'read' && args.p_grant_id === original.grantId && readsHeld < 2) {
+                const receipt = await response.clone().json();
+                expect(receipt.revision).toBe(4);
+                readsHeld++;
+                if (readsHeld === 2) releaseReads.resolve();
+                await releaseReads.promise;
+              }
+            }
+            return response;
+          },
+        });
+        const configPath = join(mcpDirectory!, 'config.json');
+        const directConfig = await Bun.file(configPath).text();
+        const proxyConfig = JSON.parse(directConfig);
+        proxyConfig.authorization.supabaseUrl = proxy.url.origin;
+        try {
+          mcpProcess!.kill('SIGTERM');
+          expect(await mcpProcess!.exited).toBe(0);
+          await writeFile(configPath, JSON.stringify(proxyConfig), { mode: 0o600 });
+          await startMcp!();
+          const results = await Promise.all([networkCall(tokens[1]), networkCall(tokens[1])]);
+          expect(readsHeld).toBe(2);
+          expect(claims).toBe(2);
+          expect(results.map((result) => result.status).sort()).toEqual([200, 503]);
+          expect(results.find((result) => result.status === 503)!.body).toEqual({
+            error: 'authorization_unavailable',
+          });
+          expect(
+            results.find((result) => result.status === 200)!.body.result.structuredContent.data.currency,
+          ).toBe('USD');
+          expect(refreshRequests).toBe(1);
+          renewed = await authorizer.readCredentials(tokens[1], cipher);
+          expect(renewed.revision).toBe(5);
+          expect(renewed.expectedUserId).toBe(users[1].userId);
+        } finally {
+          releaseReads.resolve();
+          if (mcpProcess!.exitCode === null) {
+            mcpProcess!.kill('SIGTERM');
+            await mcpProcess!.exited;
+          }
+          await proxy.stop(true);
+          await writeFile(configPath, directConfig, { mode: 0o600 });
+          await startMcp!();
+        }
+        expect((await networkCall(tokens[1])).status).toBe(200);
         const refresh = async (token: string) => {
           const response = await local('/token', {
             method: 'POST',
@@ -819,7 +895,7 @@ for (const runtime of ['bun', 'node'] as const)
         expect((await authorizer.authorize(tokens[1])).expectedUserId).toBe(users[1].userId);
         const restored = await authorizer.readCredentials(rotated.data.access_token, cipher);
         expect(restored.expectedUserId).toBe(users[1].userId);
-        expect(restored.revision).toBe(3);
+        expect(restored.revision).toBe(5);
         expect(restored.credentials).not.toBeNull();
         expect((await authorizer.authorize(rotated.data.access_token)).grantId).toBe(before.grantId);
         expect(
@@ -855,7 +931,7 @@ for (const runtime of ['bun', 'node'] as const)
           async () => {
             const [pending] = await db`select revision,refresh_id from private.mcp_credentials
               where grant_id=${original.grantId}::uuid`;
-            expect(Number(pending.revision)).toBe(4);
+            expect(Number(pending.revision)).toBe(6);
             expect(pending.refresh_id).not.toBeNull();
             pendingRefreshId = pending.refresh_id;
             abort.abort();
@@ -880,7 +956,7 @@ for (const runtime of ['bun', 'node'] as const)
           });
           const [pending] = await db`select revision,refresh_id from private.mcp_credentials
             where grant_id=${original.grantId}::uuid`;
-          expect(Number(pending.revision)).toBe(4);
+          expect(Number(pending.revision)).toBe(6);
           expect(pending.refresh_id).toBe(pendingRefreshId);
         }
         const replay = await refresh(refreshTokens[1]);
