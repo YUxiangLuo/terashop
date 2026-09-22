@@ -244,6 +244,10 @@ Node 联合场景另验证两次正常进程重建：用 SIGTERM 停止容器并
 
 真实 Node 登录／断连重启测试验证两条 completed 与一条 revoked 记录持久化，单测验证登记前无下游创建、登记回执丢失不错误收尾、清理失败不写终态。上游 Grant 保存到日志登记之间仍可能留下无下游授权的孤立 provider Grant；恢复还须解决该窗口及与存活服务实例的互斥，不能自动对所有 pending 项撤销或重试发码。新入口要求日志表和 DML 权限，旧两表角色将被启动校验拒绝；已有 issuer 数据库须先显式审核添加 storage.sql 中的 approval_attempts 表／索引及权限，不可重跑整份建库基线。下游也须支持 revoke_binding。尚未执行任何已有部署的升级。
 
+单实例启动约束已接入：每个 issuer 数据库使用额外一个专用 PostgreSQL 保留连接持有 session advisory lock（与 adapter 写锁不同），关闭空闲／寿命回收，未取得锁不开放监听。正常退出先停止接收并等待处理器与业务连接池关闭，最后释放持锁连接；端口冲突等启动失败也释放锁。意外失去该连接后拒绝新请求并关闭服务，CLI 输出固定 OIDC_SERVICE_OWNERSHIP_LOST、退出码 1，不在原进程重新抢锁。Node 测试覆盖随机端口的同进程／跨进程竞争、正常释放、监听失败后释放、强制终止持锁数据库会话及新实例接管。
+
+这不是跨数据库写入的隔离保证：网络分区的断连检测可能滞后，已进入处理器的下游 HTTP 写入也不会因 advisory lock 丢失而自动取消。不能据此断言新旧实例的在途写入绝不重叠，或安全地自动撤销全部 pending 日志；自动恢复仍未启用。部署必须直连支持 session 锁的数据库，不支持事务池代理，并为专用连接预留一个额外连接配额。
+
 固定服务配置已集中到 [createOidcProvider](src/oidc-provider.ts)，真实数据库联合测试及 Node PostgreSQL 交互场景现使用它。输入为 `issuer/resource/scopes/signingKey/cookieKeys/clients/introspectionClient`，另由宿主传入持久化 adapter。要求 HTTPS 根 issuer、固定 HTTPS resource、完整 ES256/P-256 私有 JWK（含 kid/alg/use，并验证公私钥匹配）、1–3 个有序 Cookie 签名密钥和独立 introspection secret；后两类值均为 32 字节的规范 base64url，不生成默认密钥。clients 项为 `id/applicationType/redirectUris`：web 仅 HTTPS，native 首版仅 HTTP 字面 loopback（127.0.0.1/::1），不支持自定义 scheme、localhost、query/fragment 回调。native 端口匹配遵循 provider 的 loopback 规则。未知字段、重复 ID/范围/密钥/回调、缺失或不匹配的密钥统一拒绝为 INVALID_OIDC_PROVIDER_CONFIGURATION，不返回配置详情。
 
 provider 禁用开发登录、userinfo 和动态注册，忽略数据库残留的非预注册 Client；只有指定 resource 客户端可 introspect 目标资源的 AccessToken，业务客户端只能撤销自己的 token。固定 Code/S256、opaque access token、刷新轮换与 grant 撤销；期限为 code 60 秒、access/ID token/interaction 300 秒、SSO session 8 小时、grant/refresh 30 天。新实例重复加载相同配置的 JWKS 已验证稳定，但这不是完整进程重启或密钥轮换验收。构造器不读取环境、不启动监听、不配置代理；**provider 的 endpoint URL 仍依赖请求 authority，服务入口必须先验证 Host/TLS 和受信代理，不能只设置 issuer 就直接开放 callback**。服务入口、秘密装载和进程生命周期仍是下一步。

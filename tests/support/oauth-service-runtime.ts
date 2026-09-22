@@ -3,8 +3,9 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { request } from 'node:https';
+import { request, createServer } from 'node:https';
 import { spawn } from 'node:child_process';
+import postgres from 'postgres';
 import { startOidcService } from '../../mcp/src/oidc-service';
 
 // Supported-runtime service smoke test. No real downstream accounts or public ports.
@@ -37,6 +38,7 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
   };
   const save = (value: unknown) => writeFile(path, JSON.stringify(value), { mode: 0o600 });
   let service: Awaited<ReturnType<typeof startOidcService>> | undefined;
+  const observer = postgres(databaseUrl, { max: 1, connect_timeout: 5 });
   const get = (port: number, route: string, host = 'auth.example') =>
     new Promise<{ status: number; data: any }>((resolve, reject) => {
       const req = request(
@@ -95,45 +97,72 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     const jwks = (await get(port, '/jwks')).data;
     assert.equal(jwks.keys[0].kid, 'stable');
     assert.equal(jwks.keys[0].d, undefined);
+    // Still port 0: rejection must be database ownership, not a TCP bind conflict.
+    await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
+    assert.equal((await get(port, '/jwks')).status, 200);
     config.listen.port = port;
     await save(config);
-    await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/); // Port occupied.
+    await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
     assert.equal((await get(port, '/jwks')).status, 200); // Failed start cannot close the existing service.
     await Promise.all([service.close(), service.close()]);
     service = undefined;
     await assert.rejects(get(port, '/jwks'));
 
-    // Start the real executable, recover the same keys/config, then exercise SIGTERM.
-    const child = spawn(process.execPath, ['/check/auth.mjs', path], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stderr = '';
-    child.stderr.on('data', (part) => {
-      stderr += part;
-    });
-    const exited = new Promise<number | null>((resolve, reject) => {
-      child.once('error', reject);
-      child.once('exit', resolve);
-    });
-    const ready = new Promise<void>((resolve, reject) => {
-      child.stdout.once('data', (part) =>
-        part.toString() === 'OIDC_SERVICE_READY\n' ? resolve() : reject(new Error('Unexpected readiness')),
-      );
-      void exited.then(() => reject(new Error('Exited before readiness')), reject);
-    });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
+    // Acquisition succeeds but listen fails: startup must release its new lock.
+    const occupied = createServer(tls);
+    await new Promise<void>((resolve) => occupied.listen(port, '127.0.0.1', resolve));
     try {
-      await ready;
-      assert.deepEqual((await get(port, '/jwks')).data, jwks);
-      child.kill('SIGTERM');
-      assert.equal(await exited, 0);
-      assert.equal(stderr, '');
-      await assert.rejects(get(port, '/jwks'));
+      await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
     } finally {
-      clearTimeout(timer);
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      await exited;
+      await new Promise<void>((resolve) => occupied.close(() => resolve()));
     }
+
+    // Separate real processes: graceful release, then physical lock-session loss.
+    for (const shutdown of ['signal', 'ownership'] as const) {
+      const child = spawn(process.execPath, ['/check/auth.mjs', path], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.on('data', (part) => {
+        stderr += part;
+      });
+      const exited = new Promise<number | null>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', resolve);
+      });
+      const ready = new Promise<void>((resolve, reject) => {
+        child.stdout.once('data', (part) =>
+          part.toString() === 'OIDC_SERVICE_READY\n' ? resolve() : reject(new Error('Unexpected readiness')),
+        );
+        void exited.then(() => reject(new Error('Exited before readiness')), reject);
+      });
+      const timer = setTimeout(() => child.kill('SIGKILL'), 15000);
+      try {
+        await ready;
+        assert.deepEqual((await get(port, '/jwks')).data, jwks);
+        await save({ ...config, listen: { ...config.listen, port: 0 } });
+        await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
+        await save(config);
+        if (shutdown === 'signal') child.kill('SIGTERM');
+        else {
+          const rows = await observer`select pg_terminate_backend(pid) as terminated from pg_locks
+          where locktype='advisory' and granted and classid=1952805473 and objid=1869177956
+            and database=(select oid from pg_database where datname=current_database())`;
+          assert.equal(rows.length, 1);
+          assert.equal(rows[0].terminated, true);
+        }
+        assert.equal(await exited, shutdown === 'signal' ? 0 : 1);
+        assert.equal(stderr, shutdown === 'signal' ? '' : 'OIDC_SERVICE_OWNERSHIP_LOST\n');
+        await assert.rejects(get(port, '/jwks'));
+      } finally {
+        clearTimeout(timer);
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        await exited;
+      }
+    }
+    service = await startOidcService(path); // Lost owner never reacquires; a new process may start.
+    assert.equal((await get(port, '/jwks')).status, 200);
   } finally {
     await service?.close();
+    await observer.end({ timeout: 5 });
     await rm(directory, { recursive: true, force: true });
   }
 }

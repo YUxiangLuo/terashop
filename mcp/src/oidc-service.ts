@@ -52,6 +52,11 @@ const configuration = z.strictObject({
 // creation/migrations, automatic secrets, proxy trust or business-service-role RPCs.
 export async function startOidcService(path: string) {
   let database: postgres.Sql | undefined;
+  let ownerDatabase: postgres.Sql | undefined;
+  let owner: postgres.ReservedSql | undefined;
+  let ownerClosed = false;
+  let releasingOwner = false;
+  const ownershipLost = Promise.withResolvers<void>();
   let server: ReturnType<typeof createServer> | undefined;
   const pending = new Set<Promise<void>>();
   let closing: Promise<void> | undefined;
@@ -59,7 +64,13 @@ export async function startOidcService(path: string) {
     (closing ??= (async () => {
       if (server?.listening) await new Promise<void>((resolve) => server!.close(() => resolve()));
       await Promise.allSettled([...pending]);
-      await database?.end({ timeout: 5 });
+      try {
+        await database?.end({ timeout: 5 });
+      } finally {
+        releasingOwner = true;
+        owner?.release();
+        await ownerDatabase?.end({ timeout: 5 });
+      }
     })());
   try {
     const c = configuration.parse(await readOidcProviderConfiguration(path));
@@ -118,6 +129,11 @@ export async function startOidcService(path: string) {
     const handler = createOidcTlsHandler(provider, interaction);
     // Constructing HTTPS validates the certificate/private-key pair before any DB IO.
     server = createServer({ ...c.tls, minVersion: 'TLSv1.2', handshakeTimeout: 10_000 }, (req, res) => {
+      if (closing || ownerClosed) {
+        res.writeHead(503, { 'Cache-Control': 'no-store', Connection: 'close' });
+        res.end();
+        return;
+      }
       const operation = handler(req, res).catch(() => {
         res.destroy();
       });
@@ -148,6 +164,26 @@ export async function startOidcService(path: string) {
     await database`select model,id,payload,expires_at,grant_id,uid,user_code,consumed,destroyed from oidc.artifacts limit 0`;
     await database`select id,revoked_at from oidc.revoked_grants limit 0`;
     await database`select interaction_id,binding,state,created_at from oidc.approval_attempts limit 0`;
+    // One issuer per database. Never return this physical session to the pool
+    // while requests may still write. It is distinct from the adapter write lock.
+    ownerDatabase = postgres(c.databaseUrl, {
+      max: 1,
+      idle_timeout: 0,
+      max_lifetime: null,
+      connect_timeout: 5,
+      ssl: ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ? false : 'verify-full',
+      onnotice: () => {},
+      onclose: () => {
+        ownerClosed = true;
+        if (!releasingOwner) ownershipLost.resolve();
+        if (!closing) {
+          void close().catch(() => {}); // CLI observes ownershipLost and exits unsuccessfully.
+        }
+      },
+    });
+    owner = await ownerDatabase.reserve();
+    const [lease] = await owner`select pg_try_advisory_lock(1952805473,1869177956) as acquired`;
+    if (!lease.acquired || ownerClosed || closing) throw new Error('Issuer ownership unavailable');
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject);
       server!.listen(c.listen.port, c.listen.host, () => {
@@ -155,7 +191,12 @@ export async function startOidcService(path: string) {
         resolve();
       });
     });
-    return { address: server.address(), close };
+    if (ownerClosed || closing) {
+      // Loss while listen() was pending can precede server.listening becoming true.
+      await new Promise<void>((resolve) => server!.close(() => resolve()));
+      throw new Error('Issuer ownership lost during startup');
+    }
+    return { address: server.address(), close, ownershipLost: ownershipLost.promise };
   } catch {
     try {
       await close();

@@ -10,6 +10,10 @@ try {
   )
     throw new Error('Unsupported startup');
   const service = await startOidcService(process.argv[2]);
+  void service.ownershipLost.then(() => {
+    process.stderr.write('OIDC_SERVICE_OWNERSHIP_LOST\n');
+    process.exitCode = 1;
+  });
   const stop = () => {
     void service.close().catch(() => {
       process.stderr.write('OIDC_SERVICE_STOP_FAILED\n');
