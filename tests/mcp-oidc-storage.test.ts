@@ -5,6 +5,9 @@ import { createOidcAdapter } from '../mcp/src/oidc-adapter';
 import { heldTransactionRace, testDatabase } from './database-concurrency';
 import { verifyOAuthProvider } from './support/oauth-provider-compat';
 import { verifyApprovalJournal } from './support/oauth-journal';
+import { createOidcApprovalJournal } from '../mcp/src/oidc-journal';
+import { recoverOidcApprovals } from '../mcp/src/oidc-recovery';
+import { API, SERVICE_KEY, checked, rpc, signup, makeAdmin } from './helpers';
 
 // A fresh dedicated database on the already validated disposable local cluster.
 // No tables or migrations are added to the shop database.
@@ -38,6 +41,131 @@ afterAll(async () => {
 test('OIDC approval journal preserves bindings, terminal states and paginated recovery work', async () => {
   await verifyApprovalJournal(db);
 });
+
+test('pending recovery survives lost revocation receipts, fences late writes and skips completed approvals', async () => {
+  const user = await signup();
+  await makeAdmin(user.userId);
+  const project = `recovery-${crypto.randomUUID()}`;
+  const config = {
+    issuer: 'https://auth.example',
+    resource: 'https://shop.example/mcp',
+    project,
+    supabaseUrl: API,
+    serviceRoleKey: SERVICE_KEY,
+  };
+  const journal = createOidcApprovalJournal(db);
+  const entries = Array.from({ length: 103 }, (_, i) => ({
+    interactionId: `recover-${String(i).padStart(3, '0')}`,
+    binding: {
+      issuer: config.issuer,
+      resource: config.resource,
+      project,
+      subject: user.userId,
+      client_id: 'agent',
+      session_id: crypto.randomUUID(),
+    },
+  }));
+  const first = entries[0]!,
+    completed = entries[102]!;
+  const command = (entry: typeof first, action: string) =>
+    rpc(
+      'mcp_grant_command',
+      {
+        p_action: action,
+        p_binding: entry.binding,
+        ...(action === 'create' ? { p_user_id: user.userId, p_scopes: ['store:read'] } : {}),
+      },
+      undefined,
+      true,
+    );
+  try {
+    for (const entry of entries) await journal.begin(entry);
+    const grant = await checked<{ id: string }>(command(first, 'create'));
+    const kept = await checked<{ id: string }>(command(completed, 'create'));
+    await journal.finish(completed.interactionId, 'completed');
+    await admin`insert into private.mcp_credentials(grant_id,revision,envelope) values (${grant.id}::uuid,1,'{}'::jsonb)`;
+    const grants = new Adapter('Grant');
+    await grants.upsert(first.binding.session_id, { accountId: user.userId }, 60);
+    await grants.upsert(completed.binding.session_id, { accountId: user.userId }, 60);
+    // Reject a mismatched deployment before either side is changed or contacted.
+    let calls = 0;
+    await expect(
+      recoverOidcApprovals(db, { ...config, project: 'wrong-shop' }, async () => {
+        calls++;
+        throw new Error('must not send identity');
+      }),
+    ).rejects.toThrow(/^OIDC_RECOVERY_UNCONFIRMED$/);
+    expect(calls).toBe(0);
+    expect(await grants.find(first.binding.session_id)).toBeDefined();
+    // Commit real downstream revocation, then lose its HTTP receipt.
+    await expect(
+      recoverOidcApprovals(db, config, async (url, init) => {
+        calls++;
+        const response = await fetch(url, init);
+        expect(response.ok).toBe(true);
+        await response.arrayBuffer();
+        throw new Error('sensitive upstream transport detail');
+      }),
+    ).rejects.toThrow(/^OIDC_RECOVERY_UNCONFIRMED$/);
+    expect(calls).toBe(1);
+    expect((await journal.pending())[0]).toEqual(first);
+    expect((await command(first, 'resolve')).data).toMatchObject({ code: '42501' });
+    expect(await admin`select 1 from private.mcp_credentials where grant_id=${grant.id}::uuid`).toHaveLength(
+      0,
+    );
+    expect(await grants.find(first.binding.session_id)).toBeUndefined();
+    await expect(grants.upsert(first.binding.session_id, {}, 60)).rejects.toThrow();
+    // Invalid/partial acknowledgements must never finish the journal entry.
+    for (const bad of [
+      { id: null, user_id: null, scopes: [], state: 'active', version: 2 },
+      { id: null, user_id: user.userId, scopes: [], state: 'revoked', version: 2 },
+      { id: grant.id, user_id: crypto.randomUUID(), scopes: [], state: 'revoked', version: 2 },
+    ]) {
+      await expect(recoverOidcApprovals(db, config, async () => Response.json(bad))).rejects.toThrow(
+        /^OIDC_RECOVERY_UNCONFIRMED$/,
+      );
+      expect((await journal.pending())[0]).toEqual(first);
+    }
+    // First entry finishes; the second fails after both revocations but before
+    // journal commit. A real DB write failure, not a mocked journal method.
+    await db.unsafe(`create function oidc.reject_recovery_finish() returns trigger language plpgsql as $$
+      begin
+        if new.interaction_id='recover-001' then raise exception 'fixture interruption'; end if;
+        return new;
+      end; $$;
+      create trigger reject_recovery_finish before update on oidc.approval_attempts
+      for each row execute function oidc.reject_recovery_finish()`);
+    try {
+      await expect(recoverOidcApprovals(db, config)).rejects.toThrow(/^OIDC_RECOVERY_UNCONFIRMED$/);
+      expect((await journal.pending())[0]).toEqual(entries[1]!);
+      expect((await command(entries[1]!, 'create')).data).toMatchObject({ code: 'PT409' });
+      await expect(grants.upsert(entries[1]!.binding.session_id, {}, 60)).rejects.toThrow();
+    } finally {
+      await db.unsafe(`drop trigger reject_recovery_finish on oidc.approval_attempts;
+        drop function oidc.reject_recovery_finish()`);
+    }
+    // Another pool resumes remaining work across the 100-entry page boundary.
+    expect(await recoverOidcApprovals(second, config)).toBe(101);
+    expect(await recoverOidcApprovals(second, config)).toBe(0);
+    expect(await journal.pending()).toEqual([]);
+    expect((await command(completed, 'resolve')).data).toMatchObject({ id: kept.id, state: 'active' });
+    expect(await grants.find(completed.binding.session_id)).toBeDefined();
+    const absent = entries[101]!;
+    expect((await command(absent, 'create')).data).toMatchObject({ code: 'PT409' });
+    await expect(grants.upsert(absent.binding.session_id, {}, 60)).rejects.toThrow();
+    await expect(
+      new Adapter('AccessToken').upsert('recovery-late-token', { grantId: absent.binding.session_id }, 60),
+    ).rejects.toThrow();
+    const [{ count }] =
+      await db`select count(*)::int as count from oidc.approval_attempts where state='revoked' and binding->>'project'=${project}`;
+    expect(count).toBe(102);
+  } finally {
+    await admin`delete from private.mcp_grants where binding->>'project'=${project}`;
+    await admin`delete from private.mcp_grant_fences where binding->>'project'=${project}`;
+    await db`delete from oidc.approval_attempts where binding->>'project'=${project}`;
+    await admin`delete from auth.users where id=${user.userId}::uuid`;
+  }
+}, 20000);
 
 test('OIDC payloads persist across pools; secondary indexes update and TTL is enforced', async () => {
   const sessions = new Adapter('Session');
