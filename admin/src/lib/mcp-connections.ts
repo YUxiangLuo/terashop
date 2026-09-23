@@ -50,6 +50,17 @@ export function connectionPage(value: unknown): {
   };
 }
 
+export function revocationPreview(value: unknown): McpConnection[] {
+  const page = connectionPage(value);
+  if (
+    page.next_cursor !== null ||
+    new Set(page.items.map((item) => item.id)).size !== page.items.length ||
+    page.items.some((item) => item.cleanup !== "not_requested")
+  )
+    throw Error("The complete revocation preview could not be verified.");
+  return page.items;
+}
+
 export function confirmsRevocation(value: unknown, ids: string[]): boolean {
   return (
     object(value) &&

@@ -18,14 +18,17 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 
 ## 本人 MCP 授权管理
 
-以下两个 RPC 仅允许当前非匿名 `authenticated` 用户管理本人授权，使用 `auth.uid()`，无用户 ID 入参；降级为 customer 后仍可撤销本人授权，不赋予任何业务或新授权创建权限。匿名、service-role 及他人授权不能通过这些个人入口操作；完整 binding 和凭据始终不返回浏览器。
+以下三个 RPC 仅允许当前非匿名 `authenticated` 用户管理本人授权，使用 `auth.uid()`，无用户 ID 入参；降级为 customer 后仍可撤销本人授权，不赋予任何业务或新授权创建权限。匿名、service-role 及他人授权不能通过这些个人入口操作；完整 binding 和凭据始终不返回浏览器。
 
 | RPC | 参数 | 返回 |
 | --- | --- | --- |
 | `list_my_mcp_connections` | `page_size` 默认 20，1–100；可选 `after_id` | `{items,next_cursor}`；UUID 升序，无跨页快照。每项仅 `id,client_id,resource,scopes,state,created_at,revoked_at,cleanup` |
+| `preview_my_mcp_connection_revocation` | 无 | 单次语句快照中的本人全部 `cleanup=not_requested` 记录，含本地已撤销但未请求清理者；同列表 DTO，`next_cursor:null`。最多 100 条，超过则 PT422 整体拒绝，无截断或写入 |
 | `revoke_my_mcp_connections` | `grant_ids`：显式 1–100 个 UUID，去重 | `{ids,state:"revoked"}`；IDs 升序。任一 ID 不存在或不属于本人，整个请求 PT404，无部分撤销 |
 
 `state=active` 仅说明本地记录未撤销，不证明 OAuth token、下游 session 或网络仍有效。`cleanup` 为 `not_requested/pending/completed`，只代表通过个人入口发起的上游清理；`not_requested` 不证明上游仍有效，也不否定其他路径已经撤销。列表不探测健康、不返回有效期限或 token。
+
+跨页预览只读取，不保留数据库任务或签发批准凭据。客户端展示完整返回集合，确认后仅向现有撤销接口提交这些 UUID；不得在提交或重试时重新扩展集合。预览后新建或当时尚未提交的授权不在集合中。超过 100 条时先确认撤销明确分页，再重新预览。浏览器刷新会丢弃未提交的预览，不能将旧确认套用于新集合。
 
 撤销在同一事务内锁定所选 grant、删除加密凭据并记录 `private.mcp_connection_revocations` 持久任务。原 ID 集合可以安全重试，不包含后来创建的新授权；不能用超时推断失败或改为新的“全部撤销”范围。已派发业务可能仍完成。OAuth 服务按 issuer/resource/project 筛选任务，先持久撤销上游 token 家族再确认清理；跨库不是原子事务，清理失败保留 pending。Admin 退出、管理员降级和用户资料匿名化不自动触发此个人撤销流程。
 

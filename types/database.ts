@@ -2334,6 +2334,7 @@ export type Database = {
         }
         Returns: Json
       }
+      preview_my_mcp_connection_revocation: { Args: never; Returns: Json }
       price_checkout: {
         Args: {
           address?: Json

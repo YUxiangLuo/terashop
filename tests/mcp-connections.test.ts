@@ -293,6 +293,7 @@ test('anonymous authenticated sessions and service-role cannot use personal mana
   );
   try {
     for (const [token, service] of [[guest.access_token, false], [undefined, true]] as const) {
+      expect((await rpc('preview_my_mcp_connection_revocation', {}, token, service)).data).toMatchObject({ code: '42501' });
       expect((await rpc('list_my_mcp_connections', {}, token, service)).data).toMatchObject({ code: '42501' });
       expect((await rpc('revoke_my_mcp_connections', { grant_ids: [crypto.randomUUID()] }, token, service)).data)
         .toMatchObject({ code: '42501' });
@@ -301,3 +302,37 @@ test('anonymous authenticated sessions and service-role cannot use personal mana
     await checked(api(`/auth/v1/admin/users/${guest.user.id}`, { method: 'DELETE', service: true }));
   }
 });
+
+test('cross-page preview is bounded, redacted and immutable by explicit IDs; includes locally revoked grants without cleanup', async () => {
+  const owner = await signup();
+  await makeAdmin(owner.userId);
+  const entries: string[] = [];
+  const preview = () => rpc('preview_my_mcp_connection_revocation', {}, owner.token);
+  try {
+    expect((await rpc('preview_my_mcp_connection_revocation', {})).status).toBe(401);
+    expect((await checked<any>(preview())).items).toEqual([]);
+    for (let i=0; i<100; i++) entries.push((await create(owner)).id);
+    // One already revoked locally still needs its upstream family cleanup.
+    await db`update private.mcp_grants set state='revoked', version=2, revoked_at=clock_timestamp() where id=${entries[0]}::uuid`;
+    const p = await checked<any>(preview());
+    expect(p.next_cursor).toBeNull();
+    expect(p.items.map((i:any) => i.id)).toEqual([...entries].sort());
+    expect(Object.keys(p.items[0]).sort()).toEqual(['id','client_id','resource','scopes','state','created_at','revoked_at','cleanup'].sort());
+    expect(await db`select 1 from private.mcp_connection_revocations r join private.mcp_grants g on g.id=r.grant_id where g.user_id=${owner.userId}::uuid`).toHaveLength(0);
+    const later = await create(owner);
+    expect((await preview()).data).toMatchObject({ code: 'PT422' });
+    // Demotion does not prevent revocation of the already confirmed snapshot.
+    await checked(api(`/rest/v1/profiles?id=eq.${owner.userId}`, { service: true, method: 'PATCH', body: { role: 'customer' } }));
+    const receipt = await checked<any>(revoke(p.items.map((i:any) => i.id), owner.token));
+    expect(receipt.ids).toEqual([...entries].sort());
+    expect(await checked<typeof receipt>(revoke(receipt.ids, owner.token))).toEqual(receipt);
+    expect((await db`select state from private.mcp_grants where id=${later.id}::uuid`)[0].state).toBe('active');
+    expect((await checked<any>(preview())).items.map((i:any) => i.id)).toEqual([later.id]);
+    await checked(revoke([later.id], owner.token));
+    expect((await checked<any>(preview())).items).toEqual([]);
+  } finally {
+    await db`delete from private.mcp_grants where user_id=${owner.userId}::uuid`;
+    await db`delete from private.mcp_grant_fences where binding->>'subject'=${owner.userId}`;
+    await checked(api(`/auth/v1/admin/users/${owner.userId}`, { service:true, method:'DELETE' }));
+  }
+}, 30000);

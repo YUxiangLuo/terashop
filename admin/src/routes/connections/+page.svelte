@@ -5,6 +5,7 @@
   import { supabase, dateTime } from "$lib/api";
   import {
     connectionPage,
+    revocationPreview,
     confirmsRevocation,
     type McpConnection,
   } from "$lib/mcp-connections";
@@ -17,7 +18,7 @@
   let busy = $state(false);
   let error = $state("");
   let notice = $state("");
-  let selected = $state<string[]>([]);
+  let selected = $state<McpConnection[]>([]);
   let attempted = $state(false);
   let loaded = $state(false);
   let alive = true;
@@ -50,22 +51,47 @@
       if (alive) busy = false;
     }
   }
-  function choose(ids: string[]) {
-    selected = [...ids];
+  function choose(connections: McpConnection[]) {
+    selected = [...connections];
     attempted = false;
     notice = "";
     error = "";
+  }
+  async function previewAll() {
+    if (busy || selected.length) return;
+    busy = true;
+    error = "";
+    notice = "";
+    try {
+      const result = await supabase.rpc("preview_my_mcp_connection_revocation");
+      if (result.error) throw result.error;
+      const snapshot = revocationPreview(result.data);
+      if (!alive) return;
+      choose(snapshot);
+      if (!snapshot.length)
+        notice =
+          "No connections currently eligible for a new revocation request.";
+    } catch (failure) {
+      if (alive)
+        error =
+          (failure as { code?: string })?.code === "PT422"
+            ? "More than 100 eligible connections. Revoke explicit pages first, then request a new preview. Nothing was revoked by this preview."
+            : "Could not verify the complete revocation preview. Nothing was revoked; retry the preview explicitly.";
+    } finally {
+      if (alive) busy = false;
+    }
   }
   async function revoke() {
     if (busy || !selected.length) return;
     busy = true;
     attempted = true;
     error = "";
+    const ids = selected.map((item) => item.id);
     try {
       const result = await supabase.rpc("revoke_my_mcp_connections", {
-        grant_ids: selected,
+        grant_ids: ids,
       });
-      if (result.error || !confirmsRevocation(result.data, selected))
+      if (result.error || !confirmsRevocation(result.data, ids))
         throw Error("Unconfirmed");
       if (!alive) return;
       notice = `${selected.length} connection(s) revoked locally. Upstream cleanup is asynchronous; requests already dispatched may still complete.`;
@@ -106,11 +132,27 @@
       stored credentials. It does not undo previous work or revoke connections
       created later.
     </p>
-    <ul>
-      {#each items.filter((item) => selected.includes(item.id)) as item}<li>
-          {item.client_id} · {item.id}
-        </li>{/each}
-    </ul>
+    <p class="small muted">
+      Review all {selected.length} selected connections below. Scroll the list to
+      see every entry.
+    </p>
+    <!-- Keyboard focus is required to scroll the bounded confirmation list. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <div
+      class="revocation-selection"
+      role="region"
+      aria-label="Selected connections, scroll to review all entries"
+      tabindex="0"
+    >
+      <ul>
+        {#each selected as item}<li>
+            <strong>{item.client_id}</strong> · {item.id}
+            <p class="small muted">
+              {item.resource} · {item.scopes.join(", ")}
+            </p>
+          </li>{/each}
+      </ul>
+    </div>
     <div class="actions">
       <button class="primary" onclick={revoke} disabled={busy}
         >{attempted ? "Retry same revocation" : "Confirm revocation"}</button
@@ -176,8 +218,7 @@
                   selected.length > 0 ||
                   item.cleanup === "completed" ||
                   item.cleanup === "pending"}
-                onclick={() => choose([item.id])}
-                >Revoke {item.client_id}</button
+                onclick={() => choose([item])}>Revoke {item.client_id}</button
               ></td
             >
           </tr>
@@ -196,11 +237,11 @@
         selected.length > 0 ||
         !items.some((item) => item.cleanup === "not_requested")}
       onclick={() =>
-        choose(
-          items
-            .filter((item) => item.cleanup === "not_requested")
-            .map((item) => item.id),
-        )}>Revoke eligible connections on this page</button
+        choose(items.filter((item) => item.cleanup === "not_requested"))}
+      >Revoke eligible connections on this page</button
+    >
+    <button disabled={busy || selected.length > 0} onclick={previewAll}
+      >Preview all eligible connections</button
     >
     {#if cursor}<button
         disabled={busy || selected.length > 0}
@@ -210,6 +251,8 @@
   <p class="small muted">
     20 records per page, ordered by connection ID. Pagination is not a frozen
     snapshot. Batch revocation only affects the IDs shown in the confirmation.
+    Preview all reads one snapshot across pages, up to 100 connections without
+    an existing cleanup request. New connections after the preview are excluded.
   </p>
 </section>
 <section class="card">
@@ -268,3 +311,13 @@
     token into an Agent.
   </p>
 </section>
+
+<style>
+  .revocation-selection {
+    max-height: 20rem;
+    overflow: auto;
+    overflow-wrap: anywhere;
+    border-bottom: 1px solid #cfd6ce;
+    margin-bottom: 1rem;
+  }
+</style>

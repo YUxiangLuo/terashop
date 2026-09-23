@@ -187,8 +187,82 @@ try {
     throw Error('Demoted self revoke failed');
   await browser('open', `${origin.origin}/orders`);
   await wait('Administrator access required');
+  await checked(
+    api(`/rest/v1/profiles?id=eq.${owner}`, {
+      service: true,
+      method: 'PATCH',
+      body: { role: 'admin' },
+    }),
+  );
+  const acrossPages = [later.id];
+  for (let i = 0; i < 21; i++)
+    acrossPages.push((await grant(owner, `Snapshot Agent ${i + 1}`)).id);
+  await browser('open', `${origin.origin}/connections`);
+  await wait('Preview all eligible connections');
+  await browser(
+    'eval',
+    `(() => {
+    const send=window.fetch; let failPreview=true, lose=true;
+    window.snapshotBodies=[];
+    window.fetch=async (...args) => {
+      if(String(args[0]).includes('/preview_my_mcp_connection_revocation') && failPreview) {
+        failPreview=false; return new Response('{}',{status:503});
+      }
+      if(String(args[0]).includes('/revoke_my_mcp_connections')) {
+        snapshotBodies.push(JSON.parse(args[1].body));
+        const res=await send(...args);
+        if(lose) {lose=false; if(!res.ok)throw Error('RPC failed'); await res.text(); throw TypeError('Lost snapshot receipt');}
+        return res;
+      }
+      return send(...args);
+    };
+  })()`,
+  );
+  await click('Preview all eligible connections');
+  await wait('Could not verify the complete revocation preview.');
+  await browser(
+    'eval',
+    `if(document.querySelector('[aria-label="Confirm revocation"]') || snapshotBodies.length)throw Error('Failed preview offered a partial mutation');`,
+  );
+  await click('Preview all eligible connections');
+  await wait('Revoke 22 selected connection(s)?');
+  await browser('set', 'viewport', '1440', '1000');
+  await browser(
+    'eval',
+    `const section=document.querySelector('[aria-label="Confirm revocation"]'); if(section.querySelectorAll('li').length!==22)throw Error('Missing cross-page identities'); section.scrollIntoView();`,
+  );
+  await browser('screenshot', '/tmp/admin-connections-snapshot.png');
+  await browser('set', 'viewport', '390', '844');
+  await browser(
+    'eval',
+    `document.querySelector('[aria-label="Confirm revocation"]').scrollIntoView(); if(document.documentElement.scrollWidth>innerWidth)throw Error('Snapshot overflow'); const list=document.querySelector('.revocation-selection'); list.scrollTop=list.scrollHeight; if(list.scrollTop<=0 || list.tabIndex!==0)throw Error('Selection not accessible'); list.scrollTop=0;`,
+  );
+  await browser('screenshot', '/tmp/admin-connections-snapshot-mobile.png');
+  await browser('eval', `document.querySelector('.revocation-selection').focus();`);
+  await browser('press', 'PageDown');
+  await browser('wait', '200');
+  await browser('eval', `if(document.querySelector('.revocation-selection').scrollTop<=0)throw Error('Keyboard cannot scroll selected connections');`);
+  const afterPreview = await grant(owner, 'Created after snapshot');
+  await click('Confirm revocation');
+  await wait('Revocation was not confirmed.');
+  await click('Retry same revocation');
+  await wait('22 connection(s) revoked locally.');
+  await browser(
+    'eval',
+    `if(snapshotBodies.length!==2 || JSON.stringify(snapshotBodies[0])!==JSON.stringify(snapshotBodies[1]) || JSON.stringify([...snapshotBodies[0].grant_ids].sort())!==${JSON.stringify(JSON.stringify(acrossPages.sort()))})throw Error('Expanded snapshot retry');`,
+  );
+  if (
+    (
+      await db`select state from private.mcp_grants where id=${afterPreview.id}`
+    )[0].state !== 'active'
+  )
+    throw Error('Snapshot revoked a later grant');
+  const remaining =
+    await db`select id from private.mcp_grants where user_id=${owner} and state='active'`;
+  if (remaining.length !== 1 || remaining[0].id !== afterPreview.id)
+    throw Error('Cross-page revocation incomplete');
   console.log(
-    'PASS: real login, personal isolation, exact retry after lost receipt, new grant preserved, demoted self-revocation and business gate',
+    'PASS: login, isolation, exact retries, demoted self-revocation, business gate, cross-page snapshot and later grant exclusion',
   );
 } finally {
   try {

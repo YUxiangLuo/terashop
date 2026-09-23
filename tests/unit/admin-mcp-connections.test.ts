@@ -3,6 +3,7 @@ import { mcpOnboarding } from '../../admin/src/lib/mcp-onboarding';
 import {
   confirmsRevocation,
   connectionPage,
+  revocationPreview,
 } from '../../admin/src/lib/mcp-connections';
 
 test('onboarding preserves exact endpoints and offers only permitted non-sensitive presets', () => {
@@ -92,4 +93,21 @@ test('connection pages reject malformed identities, scopes and pagination before
   expect(() =>
     connectionPage({ items: [row], next_cursor: 'not-a-cursor' }),
   ).toThrow();
+  expect(revocationPreview({ items: [row], next_cursor: null })).toHaveLength(
+    1,
+  );
+  expect(revocationPreview({ items: [], next_cursor: null })).toEqual([]);
+  for (const page of [
+    { items: [row], next_cursor: row.id },
+    { items: [row, row], next_cursor: null },
+    { items: [{ ...row, cleanup: 'pending' }], next_cursor: null },
+    {
+      items: Array.from({ length: 101 }, () => ({
+        ...row,
+        id: crypto.randomUUID(),
+      })),
+      next_cursor: null,
+    },
+  ])
+    expect(() => revocationPreview(page)).toThrow();
 });
