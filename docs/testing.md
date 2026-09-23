@@ -53,6 +53,8 @@ Realtime 前置迁移为 `20260923000005_admin_realtime.sql`。`bun run test:cur
 
 分类浏览器回归还覆盖实时分类树：展开分支收到新增通知后自动显示、22 个子分类跨页保留、第二页失败不安装第一页的新数据、显式重试后两页一起更新、移出与删除后自动移除，以及启用筛选随事实变化但不清空未提交的搜索输入。使用本地临时数据，故障注入仅拦截一次浏览器分页读取；桌面错误态和手机恢复态截图为 `/tmp/admin-category-live-error.png`、`/tmp/admin-category-live-mobile.png`。
 
+商品列表实时回归需再应用 `20260923000006_admin_product_realtime.sql`。本地 Admin 启动后运行 `bun scripts/admin-products-live-smoke.ts`（支持 `ADMIN_URL`），验证 21 条商品的跨页刷新、第二页失败保留全部旧数据及重试、筛选草稿不变、变体价格更新、状态移出和删除。截图为 `/tmp/admin-products-live*.png`；夹具仅创建和清理本轮本地商品与账号。`tests/admin-realtime.test.ts` 同时验证商品频道权限、事务回滚与商品/变体/图片/分类关联四张表的增删改通知，不向客户端发送业务内容。
+
 该验收覆盖一条代表性跨客户端业务链路，不等于全部 113 个工具的端到端覆盖，也不替代真实域名、SMTP、生产 Edge CORS、目标 Agent 产品客户端与上线运维验收。未设置 `MCP_ADMIN_URL` 时保持原有浏览器只读验收。
 
 ## Storefront 验证与演示数据

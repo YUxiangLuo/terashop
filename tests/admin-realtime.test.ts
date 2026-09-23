@@ -6,10 +6,12 @@ import { testDatabase } from './database-concurrency';
 const db = testDatabase();
 const clients: SupabaseClient[] = [];
 const users: string[] = [],
-  categories: string[] = [];
+  categories: string[] = [],
+  products: string[] = [];
 const project = `realtime-${crypto.randomUUID()}`;
 afterAll(async () => {
   for (const client of clients) await client.removeAllChannels();
+  for (const id of products) await db`delete from public.products where id=${id}::uuid`;
   for (const id of categories) await db`delete from public.categories where id=${id}::uuid`;
   await db`delete from private.mcp_tool_audit where project=${project}`;
   for (const id of users)
@@ -49,6 +51,54 @@ async function until(check: () => boolean) {
     await Bun.sleep(20);
   }
 }
+test('product invalidation covers list sources without exposing rows or accepting non-admin subscriptions', async () => {
+  const admin = await account(true),
+    customer = await account();
+  const allowed = await join('admin:products', admin.token);
+  expect(allowed.state).toBe('SUBSCRIBED');
+  expect((await join('admin:products', customer.token)).state).toBe('CHANNEL_ERROR');
+  expect((await join('admin:products')).state).toBe('CHANNEL_ERROR');
+  const id = crypto.randomUUID(),
+    category = crypto.randomUUID();
+  products.push(id);
+  categories.push(category);
+  await db`insert into public.categories(id,name,slug) values(${category}::uuid,'private',${category})`;
+  await expect(
+    db.begin(async (tx) => {
+      await tx`insert into public.products(id,name,slug) values(${id}::uuid,'rolled back',${id})`;
+      throw Error('rollback');
+    }),
+  ).rejects.toThrow('rollback');
+  await Bun.sleep(300);
+  expect(allowed.messages).toHaveLength(0);
+  const operations = [
+    () => db`insert into public.products(id,name,slug) values(${id}::uuid,'private',${id})`,
+    () => db`insert into public.product_variants(product_id,price) values(${id}::uuid,13.27)`,
+    () =>
+      db`insert into public.product_images(product_id,url) values(${id}::uuid,'https://example.test/private.png')`,
+    () =>
+      db`insert into public.product_categories(product_id,category_id) values(${id}::uuid,${category}::uuid)`,
+    () => db`update public.products set name='renamed' where id=${id}::uuid`,
+    () => db`update public.product_variants set price=29.31 where product_id=${id}::uuid`,
+    () => db`update public.product_images set position=3 where product_id=${id}::uuid`,
+    () => db`update public.product_categories set category_id=${category}::uuid where product_id=${id}::uuid`,
+    () => db`delete from public.product_categories where product_id=${id}::uuid`,
+    () => db`delete from public.product_images where product_id=${id}::uuid`,
+    () => db`delete from public.product_variants where product_id=${id}::uuid`,
+    () => db`delete from public.products where id=${id}::uuid`,
+  ];
+  for (const change of operations) {
+    const before = allowed.messages.length;
+    await change();
+    await until(() => allowed.messages.length > before);
+    await Bun.sleep(100);
+  }
+  for (const value of allowed.messages) expect(Object.keys(value)).toEqual(['id']);
+  await db`update public.profiles set role='customer' where id=${admin.userId}::uuid`;
+  expect((await rpc('list_admin_products', {}, admin.token)).status).toBe(403);
+  expect((await join('admin:products', admin.token)).state).toBe('CHANNEL_ERROR');
+}, 30000);
+
 test('private category broadcast is commit-only and payload-free; customers and demoted joins are denied', async () => {
   const admin = await account(true),
     customer = await account();

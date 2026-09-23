@@ -4,7 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 // reconnect/focus; delivery and cached channel authorization are not guarantees.
 export function watchAdminChanges(
   client: SupabaseClient,
-  scope: "categories" | "calls",
+  scope: "categories" | "products" | "calls",
   invalidate: () => void,
   status: (connected: boolean) => void,
 ) {
@@ -28,9 +28,9 @@ export function watchAdminChanges(
       await client.realtime.setAuth(data.session.access_token);
       if (stopped) return;
       const topic =
-        scope === "categories"
-          ? "admin:categories"
-          : `admin:calls:${data.session.user.id}`;
+        scope === "calls"
+          ? `admin:calls:${data.session.user.id}`
+          : `admin:${scope}`;
       channel = client.channel(topic, { config: { private: true } });
       channel
         .on("broadcast", { event: "invalidate" }, schedule)

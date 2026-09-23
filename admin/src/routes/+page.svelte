@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
+  import { watchAdminChanges } from "$lib/realtime";
   import {
     supabase,
     message,
@@ -16,52 +17,77 @@
   let applied = { search: "", status: "" as ProductStatus | "" };
   let loading = $state(true);
   let error = $state("");
+  let live = $state(false);
+  let changes = $state(0),
+    attempted = $state(0);
+  let retry = $state<"filter" | "refresh" | "more">("filter");
+  let pages = 1;
   let request = 0;
   let alive = true;
   onMount(() => {
-    void load(false);
+    void load("filter");
+    const stop = watchAdminChanges(
+      supabase,
+      "products",
+      () => changes++,
+      (value) => (live = value),
+    );
     return () => {
       alive = false;
       request++;
+      stop();
     };
   });
-  async function load(more: boolean) {
+  $effect(() => {
+    if (changes > attempted && !loading) void load("refresh");
+  });
+  async function load(mode: "filter" | "refresh" | "more") {
     const current = ++request;
+    if (mode !== "more") attempted = changes;
+    retry = mode;
     loading = true;
     error = "";
-    if (!more) {
+    if (mode === "filter") {
       applied = { search: search.trim(), status };
       cursor = null;
       products = [];
+      pages = 1;
     }
     try {
-      const result = await supabase.rpc("list_admin_products", {
-        page_size: 20,
-        ...(applied.search ? { search: applied.search } : {}),
-        ...(applied.status ? { status_filter: applied.status } : {}),
-        ...(more && cursor ? { after_cursor: cursor } : {}),
-      });
-      if (!alive || current !== request) return;
-      if (result.error) throw result.error;
-      const page = result.data as unknown as ProductPage;
-      products = more
-        ? [
-            ...products,
-            ...page.items.filter(
-              (item) => !products.some((old) => old.id === item.id),
-            ),
-          ]
-        : page.items;
-      cursor = page.next_cursor;
+      const rows = mode === "more" ? [...products] : [];
+      let next = mode === "more" ? cursor : null;
+      let readPages = 0;
+      do {
+        const result = await supabase.rpc("list_admin_products", {
+          page_size: 20,
+          ...(applied.search ? { search: applied.search } : {}),
+          ...(applied.status ? { status_filter: applied.status } : {}),
+          ...(next ? { after_cursor: next } : {}),
+        });
+        if (!alive || current !== request) return;
+        if (result.error) throw result.error;
+        const page = result.data as unknown as ProductPage;
+        rows.push(
+          ...page.items.filter(
+            (item) => !rows.some((old) => old.id === item.id),
+          ),
+        );
+        next = page.next_cursor;
+        readPages++;
+      } while (mode === "refresh" && next && readPages < pages);
+      products = rows;
+      cursor = next;
+      pages = mode === "more" ? pages + 1 : readPages;
     } catch (cause) {
-      if (alive && current === request) error = message(cause);
+      if (alive && current === request)
+        error = `${message(cause)} Displayed products may be stale.`;
     } finally {
       if (alive && current === request) loading = false;
     }
   }
   function filter(event: SubmitEvent) {
     event.preventDefault();
-    void load(false);
+    void load("filter");
   }
 </script>
 
@@ -79,6 +105,12 @@
   >
 </div>
 <section class="card" aria-label="Product catalog">
+  <p class="small muted">
+    {live
+      ? "Live product updates connected."
+      : "Live product updates unavailable; focus or refresh to check current facts."}
+    Updates reread loaded pages; products may move as their update time changes.
+  </p>
   <form class="toolbar" onsubmit={filter}>
     <label
       >Search products<input
@@ -98,9 +130,15 @@
       ></label
     >
     <button disabled={loading}>Apply</button>
+    <button type="button" disabled={loading} onclick={() => load("refresh")}
+      >Refresh products</button
+    >
   </form>
   {#if error}<p class="notice error" role="alert">{error}</p>
-    <button onclick={() => load(false)}>Retry</button>{/if}
+    <button
+      disabled={loading}
+      onclick={() => load(retry === "filter" ? "refresh" : retry)}>Retry</button
+    >{/if}
   <div class="table-wrap">
     <table>
       <thead
@@ -154,8 +192,9 @@
   <div class="list-footer">
     <span class="small muted"
       >{products.length} loaded · Most recently updated first</span
-    >{#if cursor}<button onclick={() => load(true)} disabled={loading}
-        >Load more</button
+    >{#if cursor}<button
+        onclick={() => load("more")}
+        disabled={loading || !!error}>Load more</button
       >{/if}
   </div>
 </section>
