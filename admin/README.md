@@ -2,6 +2,14 @@
 
 独立的 Svelte 5 / SvelteKit CSR 管理端，与 [Storefront](../storefront/README.md) 共用 Bun workspace、lockfile 和依赖安装。根 layout 关闭 SSR/prerender，adapter-static 输出 SPA fallback。没有服务端路由，也不新增 Edge Function。
 
+## 导航
+
+管理入口分为 Orders（订单、Checkout quotes）、Products（商品、分类）、Inventory（库存、仓库）、Customers、Promotions、Operations（对账异常、支付事件、事件投递 Outbox）及 Settings（配送与运费、税率）。模块名称进入默认页面，旁边的展开按钮只切换二级菜单；同时展开一个模块，深链接及浏览器前进／后退会自动展开当前模块。保留所有原 URL、查询参数和业务页面，不新增概览页。退款／退货／履约仍从订单进入，调拨仍从库存进入。
+
+My Agent connections 位于独立 Personal 区域，非管理员仍仅能进入本人连接页面；导航可见性不替代 RPC 权限检查。650px 及以下使用 Menu 模态抽屉，支持焦点约束、Escape／Close／遮罩关闭，导航成功后关闭；取消离开草稿页则保持原页及抽屉。切回桌面时关闭抽屉并解除滚动锁。
+
+本地验收：`bun scripts/admin-navigation-smoke.ts`。覆盖所有主页面分组及商品深链接、历史返回、桌面和手机布局、键盘焦点、抽屉关闭与屏幕切换、草稿导航取消、降级及退出。截图为 `/tmp/admin-menu-desktop.png`、`/tmp/admin-menu-mobile-closed.png` 和 `/tmp/admin-menu-mobile-open.png`。
+
 ## 本地运行
 
 先按根目录 [快速开始](../README.md#快速开始) 安装依赖并初始化可丢弃的本地 Supabase。已有开发环境需要重新 `bun run setup` 才会应用管理员 Storage 策略；这会清空本地数据库。

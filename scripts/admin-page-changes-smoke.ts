@@ -84,7 +84,22 @@ try {
   await wait('Live page notifications connected.');
   await browser('eval', 'window.spaNavigationMarker=true');
   for (const [path, table] of cases) {
-    await browser('click', `nav a[href="${path}"]`);
+    const group =
+      path === '/quotes'
+        ? 'Orders'
+        : path === '/locations'
+          ? 'Inventory'
+          : ['/shipping', '/taxes'].includes(path)
+            ? 'Settings'
+            : ['/outbox', '/payment-events', '/reconciliation'].includes(path)
+              ? 'Operations'
+              : null;
+    if (group) {
+      await browser('eval', `document.querySelector('aside button[aria-label="Expand ${group}"]')?.click()`);
+      await browser('click', `aside .subnav a[href="${path}"]`);
+    } else {
+      await browser('click', `aside .module a[href="${path}"]`);
+    }
     await browser('wait', '--url', `**${path}`);
     await wait('Live page notifications connected.');
     await wait('Data used by this page may have changed.');
