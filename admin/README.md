@@ -32,6 +32,8 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 ## MVP 范围
 
+- `/payment-events` 提供支付 Inbox 只读查询：状态和关联资源 UUID 组合筛选、URL 保留、按创建时间/UUID 倒序分页，原样保留微秒游标；翻页失败保留记录。展示处理次数、后端重试耗尽标记、错误标记、Live/Test 和安全元数据，不展示载荷或原始错误，不提供重放。处理状态不证明收款或对账完成，下一次尝试时间不是处理承诺。
+- Inbox 的资源 ID 是意图、交易、退款请求或渠道资金记录，不是订单或事件 ID；无资源筛选才包含未关联事件。对账记录提供按资金记录 ID 查询事件的入口，但资源关联不保证包含其来源事件，不提供精确事件 ID 搜索。切换资源清空状态和游标；无跨页快照。
 - `/reconciliation` 查询全店未解决的渠道资金变动，包括没有关联订单的记录。分别查询 unmatched / action_required，URL 保留筛选，按创建时间及 UUID 最早优先分页，微秒游标原样传递；下一页失败保留已加载记录。金额按原币种及原始十进制字符串显示，不换算、舍入或跨币种合计。
 - 对账页仅展示安全引用 ID、错误标记和关联订单入口，不显示渠道引用、原始错误或载荷。记录不等于已结算账本资金，空页不证明系统健康，错误标记不是重试许可，无跨页快照。不提供自动匹配、资金重放或退款；action_required 交由受信运维核查。
 - `/quotes` 提供只读 Checkout 报价查询，支持客户 UUID、有效状态、是否关联订单组合筛选，URL 保留筛选条件，按 UUID 游标分页；下一页失败保留已有记录并可重试。详情显示历史价格、地址、备注及客户/订单链接，支持直接打开和刷新。
@@ -148,5 +150,7 @@ location / {
 同一报价脚本还通过取消页验证原因必填、未发送请求的原参数恢复、重试成功但响应与后续读取丢失后的刷新核对、终态按钮禁用，以及关联未付款订单确实取消。取消截图保存于 `/tmp/admin-quote-cancel*.png`；并发 Capture 阻止取消和重复调用保留原原因由上述后端回归覆盖。
 
 对账异常回归：`bun run test:current tests/admin-reconciliation.test.ts` 验证真实权限、无订单记录、微秒游标、原始金额与安全字段；本地 Admin 运行后执行 `bun scripts/admin-reconciliation-smoke.ts`（支持 `ADMIN_URL`）。真实登录与读取后，用浏览器模拟响应验证八位 EUR 金额、精确游标、分页失败重试、状态切换清空游标、安全字段、空结果/错误/非法状态、深链接刷新和移动端内部滚动。仅创建并删除临时账号，不写资金记录；模拟记录截图保存于 `/tmp/admin-reconciliation*.png`。
+
+同一脚本覆盖支付 Inbox：真实读取和深链接刷新、微秒游标重试、资源跳转与清空筛选、未关联事件、25 次未终结耗尽与 26 次已处理未耗尽的区别、infinity 时间、事件文本转义、安全字段及移动端滚动。截图为模拟事件，保存于 `/tmp/admin-payment-events*.png`。后端权限、同时间游标及耗尽边界回归：`bun run test:current tests/admin-operations.test.ts`。
 
 自动检查：`admin:check`、`admin:build`、`bun test tests/unit/admin-commands.test.ts tests/unit/admin-catalog.test.ts`；数据库回归可运行 `bun run test:current tests/product-edit.test.ts tests/admin-order-operations.test.ts tests/admin-retry.test.ts tests/storage-admin.test.ts`。浏览器验收应包含登录失败、普通客户拒绝、管理员恢复会话、创建/发布/归档、规格组合增删及原 ID 保留、图片上传和变体归属、分类跨搜索保留、库存搜索/流水分页、仓库/变体切换、备注冲突、部分发货、未知写结果刷新后原键重试，以及桌面/移动端与深链接刷新。整个回归套件会写入额外目录数据；恢复演示环境需重新 setup（会清空账号）并构建 Storefront。

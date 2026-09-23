@@ -23,7 +23,10 @@ async function browser(...args: string[]) {
 }
 const click = (name: string) =>
   browser("find", "role", "button", "click", "--name", name, "--exact");
-const wait = (text: string) => browser("wait", "--text", text);
+const wait = async (text: string) => {
+  try { await browser("wait", "--text", text); }
+  catch (cause) { throw Error(`Waiting for ${text} failed`, { cause }); }
+};
 try {
   user = (
     await checked<{ id: string }>(
@@ -117,8 +120,82 @@ try {
   await wait("No issues found for this status");
   await browser("open", `${origin.origin}/reconciliation?status=matched`);
   await wait("Invalid reconciliation status");
+  await browser("open", `${origin.origin}/payment-events?status=failed`);
+  await wait("loaded · Newest created first");
+  await browser(
+    "eval",
+    `if(document.querySelector('main [role=alert]'))throw Error('Real Inbox read failed');if(document.querySelector('#inbox-status').value!=='failed')throw Error('Inbox filter lost')`,
+  );
+  await browser("reload");
+  await wait("loaded · Newest created first");
+  await browser("select", "#inbox-status", "");
+  await click("Apply filters");
+  await wait("loaded · Newest created first");
+  await browser(
+    "eval",
+    `(() => {
+    const original=window.fetch;window.inboxRequests=[];window.failInbox=false;
+    window.fetch=async(input,init)=>{
+      if(!String(input).endsWith('/rpc/list_admin_payment_provider_events'))return original(input,init);
+      const args=JSON.parse(init.body);window.inboxRequests.push(args);
+      const headers={'Content-Type':'application/json'};
+      if(window.failInbox)return new Response(JSON.stringify({message:'Inbox read failure'}),{status:400,headers});
+      const row={id:'00000000-0000-4000-8000-000000000011',provider:'paypal',provider_event_id:'EVT-TEST',source:'webhook',event_type:'PAYMENT.<b>literal</b>',status:args.status_filter||'failed',livemode:false,resource_type:null,resource_id:null,attempts:25,automatic_retry_exhausted:true,next_attempt_at:'infinity',processed_at:null,occurred_at:'2026-09-20T12:34:56.123456Z',created_at:'2026-09-20T12:34:56.123456Z',has_error:true,last_error:'DO-NOT-EXPOSE',data:{secret:'DO-NOT-EXPOSE'},object_reference:'DO-NOT-EXPOSE'};
+      const items=args.resource_id ? [] : args.after_cursor ? [{...row,id:'00000000-0000-4000-8000-000000000010',status:'processed',attempts:26,automatic_retry_exhausted:false,resource_type:'provider_money_movement',resource_id:'00000000-0000-4000-8000-000000000001'}] : [row];
+      return new Response(JSON.stringify({items,next_cursor:!args.resource_id&&!args.after_cursor?{created_at:row.created_at,id:row.id}:null}),{headers});
+    };
+  })()`,
+  );
+  await click("Refresh events");
+  await wait("Attempts: 25");
+  await browser("eval", "window.failInbox=true");
+  await click("More payment events");
+  await wait("Inbox read failure");
+  await browser(
+    "eval",
+    `if(document.querySelectorAll('tbody tr').length!==1)throw Error('Lost Inbox rows');window.failInbox=false`,
+  );
+  await click("Retry event read");
+  await wait("2 loaded");
+  await browser("click", "tbody tr:first-child summary");
+  await wait("Next attempt timestamp: infinity");
+  await browser(
+    "eval",
+    `if(window.inboxRequests.at(-1).after_cursor.created_at!=='2026-09-20T12:34:56.123456Z'||window.inboxRequests.at(-1).after_cursor.id!=='00000000-0000-4000-8000-000000000011')throw Error('Inbox cursor changed');if(document.querySelector('main b')||document.querySelector('main').textContent.includes('DO-NOT-EXPOSE'))throw Error('Unsafe Inbox fields');if(!document.querySelector('tbody tr:nth-child(2)').textContent.includes('Automatic retries exhausted: No'))throw Error('Exhaustion inferred from attempts')`,
+  );
+  await browser("set", "viewport", "1440", "1000");
+  await browser("screenshot", "/tmp/admin-payment-events.png", "--full");
+  await browser("set", "viewport", "390", "844");
+  await browser(
+    "eval",
+    `const wrap=document.querySelector('.table-wrap');wrap.scrollLeft=200;if(!wrap.scrollLeft||document.documentElement.scrollWidth>innerWidth)throw Error('Inbox mobile overflow')`,
+  );
+  await browser("screenshot", "/tmp/admin-payment-events-mobile.png", "--full");
+  await browser("set", "viewport", "1440", "1000");
+  await browser("eval", `document.querySelector('.table-wrap').scrollLeft=0`);
+  await browser(
+    "click",
+    'a[href="/payment-events?resource=00000000-0000-4000-8000-000000000001"]',
+  );
+  await wait("No payment events found");
+  await browser(
+    "eval",
+    `const args=window.inboxRequests.at(-1);if(args.resource_id!=='00000000-0000-4000-8000-000000000001'||args.status_filter||args.after_cursor)throw Error('Resource navigation retained old filters')`,
+  );
+  await browser("fill", "#inbox-resource", "");
+  await browser("select", "#inbox-status", "ignored");
+  await click("Apply filters");
+  await wait("1 loaded");
+  await browser(
+    "eval",
+    `if(window.inboxRequests.at(-1).resource_id||window.inboxRequests.at(-1).after_cursor||window.inboxRequests.at(-1).status_filter!=='ignored')throw Error('Inbox filter reset failed')`,
+  );
+  await browser("open", `${origin.origin}/payment-events?resource=invalid`);
+  await wait("Enter a valid resource UUID");
+  await browser("open", `${origin.origin}/payment-events?status=unknown`);
+  await wait("Invalid payment event status");
   console.log(
-    "Reconciliation smoke passed: real authenticated read/deep refresh; fixture exact amounts/cursor, retry preserving rows, safe fields, order links, status reset, empty/error/invalid states, mobile scroll.",
+    "Reconciliation and Inbox smoke passed: real reads/deep refresh; fixture exact amounts/cursors, retry preserving rows, safe fields, resource links, filter reset, diagnostic flags, infinity, empty/error/invalid states, mobile scroll.",
   );
 } finally {
   await browser("close").catch(() => {});

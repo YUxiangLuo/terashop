@@ -181,6 +181,13 @@
           href="/reconciliation">≍ <span>Reconciliation</span></a
         >
         <a
+          class:nav-active={page.url.pathname.startsWith("/payment-events")}
+          aria-current={page.url.pathname.startsWith("/payment-events")
+            ? "page"
+            : undefined}
+          href="/payment-events">▤ <span>Payment events</span></a
+        >
+        <a
           class:nav-active={page.url.pathname.startsWith("/customers")}
           aria-current={page.url.pathname.startsWith("/customers")
             ? "page"

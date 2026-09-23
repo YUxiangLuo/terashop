@@ -79,6 +79,13 @@
               <p>Event: {item.provider_event_id}</p>
               <p>Payment intent: {item.payment_intent_id ?? "None"}</p>
               <p>Refund request: {item.refund_request_id ?? "None"}</p>
+              <a href={`/payment-events?resource=${item.id}`}
+                >Events linked to this movement</a
+              >
+              <p class="small muted">
+                Resource association only; this may not include the source event
+                shown above.
+              </p>
             </details>
           </td>
         </tr>{/each}</tbody
