@@ -73,6 +73,15 @@ export function createOidcInteractionHandler(
   function json(body: unknown, status = 200) {
     return Response.json(body, { status });
   }
+  function completion(req: Request, location: string, headers = new Headers()) {
+    headers.set('Vary', 'Accept');
+    // Browser fetch must receive a result before deliberately navigating to
+    // the provider resume URL; do not make it follow the client's redirect.
+    if (req.headers.get('accept') === 'application/json')
+      return Response.json({ redirectTo: location }, { headers });
+    headers.set('Location', location);
+    return new Response(null, { status: 303, headers });
+  }
   async function send(res: ServerResponse, response: Response) {
     const body = await response.text();
     // end() may silently succeed after disconnect. Approval must instead enter
@@ -184,8 +193,7 @@ export function createOidcInteractionHandler(
               mergeWithLastSubmission: false,
             },
           );
-          cancelled.headers.set('Location', location);
-          await send(res, new Response(null, { status: 303, headers: cancelled.headers }));
+          await send(res, completion(web, location, cancelled.headers));
         } finally {
           tx.state = 'finished';
         }
@@ -220,7 +228,7 @@ export function createOidcInteractionHandler(
         current(uid, latest.fingerprint);
         if (identity.credentials.expiresAt <= Math.floor(Date.now() / 1000))
           throw new Error('Login expired during completion');
-        await send(res, new Response(null, { status: 303, headers: { Location: location } }));
+        await send(res, completion(web, location));
         await journal?.finish(uid, 'completed');
       } catch (error) {
         if (persisted) await approval.revoke();

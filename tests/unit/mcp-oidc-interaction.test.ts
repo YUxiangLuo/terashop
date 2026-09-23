@@ -6,3 +6,9 @@ test(
   () => verifyOAuthInteraction(),
   15_000,
 );
+
+test(
+  'JSON consent completion returns a resume URL without bypassing approval or CSRF',
+  () => verifyOAuthInteraction(undefined, true),
+  15_000,
+);

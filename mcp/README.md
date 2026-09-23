@@ -26,6 +26,8 @@
 
 - [x] 统一当前状态、历史记录及首版边界；保留代码／测试证据入口。
 - [ ] 本地端到端：真实 HTTPS MCP＋Node 授权服务＋Supabase，验证授权后工具读写、双用户隔离、降权／撤销、刷新竞争、断连与结果未知；不自动重放写入。
+  - 已完成代表性店铺设置读写、只读拒绝、版本冲突、降权／撤销、刷新竞争、完成回执丢失及断连后重启。证据见下方 Node 联合场景；不要求逐个工具重复 transport 测试，也不将代表性写入扩大为渠道资金验收。
+  - 浏览器登录／同意及实际客户端授权仍需端到端串联；下一阶段复用现有交互协议，不另建账号或批准通路。
 - [ ] 用户授权体验：展示真实 client/resource/scopes 与离线刷新，覆盖登录、批准、拒绝、取消、到期及失败，使用真实浏览器验收 Cookie／CSRF 与页面。
 - [ ] 运行防护与运维：限流和并发预算、慢连接防护、日志脱敏核对、健康／退出、密钥轮换、敏感 payload 保留、备份恢复、部署与升级手册。已有永久撤销标记不可随意清理。
 - [ ] 公网与目标客户端：域名及可信证书就绪后，验证预注册客户端的完整授权、调用、刷新、重连和撤销；部署／共享数据库升级须另行授权。生产启用支付能力前完成对应 Sandbox 与渠道验收。
@@ -253,6 +255,8 @@ provider 持久化已提供 [createOidcAdapter](src/oidc-adapter.ts) 与独立�
 任何失败均消耗本次批准，不自动重试。尽力撤销上游及本地 grant，正常本地撤销删除密文；已知 ID 使用 revoke，创建回执丢失时使用完整 binding 调用 service-only revoke_binding。核对撤销回执的 ID、用户及终态；未知 ID 的清理也必须获得合法 UUID 和原用户。查不到记录、撤销失败或回执异常仍返回 APPROVAL_CLEANUP_UNCONFIRMED，不能声称回滚完成。不得继续发码或复用本次登录会话；进程崩溃仍没有补偿调度。单测覆盖身份/会话替换、并发、畸形回执、结果丢失；`tests/mcp-login.test.ts` 用真实邮件登录、Auth 与数据库验证首次保存，以及已提交 create/凭据 write 回执丢失后的撤销。该集成在 Bun 执行，上游 Grant 使用真实库的内存 adapter，不构成完整远程授权流程。
 
 后续已增加 [createOidcInteractionHandler](src/oidc-interaction.ts)：原生 Node HTTP handler，挂在 provider.callback 前，不启动监听器。`GET /interaction/:uid` 返回已验证的 client/redirect/resource/store scopes/offlineAccess；`POST .../start` 绑定登录 Cookie，`POST .../approve` 和 `POST .../cancel` 分别要求 `X-Tera-Consent: approve/deny`、同源 Origin 与登录 CSRF。start 另要求 `X-Tera-Login: start`，以上 POST 不接受正文。邮件与回调沿用 `/login/email`、配置的固定 callback、`/login/status`；独立 `/login/session`、`/login/approve`、`/login/cancel` 不对外开放。
+
+为浏览器页面提供显式完成回执：approve／cancel 的请求头精确为 `Accept: application/json` 时，成功返回 200 `{redirectTo}`，不含 Location；地址由 provider 的 interactionResult 生成，页面随后主动导航至该同源恢复地址。其他 Accept 或未指定时保留 303 Location。两种响应均 no-store、Vary: Accept，不返回下游凭据或授权码；取消仍发送清除登录 Cookie 的响应头。JSON 仅改变成功响应表示，不改变 Cookie／Origin／CSRF、指纹核对、持久化先于发码和失败撤销规则。Bun 及 Node 22＋PostgreSQL 协议测试覆盖两种模式的批准、拒绝、恢复后发码／access_denied 及安全反例。此阶段仍无用户可操作页面，也未完成浏览器导航验收。
 
 每次交互操作用原生请求验证 provider 的签名 Cookie/Session，并比较路由 UID；client/resource/scopes 只取 provider interaction，不从用户正文取值。登录 bootstrap 固定 UID，身份交接必须匹配；五分钟内单次批准，存储开始后取消/再次批准拒绝。先保存两端 grant/加密凭据，再提交 login+consent 结果并返回 provider resume 地址；完成失败时撤销已保存批准，清理结果不明返回 503/APPROVAL_CLEANUP_UNCONFIRMED。已写 provider result 的交互不能重新启动，固定 authority 检查不信任 Forwarded 生成 URL。
 

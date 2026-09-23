@@ -74,6 +74,8 @@ try {
     console.log('PASS: Node LTS PostgreSQL protocol and barrier-controlled HTTP code/refresh races');
     await verifyOAuthInteraction(Adapter);
     console.log('PASS: Node LTS PostgreSQL interaction binding, consent and completion cleanup');
+    await verifyOAuthInteraction(Adapter, true);
+    console.log('PASS: Node LTS PostgreSQL JSON consent completion and explicit resume');
     const local = new URL(url);
     local.hostname = '127.0.0.1'; // Node shares only this disposable database's network namespace.
     await verifyOidcService(local.href, {
