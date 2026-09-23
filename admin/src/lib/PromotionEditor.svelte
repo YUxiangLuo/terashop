@@ -295,9 +295,15 @@
           <p class="small muted">
             Scopes affect item percentage and buy/get rules; order discounts and
             free shipping keep their whole-order semantics. New item and buy/get
-            rules apply to all products. Existing targets and scopes are never
-            replaced by this editor.
+            rules apply to all products. For a targeted offer, save it disabled,
+            edit its targets, then enable it. Rule-detail saves do not replace
+            targets or scopes.
           </p>
+          {#if rule && (rule.type === "item_percentage" || rule.type === "buy_x_get_y")}
+            <a href={`/promotions/${rule.id}/targets${page.url.search}`}
+              >Edit targets and scope →</a
+            >
+          {/if}
           {#if rule}<p class="small muted">
               Revision {rule.revision}. Checkout usage and target edits also
               change the revision.
