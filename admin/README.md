@@ -32,6 +32,8 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 ## MVP 范围
 
+- `/quotes` 提供只读 Checkout 报价查询，支持客户 UUID、有效状态、是否关联订单组合筛选，URL 保留筛选条件，按 UUID 游标分页；下一页失败保留已有记录并可重试。详情显示历史价格、地址、备注及客户/订单链接，支持直接打开和刷新。
+- 报价有效状态与存储状态分别显示；预留标记不是库存数量或付款证明，显示过期不证明后台已完成释放，须重新读取获取当前事实。不提供取消、延期或释放库存操作，无跨页快照，不添加兼容接口或数据转换。
 - 邮箱密码登录、会话恢复、退出；不同于 Storefront 的独立会话存储 key。通过 `is_admin()` 验证数据库角色后才挂载管理页面，后端仍独立验证每个 RPC/Storage 请求。刷新 token、窗口重新聚焦时重新检查权限。
 - 商品列表通过 `list_admin_products` 搜索名称/SKU、筛选状态、按服务端游标加载更多；编辑时重新读取详情。
 - 创建和编辑商品名称、slug、描述、vendor、product type，以及图片 alt、排序、关联删除；支持 draft / active / archived 切换，发布或撤回前要求确认。
@@ -137,5 +139,7 @@ location / {
 同一退款脚本还创建商品退款历史，验证名称与关联交易显示、价格快照失败时回退 ID 与重读恢复、渠道引用不出现在页面；浏览器模拟不平衡分配，验证告警和新记账禁用，不修改数据库账目。核对明细截图为 `/tmp/admin-refund-detail*.png`。
 
 试算浏览器回归还覆盖并发发货使库存影响变化而拒绝提交、重新选择清除确认、成功后仅释放确认数量，以及商品/运费税展示和单独退运费。临时税率与配送方式在结束后停用；截图为 `/tmp/admin-refund-preview*.png`。后端合同回归：`bun run test:current tests/manual-refund-preview.test.ts`。
+
+报价回归：`bun test tests/unit/admin-quotes.test.ts`、`bun run test:current tests/admin-checkout-quotes.test.ts`；本地 Admin 运行后执行 `bun scripts/admin-quotes-smoke.ts`（支持 `ADMIN_URL`）。验证真实分页、下一页失败保留记录及重试、组合筛选、订单链接、深链接刷新、空结果和非法筛选；模拟有效过期与不可信备注响应，验证状态区别和文本转义，不改写报价事实。仅创建本次临时账号、商品和订单，结束取消自建未付款订单、归档商品并撤销管理员角色，保留审计记录；桌面及移动截图写入 `/tmp/admin-quote*.png`。
 
 自动检查：`admin:check`、`admin:build`、`bun test tests/unit/admin-commands.test.ts tests/unit/admin-catalog.test.ts`；数据库回归可运行 `bun run test:current tests/product-edit.test.ts tests/admin-order-operations.test.ts tests/admin-retry.test.ts tests/storage-admin.test.ts`。浏览器验收应包含登录失败、普通客户拒绝、管理员恢复会话、创建/发布/归档、规格组合增删及原 ID 保留、图片上传和变体归属、分类跨搜索保留、库存搜索/流水分页、仓库/变体切换、备注冲突、部分发货、未知写结果刷新后原键重试，以及桌面/移动端与深链接刷新。整个回归套件会写入额外目录数据；恢复演示环境需重新 setup（会清空账号）并构建 Storefront。
