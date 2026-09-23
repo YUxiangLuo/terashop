@@ -13,12 +13,60 @@ import {
   dispositionQuantity,
   acknowledgesDisposition,
   type DisposeCommand,
+  isCloseReturnCommand,
+  acknowledgesClosure,
 } from "../../admin/src/lib/returns";
 import { dispatchCommand } from "../../admin/src/lib/commands";
 const a = "aaaaaaaa-1111-4111-8111-111111111111",
   b = "bbbbbbbb-2222-4222-8222-222222222222";
 const shipment = crypto.randomUUID(),
   order = crypto.randomUUID();
+test("closure requires exact identity, desired terminal state and zero remaining receivable quantity", () => {
+  const command = { return_id: a, cancel: false };
+  expect(isCloseReturnCommand(command)).toBe(true);
+  for (const change of [
+    { cancel: "false" },
+    { return_id: "bad" },
+    { idempotency_key: b },
+  ])
+    expect(isCloseReturnCommand({ ...command, ...change })).toBe(false);
+  const result = {
+    id: a,
+    order_id: order,
+    status: "closed",
+    closed_at: "2026-09-23T12:00:00Z",
+    lines: [{ receivable_quantity: 0 }],
+    receipts: [{ id: b }],
+  };
+  expect(acknowledgesClosure(result, command, order)).toBe(true);
+  for (const change of [
+    { id: b },
+    { order_id: b },
+    { status: "cancelled" },
+    { status: "open" },
+    { closed_at: null },
+    { closed_at: "bad" },
+    { lines: [] },
+    { lines: [{ receivable_quantity: 1 }] },
+  ])
+    expect(acknowledgesClosure({ ...result, ...change }, command, order)).toBe(
+      false,
+    );
+  expect(
+    acknowledgesClosure(
+      { ...result, status: "cancelled", receipts: [] },
+      { ...command, cancel: true },
+      order,
+    ),
+  ).toBe(true);
+  expect(
+    acknowledgesClosure(
+      { ...result, status: "cancelled" },
+      { ...command, cancel: true },
+      order,
+    ),
+  ).toBe(false);
+});
 test("disposition quantities and commands reject over-disposal and invalid outcomes", () => {
   expect(dispositionQuantity(2, 2)).toBe(2);
   for (const quantity of [undefined, 0, -1, 1.5, 3])

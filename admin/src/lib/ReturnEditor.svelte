@@ -292,6 +292,9 @@
         <a href={`/orders/${id}/returns/${authorization.id}/receive`}
           >Receive items / recover request</a
         >
+        <a href={`/orders/${id}/returns/${authorization.id}/close`}
+          >Close / cancel / check state</a
+        >
       </div>
       <p class="small muted">
         {dateTime(authorization.created_at)} · Shipment {authorization.fulfillment_id}{authorization.closed_at

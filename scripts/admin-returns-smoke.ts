@@ -285,7 +285,10 @@ try {
   await click("Record disposition");
   await browser("dialog", "accept");
   await wait("Unconfirmed disposition request");
-  await browser("eval", 'if (!document.querySelector("#disposition-kind").matches(":disabled")) throw Error("Pending form enabled")');
+  await browser(
+    "eval",
+    'if (!document.querySelector("#disposition-kind").matches(":disabled")) throw Error("Pending form enabled")',
+  );
   await browser("screenshot", "/tmp/admin-disposition-uncertain.png", "--full");
   await checked(
     api(`/rest/v1/locations?id=eq.${receiptLocation}`, {
@@ -351,7 +354,10 @@ try {
   await browser("dialog", "accept");
   await wait("Discard recorded");
   await wait("This receipt line is fully disposed.");
-  await browser("eval", 'for (const control of document.querySelectorAll("fieldset input, fieldset select, fieldset textarea, fieldset button")) if (!control.matches(":disabled")) throw Error("Fully disposed form enabled")');
+  await browser(
+    "eval",
+    'for (const control of document.querySelectorAll("fieldset input, fieldset select, fieldset textarea, fieldset button")) if (!control.matches(":disabled")) throw Error("Fully disposed form enabled")',
+  );
   assert.equal((await disposed()).dispositions.length, 2);
   assert.equal((await disposed()).undisposed_quantity, 0);
   assert.equal(
@@ -413,8 +419,157 @@ try {
     "eval",
     'if (!document.querySelector("fieldset").disabled) throw Error("Stale form editable")',
   );
+  console.log("Authorization, receipt and disposition smoke passed.");
+  // Terminal-state UI: partial close, cancel, conflicting terminal state, and racing receipt.
+  await checked(
+    api(`/rest/v1/locations?id=eq.${receiptLocation}`, {
+      service: true,
+      method: "PATCH",
+      body: { is_active: true },
+    }),
+  );
+  const authorize = (quantity: number) =>
+    checked<any>(
+      rpc(
+        "create_return",
+        {
+          fulfillment_id: second.id,
+          items: [{ order_item_id: order.itemId, quantity }],
+          idempotency_key: crypto.randomUUID(),
+          reason: "Closure smoke",
+        },
+        actor.token,
+      ),
+    );
+  const receiveOne = (r: any) =>
+    checked<any>(
+      rpc(
+        "receive_return",
+        {
+          return_id: r.id,
+          location_id: receiptLocation,
+          items: [{ return_line_id: r.lines[0].id, quantity: 1 }],
+          idempotency_key: crypto.randomUUID(),
+        },
+        actor.token,
+      ),
+    );
+  const openClose = async (r: any) => {
+    await browser(
+      "open",
+      `${origin.origin}/orders/${order.id}/returns/${r.id}/close`,
+    );
+    await browser(
+      "wait",
+      "--fn",
+      'Array.from(document.querySelectorAll("button")).some(b => b.textContent.trim() === "Close return" && !b.disabled)',
+    );
+  };
+  const loseClosure = (send: boolean) =>
+    browser(
+      "eval",
+      `(() => { const original = window.fetch; window.fetch = async (...args) => {
+    if (String(args[0]).includes('/rpc/close_return')) { window.fetch = original; ${send ? "const response = await original(...args); if (!response.ok) return response;" : ""} return new Response(JSON.stringify({message:'Simulated unknown closure'}), {status:503,headers:{'Content-Type':'application/json'}}); } return original(...args);
+  }; })()`,
+    );
+  const closureFacts = (r: any) =>
+    facts().then((f) => f.returns.find((item: any) => item.id === r.id));
+  const noTerminalActions = () =>
+    browser(
+      "eval",
+      'for (const name of ["Close return", "Cancel authorization"]) if (!Array.from(document.querySelectorAll("button")).find(b => b.textContent.trim() === name).disabled) throw Error("Terminal action enabled")',
+    );
+  const closureStock = await stock();
+  const partial = await authorize(2);
+  await receiveOne(partial);
+  await openClose(partial);
+  await browser(
+    "eval",
+    'if (!Array.from(document.querySelectorAll("button")).find(b => b.textContent.trim() === "Cancel authorization").disabled) throw Error("Received return cancellable")',
+  );
+  await loseClosure(true);
+  await click("Close return");
+  await browser("dialog", "accept");
+  await wait("Unconfirmed closure request");
+  await browser(
+    "screenshot",
+    "/tmp/admin-return-close-uncertain.png",
+    "--full",
+  );
+  await browser("reload");
+  await wait("Requested terminal state confirmed");
+  await noTerminalActions();
+  const closed = await closureFacts(partial);
+  assert.equal(closed.status, "closed");
+  assert.equal(closed.lines[0].received_quantity, 1);
+  assert.equal(closed.lines[0].receivable_quantity, 0);
+  assert.equal(closed.receipts.length, 1);
+  assert.equal(
+    (await facts()).lines.find((l: any) => l.fulfillment_id === second.id)
+      .available_quantity,
+    1,
+  );
+  await browser("set", "viewport", "1280", "900");
+  await browser("screenshot", "/tmp/admin-return-close.png", "--full");
+  await browser("set", "viewport", "390", "844");
+  await browser("screenshot", "/tmp/admin-return-close-mobile.png", "--full");
+  await browser(
+    "eval",
+    'if (document.documentElement.scrollWidth > innerWidth) throw Error("Closure mobile overflow")',
+  );
+  const cancelled = await authorize(1);
+  await openClose(cancelled);
+  await click("Cancel authorization");
+  await browser("dialog", "accept");
+  await wait("Return cancelled.");
+  await noTerminalActions();
+  assert.equal((await closureFacts(cancelled)).status, "cancelled");
+  const retryable = await authorize(1);
+  await openClose(retryable);
+  await loseClosure(false);
+  await click("Cancel authorization"); await browser("dialog", "accept"); await wait("Unconfirmed cancellation request");
+  await click("Check current return state");
+  await browser("wait", "--fn", 'Array.from(document.querySelectorAll("button")).some(b => b.textContent.trim() === "Retry saved request" && !b.disabled)');
+  await click("Retry saved request"); await browser("dialog", "accept"); await wait("Return cancelled.");
+  assert.equal((await closureFacts(retryable)).status, "cancelled");
+  const raced = await authorize(1);
+  await openClose(raced);
+  await loseClosure(false);
+  await click("Cancel authorization");
+  await browser("dialog", "accept");
+  await wait("Unconfirmed cancellation request");
+  await checked(rpc("close_return", { return_id: raced.id }, actor.token));
+  await click("Check current return state");
+  await wait("not the requested state");
+  await noTerminalActions();
+  const receiptRace = await authorize(1);
+  await openClose(receiptRace);
+  await loseClosure(false);
+  await click("Cancel authorization");
+  await browser("dialog", "accept");
+  await wait("Unconfirmed cancellation request");
+  await receiveOne(receiptRace);
+  await click("Check current return state");
+  await wait("Cancellation cannot complete because receipts now exist");
+  await click("Close return");
+  await browser("dialog", "accept");
+  await wait("Return closed.");
+  await noTerminalActions();
+  assert.deepEqual(await stock(), closureStock);
+  assert.equal(
+    (
+      await checked<any>(
+        rpc("get_order_ledger", { order_id: order.id }, actor.token),
+      )
+    ).balances.refunded,
+    0,
+  );
+  await browser(
+    "eval",
+    'if (Object.keys(sessionStorage).some(k => k.includes(":return-close:"))) throw Error("Unresolved closure journal")',
+  );
   console.log(
-    "Return smoke passed: authorization and partial receipt recovery; restock replay after location disabled and return closed; rejected new restock; discard without stock; exact movement and no refund; mobile and read-failure lock.",
+    "Closure smoke passed: partial release, no cancellation after receipt, unknown response recovery, cancellation, conflicting terminal state, racing receipt, no stock or refunds, mobile.",
   );
 } finally {
   await browser("close").catch(() => {});

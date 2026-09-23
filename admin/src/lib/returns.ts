@@ -4,6 +4,36 @@ export type OrderReturns = typeof orderReturns._output;
 export type ReturnAuthorization = OrderReturns["returns"][number];
 export type ReturnReceipt = ReturnAuthorization["receipts"][number];
 export type ReceiptLine = ReturnReceipt["lines"][number];
+export interface CloseReturnCommand {
+  return_id: string;
+  cancel: boolean;
+}
+export function isCloseReturnCommand(v: unknown): v is CloseReturnCommand {
+  return (
+    object(v) &&
+    Object.keys(v).every((k) => ["return_id", "cancel"].includes(k)) &&
+    uuid(v.return_id) &&
+    typeof v.cancel === "boolean"
+  );
+}
+export function acknowledgesClosure(
+  v: unknown,
+  command: CloseReturnCommand,
+  orderId: string,
+): boolean {
+  return (
+    object(v) &&
+    v.id === command.return_id &&
+    v.order_id === orderId &&
+    v.status === (command.cancel ? "cancelled" : "closed") &&
+    typeof v.closed_at === "string" &&
+    Number.isFinite(Date.parse(v.closed_at)) &&
+    Array.isArray(v.lines) &&
+    v.lines.length > 0 &&
+    v.lines.every((l) => object(l) && l.receivable_quantity === 0) &&
+    (!command.cancel || (Array.isArray(v.receipts) && v.receipts.length === 0))
+  );
+}
 export interface DisposeCommand {
   receipt_line_id: string;
   quantity: number;

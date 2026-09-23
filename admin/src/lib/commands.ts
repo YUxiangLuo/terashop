@@ -26,7 +26,8 @@ export function commandKey(
     | "transfer"
     | "return"
     | "return-receipt"
-    | "return-disposition",
+    | "return-disposition"
+    | "return-close",
   resource: string,
 ) {
   return `tera-admin-command:${user}:${kind}:${resource}`;
