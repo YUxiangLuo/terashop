@@ -3,6 +3,7 @@ import {
   authenticatedUser,
   HttpError,
   jsonResponse,
+  optionalEnv,
   requiredEnv,
   requireUuid,
   serviceRpc,
@@ -127,9 +128,26 @@ async function absent(path: string): Promise<boolean> {
 }
 
 export async function handleManagedMedia(request: Request): Promise<Response> {
+  let headers: Record<string, string> = {};
   try {
-    // Initial interface is programmatic MCP, not a browser upload/signing API.
-    if (request.headers.has('Origin')) throw new HttpError('Origin not allowed', 403, 'origin_denied');
+    // Browser admission is separate from storefront/payment origins. CORS does
+    // not grant authority: POST still verifies the user and the RPC admin role.
+    const origin = request.headers.get('Origin');
+    if (origin !== null) {
+      const allowed = optionalEnv('MEDIA_ALLOWED_ORIGINS')
+        .split(',')
+        .map((value) => value.trim());
+      if (!origin || origin === 'null' || origin === '*' || !allowed.includes(origin))
+        throw new HttpError('Origin not allowed', 403, 'origin_denied');
+      headers = {
+        'Access-Control-Allow-Origin': origin,
+        'Access-Control-Allow-Headers': 'authorization, apikey, content-type, x-client-info',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Max-Age': '600',
+        Vary: 'Origin',
+      };
+    }
+    if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers });
     if (request.method !== 'POST') throw new HttpError('Method not allowed', 405, 'method_not_allowed');
     const user = await authenticatedUser(request);
     const raw = await boundedBytes(request.body, 1400000);
@@ -213,16 +231,20 @@ export async function handleManagedMedia(request: Request): Promise<Response> {
       }
     }
     // Never return arbitrary DB fields, credentials, staging keys or signed URLs.
-    return jsonResponse({
-      id: media.id,
-      request_id: media.request_id,
-      state: media.state,
-      content_type: media.content_type,
-      byte_size: media.byte_size,
-      sha256: media.sha256,
-      published: media.published,
-      upload_status: media.upload_status,
-    });
+    return jsonResponse(
+      {
+        id: media.id,
+        request_id: media.request_id,
+        state: media.state,
+        content_type: media.content_type,
+        byte_size: media.byte_size,
+        sha256: media.sha256,
+        published: media.published,
+        upload_status: media.upload_status,
+      },
+      200,
+      headers,
+    );
   } catch (error) {
     const status = error instanceof HttpError ? error.status : 502;
     const code =
@@ -238,6 +260,7 @@ export async function handleManagedMedia(request: Request): Promise<Response> {
         },
       },
       status,
+      headers,
     );
   }
 }

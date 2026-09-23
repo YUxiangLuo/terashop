@@ -116,17 +116,24 @@ P2：已有发货记录可更新承运商、单号、跟踪链接，已发货记
 
 ## 图片权限与失败处理
 
-迁移配置 `catalog-media` 为公开读、JPEG/PNG/WebP、最大 5 MiB。管理员使用自己的 Auth 会话直接调用 Storage SDK，新增路径：
+Admin 新上传复用 MCP 的 `managed-media` Edge Function：**私有暂存 → 明确确认永久公开 → 加入表单 → 保存商品关联**。JPEG/PNG/WebP，非空且最多 **1 MiB**（与 managed-media 服务上限一致）；先保存商品再上传，一次处理一张。发布不会自动修改商品。
 
-```text
-products/<product UUID>/<image UUID>.jpg|png|webp
+浏览器使用管理员自己的 Auth 会话，不分发 service role key。部署前单独设置服务端 `MEDIA_ALLOWED_ORIGINS`，逗号分隔、精确匹配 Admin origin（生产 HTTPS）；默认空列表拒绝浏览器访问，**不继承 `PAYMENT_ALLOWED_ORIGINS`**，无 Origin 的 MCP 调用不受影响。CORS 不代替 Auth 和数据库 admin 角色校验。允许的 origin 在错误响应中也有 CORS header，便于客户端保留失败状态。
+
+本地示例（只含这一项的服务端环境文件；不要把混合 `.env.example` 当生产 secrets 全量上传）：
+
+```sh
+printf 'MEDIA_ALLOWED_ORIGINS=http://127.0.0.1:5174\n' > /tmp/tera-media.env
+bunx --no-install supabase functions serve managed-media --env-file /tmp/tera-media.env
 ```
 
-UUID 使用小写标准格式。Storage RLS 仅允许管理员在此 bucket 的上述路径 INSERT；不授予 UPDATE/DELETE，`upsert:false`。不限制图片源供应商的数据库 URL 字段仍保持通用。MIME/扩展名限制不等于内容检测或重新编码；不要允许不受信任的用户上传。
+上传前，按管理员和商品隔离的 `sessionStorage` 保存 request UUID、MIME、字节数和 SHA-256，不保存文件内容或 token。丢失回执后先按 request UUID 查询事实；仅同一文件可以显式重试原请求，不生成新 UUID、不自动重写 Storage。已写入但回执丢失的字节通过恢复操作核验，不能核验时交由受信运维调查。当前标签页刷新可恢复；关闭标签页或清除浏览器数据会丢失记录，应保留 request UUID 供 MCP 查询。
 
-上传后将公开 URL 暂存在编辑表单，点击保存才原子写入商品图片关联。上传成功不等于商品保存成功，失败或放弃编辑可能留下孤立对象；界面会提示，网络错误时保留对象路径用于排查，不自动删除。商品图与数据库不在一个事务中。
+私有暂存不向浏览器提供预览或 signed URL。点击发布需要明确确认；发布前永久保留，公开对象为 `catalog-media/managed/<media UUID>.jpg|png|webp`，包括草稿商品在内，任何持有 URL 的人均可读取。**一旦发布，Admin/MCP 均不允许删除或转回私有**。发布成功后需加入表单并保存商品，读取确认关联后才清除本地恢复记录；发布和商品保存不在一个事务中。放弃未公开素材的 discard/delete 流程仍由 MCP 执行，Admin 可核对并结束已确认删除的记录，不做自动垃圾回收。
 
-每次上传使用新 UUID 路径，缓存一年；替换通过上传新图再移除旧关联完成。旧文件保留，由受信任运维在确认无数据库引用且旧 SSG/缓存不再使用后清理。**公开 bucket 内的草稿图片也可凭 URL 访问，不适合保密素材。** 客户和匿名访问者不能写入，管理员也不能修改 bucket 设置。
+旧 `products/<product UUID>/<image UUID>.<ext>` 公开文件、外部 URL 和既有 Storage RLS 保持兼容，不迁移、不假装可以撤回公开。移除图片仅在保存后移除关联，保留字节。底层旧 bucket 的 5 MiB 配置不等于新上传服务上限；MIME/扩展名限制也不等于内容检测或重新编码。
+
+本地浏览器回归：`bun scripts/admin-media-smoke.ts`，以临时 loopback HTTP 服务运行真实 Edge handler，连接真实本地 Auth/DB/Storage，并注入丢失回执；不代替实际部署的 Edge 网关验收。
 
 ## 静态部署与验收
 

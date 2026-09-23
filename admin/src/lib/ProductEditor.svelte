@@ -4,6 +4,7 @@
   import InventoryEditor from "./InventoryEditor.svelte";
   import VariantEditor from "./VariantEditor.svelte";
   import CategoryPicker from "./CategoryPicker.svelte";
+  import ManagedMediaUpload from "./ManagedMediaUpload.svelte";
   import {
     optionChanges,
     validateVariants,
@@ -13,7 +14,6 @@
   import {
     getProduct,
     saveProduct,
-    supabase,
     message,
     imageUrl,
     type ProductDetail,
@@ -37,6 +37,7 @@
   let categories = $state<ProductDetail["categories"]>([]);
   let loaded = $state(false);
   let busy = $state(false);
+  let mediaBusy = $state(false);
   let error = $state("");
   let notice = $state("");
   let uncertain = $state(false);
@@ -63,7 +64,7 @@
   });
   beforeNavigate(({ cancel }) => {
     if (
-      (busy || dirty) &&
+      (busy || mediaBusy || dirty) &&
       !window.confirm(
         "Leave this page? Unsaved changes will be lost. Uploaded files remain in Storage.",
       )
@@ -122,7 +123,7 @@
   }
   async function save(event: SubmitEvent) {
     event.preventDefault();
-    if (!editable || busy || uncertain) return;
+    if (!editable || busy || mediaBusy || uncertain) return;
     try {
       validateVariants(options, variants, status === "active");
     } catch (cause) {
@@ -187,53 +188,6 @@
       if (alive) busy = false;
     }
   }
-  async function upload(event: Event) {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    input.value = "";
-    if (!file || !product || !editable || busy || uncertain) return;
-    const extension = {
-      "image/jpeg": "jpg",
-      "image/png": "png",
-      "image/webp": "webp",
-    }[file.type];
-    error = "";
-    notice = "";
-    if (!extension || file.size === 0 || file.size > 5 * 1024 * 1024) {
-      error = "Choose a non-empty JPEG, PNG or WebP image up to 5 MiB.";
-      return;
-    }
-    busy = true;
-    const imageId = crypto.randomUUID();
-    const path = `products/${id}/${imageId}.${extension}`;
-    try {
-      const result = await supabase.storage
-        .from("catalog-media")
-        .upload(path, file, {
-          contentType: file.type,
-          cacheControl: "31536000",
-          upsert: false,
-        });
-      if (result.error) throw result.error;
-      if (!alive) return;
-      const { data } = supabase.storage
-        .from("catalog-media")
-        .getPublicUrl(path);
-      images.push({
-        id: imageId,
-        url: data.publicUrl,
-        alt: fields.name,
-        position: Math.max(0, ...images.map((image) => image.position)) + 1,
-        variant_id: null,
-      });
-      notice = "Image uploaded. Save the product to attach it.";
-    } catch (cause) {
-      if (alive)
-        error = `${message(cause)} No image record was added. If the upload reached Storage, the retained object is ${path}.`;
-    } finally {
-      if (alive) busy = false;
-    }
-  }
   function move(imageId: string, direction: number) {
     const index = images.findIndex((image) => image.id === imageId);
     const target = index + direction;
@@ -248,7 +202,7 @@
 >
 <svelte:window
   onbeforeunload={(event) => {
-    if (busy || dirty) event.preventDefault();
+    if (busy || mediaBusy || dirty) event.preventDefault();
   }}
 />
 <div class="page-heading">
@@ -262,12 +216,13 @@
     </p>
   </div>
   <div class="actions">
-    <button onclick={reload} disabled={busy}>Reload saved version</button
+    <button onclick={reload} disabled={busy || mediaBusy}
+      >Reload saved version</button
     >{#if editable}<button
         class="primary"
         type="submit"
         form="product-form"
-        disabled={busy || uncertain || !dirty}
+        disabled={busy || mediaBusy || uncertain || !dirty}
         >{busy ? "Working…" : "Save product"}</button
       >{/if}
   </div>
@@ -278,7 +233,7 @@
     {busy ? "Loading product…" : "Unable to open product."}
   </p>{:else}
   <form id="product-form" onsubmit={save}>
-    <fieldset disabled={busy || !editable || uncertain}>
+    <fieldset disabled={busy || mediaBusy || !editable || uncertain}>
       <div class="editor-grid">
         <div class="editor-main">
           <section class="card">
@@ -340,24 +295,38 @@
           <section class="card">
             <h2>Product images</h2>
             <p class="small muted">
-              The first image is the primary image. Uploaded files are public,
-              including draft images. Do not upload private content.
+              The first image is the primary image. Existing public files stay
+              public; removing an image does not delete its bytes.
             </p>
-            {#if editable}<div class="upload">
-                <label
-                  >Upload an image<input
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    onchange={upload}
-                    disabled={!product || images.length >= 100}
-                  /></label
-                >
-                <p class="small muted">
-                  {product
-                    ? "JPEG, PNG or WebP · Up to 5 MiB · Save to attach"
-                    : "Save the product first to enable uploads."}
-                </p>
-              </div>{/if}
+            {#if editable && product}
+              <ManagedMediaUpload
+                productId={id}
+                savedImages={product.images}
+                disabled={busy || uncertain || images.length >= 100}
+                onbusy={(value) => (mediaBusy = value)}
+                onattach={(imageId, url) => {
+                  if (
+                    busy ||
+                    uncertain ||
+                    images.length >= 100 ||
+                    images.some((image) => image.id === imageId)
+                  )
+                    return;
+                  images.push({
+                    id: imageId,
+                    url,
+                    alt: fields.name,
+                    position:
+                      Math.max(0, ...images.map((image) => image.position)) + 1,
+                    variant_id: null,
+                  });
+                  notice =
+                    "Published image added to form. Save the product to attach it.";
+                }}
+              />
+            {:else}<p class="small muted">
+                Save the product first to enable uploads.
+              </p>{/if}
             {#each images as image, index (image.id)}
               <div class="image-row">
                 {#if imageUrl(image.url)}<img
@@ -445,7 +414,7 @@
     <div class="inventory-section" id="inventory">
       {#key product.revision}<InventoryEditor
           {product}
-          disabled={busy || dirty || uncertain}
+          disabled={busy || mediaBusy || dirty || uncertain}
         />{/key}
     </div>
   {/if}

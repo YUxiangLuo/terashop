@@ -74,6 +74,7 @@ type Intercept = (request: Request, send: () => Promise<Response>) => Promise<Re
 async function runtime(
   run: (session: Awaited<ReturnType<typeof mcpSession>>, setFault: (f?: Intercept) => void) => Promise<void>,
   allowDelete = false,
+  mediaOrigins = '',
 ) {
   const original = globalThis.fetch,
     deno = Object.getOwnPropertyDescriptor(globalThis, 'Deno');
@@ -81,6 +82,8 @@ async function runtime(
     SUPABASE_URL: API,
     SUPABASE_ANON_KEY: ANON_KEY,
     SUPABASE_SERVICE_ROLE_KEY: SERVICE_KEY,
+    MEDIA_ALLOWED_ORIGINS: mediaOrigins,
+    PAYMENT_ALLOWED_ORIGINS: 'https://storefront.example',
   };
   Object.defineProperty(globalThis, 'Deno', {
     configurable: true,
@@ -112,6 +115,63 @@ async function runtime(
     else Reflect.deleteProperty(globalThis, 'Deno');
   }
 }
+
+test('browser media admission is opt-in and independent of payment origins and user authority', async () => {
+  const origin = 'https://admin.example';
+  const request = (origin: string, method: string, token?: string, body?: unknown) =>
+    handleManagedMedia(
+      new Request('http://media-handler.test', {
+        method,
+        headers: { Origin: origin, ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      }),
+    );
+  await runtime(async () => {
+    const response = await request(origin, 'OPTIONS');
+    expect(response.status).toBe(403);
+    expect(response.headers.has('Access-Control-Allow-Origin')).toBe(false);
+  });
+  await runtime(
+    async () => {
+      for (const denied of ['https://storefront.example', 'https://admin.example.evil', 'null', '*']) {
+        for (const method of ['OPTIONS', 'POST']) {
+          const response = await request(denied, method);
+          expect(response.status).toBe(403);
+          expect(response.headers.has('Access-Control-Allow-Origin')).toBe(false);
+        }
+      }
+      const preflight = await request(origin, 'OPTIONS');
+      expect(preflight.status).toBe(204);
+      expect(preflight.headers.get('Access-Control-Allow-Origin')).toBe(origin);
+      expect(preflight.headers.get('Access-Control-Allow-Methods')).toBe('POST, OPTIONS');
+      expect(preflight.headers.get('Access-Control-Allow-Headers')).toContain('authorization');
+      expect(preflight.headers.has('Access-Control-Allow-Credentials')).toBe(false);
+      for (const [token, expected] of [
+        [undefined, 401],
+        [customer.token, 403],
+      ] as const) {
+        const response = await request(origin, 'POST', token, {
+          action: 'get',
+          media_id: crypto.randomUUID(),
+        });
+        expect(response.status).toBe(expected);
+        expect(response.headers.get('Access-Control-Allow-Origin')).toBe(origin);
+        expect(response.headers.get('Cache-Control')).toBe('no-store');
+      }
+      const args = upload();
+      const staged = await request(origin, 'POST', admin.token, { action: 'upload', ...args });
+      expect(staged.status).toBe(200);
+      expect(staged.headers.get('Vary')).toBe('Origin');
+      const media = await staged.json();
+      expect(media).toMatchObject({ state: 'staged', published: false });
+      const published = await request(origin, 'POST', admin.token, { action: 'publish', media_id: media.id });
+      expect(published.status).toBe(200);
+      expect(await published.json()).toMatchObject({ id: media.id, published: true, state: 'retained' });
+    },
+    false,
+    ` ${origin},https://other-admin.example `,
+  );
+});
 
 test('private staging, immutable replay, publication/attachment and discard preparation use real Storage', async () => {
   await runtime(async (session) => {
