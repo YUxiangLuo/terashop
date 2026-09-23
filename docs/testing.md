@@ -51,6 +51,8 @@ MCP_BROWSER=1 MCP_ADMIN_URL=http://127.0.0.1:5174 \
 
 Realtime 前置迁移为 `20260923000005_admin_realtime.sql`。`bun run test:current tests/admin-realtime.test.ts` 使用真实本地 WebSocket 验证私有频道、事务回滚无通知、公开频道隔离、普通用户/匿名拒绝、浏览器发布拒绝、跨用户隔离及降级后 RPC 门禁；`bun test tests/unit/admin-realtime.test.ts` 验证通知合并、前台恢复与卸载清理。`bun scripts/admin-connections-smoke.ts` 另验证旧记录页收到通知后不跳页；`bun scripts/admin-categories-smoke.ts` 保留本地草稿并验证并发冲突。以上脚本清理本轮临时数据，不对共享环境执行迁移。
 
+分类浏览器回归还覆盖实时分类树：展开分支收到新增通知后自动显示、22 个子分类跨页保留、第二页失败不安装第一页的新数据、显式重试后两页一起更新、移出与删除后自动移除，以及启用筛选随事实变化但不清空未提交的搜索输入。使用本地临时数据，故障注入仅拦截一次浏览器分页读取；桌面错误态和手机恢复态截图为 `/tmp/admin-category-live-error.png`、`/tmp/admin-category-live-mobile.png`。
+
 该验收覆盖一条代表性跨客户端业务链路，不等于全部 113 个工具的端到端覆盖，也不替代真实域名、SMTP、生产 Edge CORS、目标 Agent 产品客户端与上线运维验收。未设置 `MCP_ADMIN_URL` 时保持原有浏览器只读验收。
 
 ## Storefront 验证与演示数据

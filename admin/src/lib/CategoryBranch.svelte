@@ -13,54 +13,76 @@
     active = "",
     filtered = false,
     returnQuery = "",
+    refresh = 0,
   }: {
     parentId?: string;
     search?: string;
     active?: string;
     filtered?: boolean;
     returnQuery?: string;
+    refresh?: number;
   } = $props();
   let items = $state<Category[]>([]);
   let cursor = $state<string | null>(null);
   let loading = $state(false);
   let error = $state("");
   let expanded = $state<string[]>([]);
+  let attempted = $state(0);
+  let retryRefresh = $state(false);
+  let pages = 1;
   let alive = true;
   onMount(() => {
-    void load();
+    void load(true);
     return () => {
       alive = false;
     };
   });
-  async function load() {
+  $effect(() => {
+    if (refresh > attempted && !loading) void load(true);
+  });
+  async function load(reset = false) {
     if (loading) return;
+    if (reset) attempted = refresh;
+    retryRefresh = reset;
     loading = true;
     error = "";
     try {
-      const result = await supabase.rpc("list_admin_categories", {
-        page_size: 20,
-        ...(cursor ? { after_id: cursor } : {}),
-        ...(filtered
-          ? {
-              ...(search ? { search } : {}),
-              ...(active ? { active: active === "yes" } : {}),
-            }
-          : parentId
-            ? { parent_id: parentId }
-            : { root_only: true }),
-      });
-      if (result.error) throw result.error;
-      if (!alive) return;
-      const page = result.data as unknown as CategoryPage;
-      items = sortCategories([
-        ...items,
-        ...page.items.filter(
-          (item) => !items.some((old) => old.id === item.id),
-        ),
-      ]);
-      cursor = page.next_cursor;
+      let next = reset ? null : cursor;
+      const rows: Category[] = reset ? [] : [...items];
+      let readPages = 0;
+      do {
+        const result = await supabase.rpc("list_admin_categories", {
+          page_size: 20,
+          ...(next ? { after_id: next } : {}),
+          ...(filtered
+            ? {
+                ...(search ? { search } : {}),
+                ...(active ? { active: active === "yes" } : {}),
+              }
+            : parentId
+              ? { parent_id: parentId }
+              : { root_only: true }),
+        });
+        if (result.error) throw result.error;
+        if (!alive) return;
+        const page = result.data as unknown as CategoryPage;
+        rows.push(
+          ...page.items.filter(
+            (item) => !rows.some((old) => old.id === item.id),
+          ),
+        );
+        next = page.next_cursor;
+        readPages++;
+      } while (reset && next && readPages < pages);
+      // Install only after every previously loaded page was reread successfully.
+      items = sortCategories(rows);
+      cursor = next;
+      pages = reset ? readPages : pages + 1;
+      expanded = expanded.filter((id) => rows.some((item) => item.id === id));
+      retryRefresh = false;
     } catch (cause) {
-      if (alive) error = message(cause);
+      if (alive)
+        error = `${message(cause)} Displayed categories may be stale. Retry to check current facts.`;
     } finally {
       if (alive) loading = false;
     }
@@ -68,7 +90,9 @@
 </script>
 
 {#if error}<p class="notice error" role="alert">{error}</p>
-  <button onclick={load} disabled={loading}>Retry categories</button>{/if}
+  <button onclick={() => load(retryRefresh)} disabled={loading}
+    >Retry categories</button
+  >{/if}
 <ul class="category-tree">
   {#each items as item (item.id)}
     <li>
@@ -101,6 +125,7 @@
       {#if !filtered && expanded.includes(item.id)}<CategoryBranch
           parentId={item.id}
           {returnQuery}
+          {refresh}
         />{/if}
     </li>
   {/each}
@@ -110,6 +135,6 @@
   </p>{:else if !items.length && !error}<p class="small muted">
     {parentId ? "No child categories." : "No categories found."}
   </p>{/if}
-{#if cursor}<button onclick={load} disabled={loading}
+{#if cursor}<button onclick={() => load()} disabled={loading || retryRefresh}
     >Load more categories</button
   >{/if}
