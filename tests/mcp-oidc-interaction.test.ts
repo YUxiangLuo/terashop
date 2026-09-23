@@ -19,6 +19,10 @@ import { authMail, authMessages } from './support/mail';
 import { heldTransactionRace, testDatabase } from './database-concurrency';
 import { mcpSession, toolData } from './support/mcp';
 import { nodeOidcService } from './support/oidc-node-service';
+import { verifyOidcBrowser } from './support/oidc-browser';
+
+const browserEnabled = process.env.MCP_BROWSER === '1';
+const timeout = browserEnabled ? 180_000 : 45_000;
 
 // Real local Auth/SMTP/shop database plus a separate issuer DB. Bun mode injects
 // completion failure through a fixture proxy; Node mode uses the real TLS entry.
@@ -30,6 +34,7 @@ for (const runtime of ['bun', 'node'] as const)
     let origin = 'https://127.0.0.1:3000';
     let resource = 'https://shop.example/mcp';
     const redirect = 'https://client.example/callback';
+    let browserRedirect: string | undefined;
     const secret = randomBytes(32).toString('base64url');
     const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
     const encryptionKey = randomBytes(32);
@@ -50,6 +55,7 @@ for (const runtime of ['bun', 'node'] as const)
         // Use actual authorities end to end, without Host rewriting or proxies.
         const ports: number[] = [];
         const reservations = [createServer(), createServer()];
+        if (browserEnabled) reservations.push(createServer());
         try {
           for (const reservation of reservations) {
             await new Promise<void>((resolve) => reservation.listen(0, '127.0.0.1', resolve));
@@ -66,6 +72,7 @@ for (const runtime of ['bun', 'node'] as const)
         }
         origin = `https://127.0.0.1:${ports[0]}`;
         resource = `https://127.0.0.1:${ports[1]}/mcp`;
+        if (ports[2]) browserRedirect = `https://127.0.0.1:${ports[2]}/callback`;
       }
       await db.unsafe(`create database ${name}`);
       created = true;
@@ -82,6 +89,7 @@ for (const runtime of ['bun', 'node'] as const)
         clients: [{ id: 'agent', applicationType: 'web', redirectUris: [redirect] }],
         introspectionClient: { id: 'resource', secret },
       };
+      if (browserRedirect) providerConfig.clients[0].redirectUris.push(browserRedirect);
       let failCompletion = false;
       if (runtime === 'node') {
         const password = randomBytes(32).toString('hex');
@@ -1026,6 +1034,12 @@ for (const runtime of ['bun', 'node'] as const)
           (await sessions[1].client.callTool({ name: 'get_admin_shop_settings', arguments: {} })).isError,
         ).toBe(true);
         expect((await networkCall(next.data.access_token)).status).toBe(401);
+        if (browserRedirect) {
+          const user = await signup();
+          users.push(user);
+          await makeAdmin(user.userId);
+          await verifyOidcBrowser({ node, origin, resource, redirect: browserRedirect, email: user.email });
+        }
         mcpProcess!.kill('SIGTERM');
         expect(await mcpProcess!.exited).toBe(0);
       }
@@ -1062,4 +1076,4 @@ for (const runtime of ['bun', 'node'] as const)
         }
       }
     }
-  }, 45_000);
+  }, timeout);
