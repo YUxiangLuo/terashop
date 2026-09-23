@@ -13,6 +13,7 @@ const session = `returns-${crypto.randomUUID()}`,
   email = `${session}@example.test`,
   password = crypto.randomUUID() + "Aa1!";
 let user = "",
+  receiptLocation = "",
   product = "";
 async function browser(...args: string[]) {
   const proc = Bun.spawn(["agent-browser", "--session", session, ...args], {
@@ -155,24 +156,108 @@ try {
     rpc("get_order_ledger", { order_id: order.id }, actor.token),
   );
   assert.equal(ledger.balances.refunded, 0);
-  // Show nested partial receipt/disposition facts created through the real API.
+  // Receive through the UI; a committed receipt must replay after its location is disabled.
   const authorization = (await facts()).returns[0];
   const [location] = await checked<{ id: string }[]>(
-    api("/rest/v1/locations?is_default=eq.true&select=id", { service: true }),
+    api("/rest/v1/locations", {
+      service: true,
+      method: "POST",
+      body: { code: session, name: "Returns inspection", is_active: true },
+    }),
   );
-  const receipt = await checked<any>(
-    rpc(
-      "receive_return",
-      {
-        return_id: authorization.id,
-        location_id: location.id,
-        items: [{ return_line_id: authorization.lines[0].id, quantity: 2 }],
-        idempotency_key: crypto.randomUUID(),
-        note: "Received for inspection",
-      },
-      actor.token,
-    ),
+  receiptLocation = location.id;
+  const receiveUrl = `/orders/${order.id}/returns/${authorization.id}/receive`;
+  await browser("click", `a[href="${receiveUrl}"]`);
+  await ready();
+  await browser(
+    "eval",
+    'if (document.querySelector("#receipt-location").value !== "") throw Error("Location auto-selected")',
   );
+  await browser("select", "#receipt-location", receiptLocation);
+  await browser("fill", "input[type=number]", "4");
+  await browser(
+    "eval",
+    'if (document.querySelector("input[type=number]").checkValidity()) throw Error("Over-receipt permitted")',
+  );
+  await browser("fill", "input[type=number]", "2");
+  await browser("fill", "#receipt-note", "Received for inspection");
+  await browser(
+    "eval",
+    `(() => { const original = window.fetch; window.fetch = async (...args) => {
+    if (String(args[0]).includes('/rpc/receive_return')) { window.fetch = original; const response = await original(...args); if (!response.ok) return response; return new Response(JSON.stringify({message:'Simulated lost receipt'}), {status:503,headers:{'Content-Type':'application/json'}}); } return original(...args);
+  }; })()`,
+  );
+  await click("Record receipt");
+  await browser("dialog", "accept");
+  await wait("Unconfirmed receipt request");
+  await browser("screenshot", "/tmp/admin-receipt-uncertain.png", "--full");
+  assert.equal((await facts()).returns[0].receipts.length, 1);
+  await checked(
+    api(`/rest/v1/locations?id=eq.${receiptLocation}`, {
+      service: true,
+      method: "PATCH",
+      body: { is_active: false },
+    }),
+  );
+  await browser("reload");
+  await wait("Unconfirmed receipt request");
+  await browser(
+    "wait",
+    "--fn",
+    '!Array.from(document.querySelectorAll("button")).find(b => b.textContent.includes("Replay saved receipt")).disabled',
+  );
+  await click("Replay saved receipt");
+  await browser("dialog", "accept");
+  await wait("Receipt recorded.");
+  await ready();
+  const receipt = (await facts()).returns[0].receipts[0];
+  assert.equal((await facts()).returns[0].receipts.length, 1);
+  assert.equal(receipt.location_id, receiptLocation);
+  assert.equal(receipt.lines[0].quantity, 2);
+  assert.equal((await facts()).returns[0].lines[0].receivable_quantity, 1);
+  assert.deepEqual(await stock(), before);
+  assert.equal(
+    (
+      await checked<any>(
+        rpc("get_order_ledger", { order_id: order.id }, actor.token),
+      )
+    ).balances.refunded,
+    0,
+  );
+  await browser(
+    "eval",
+    'if (Object.keys(sessionStorage).some(k => k.includes(":return-receipt:"))) throw Error("Receipt journal retained")',
+  );
+  await browser("screenshot", "/tmp/admin-receipt.png", "--full");
+  await browser("set", "viewport", "390", "844");
+  await browser(
+    "eval",
+    'document.querySelector(".table-wrap").scrollLeft = 10000; if (document.documentElement.scrollWidth > innerWidth) throw Error("Receipt mobile overflow")',
+  );
+  await browser("screenshot", "/tmp/admin-receipt-mobile.png", "--full");
+  await browser("set", "viewport", "1280", "900");
+  await checked(
+    api(`/rest/v1/locations?id=eq.${receiptLocation}`, {
+      service: true,
+      method: "PATCH",
+      body: { is_active: true },
+    }),
+  );
+  await click("Reload receipt facts");
+  await ready();
+  await browser("select", "#receipt-location", receiptLocation);
+  await browser("fill", "input[type=number]", "1");
+  await browser("fill", "#receipt-note", "Second delivery");
+  await click("Record receipt");
+  await browser("dialog", "accept");
+  await wait("Receipt recorded.");
+  await wait("No quantities can be received on this return.");
+  assert.equal((await facts()).returns[0].receipts.length, 2);
+  assert.equal((await facts()).returns[0].lines[0].received_quantity, 3);
+  assert.deepEqual(await stock(), before);
+  await browser("screenshot", "/tmp/admin-receipt-complete.png", "--full");
+  await browser("click", `a[href="/orders/${order.id}/returns"]`);
+  await ready();
   await checked(
     rpc(
       "dispose_return_receipt",
@@ -189,7 +274,7 @@ try {
   await click("Reload returns");
   await ready();
   await browser("select", "#return-shipment", second.id);
-  await browser("click", "summary");
+  await browser("click", "details:first-of-type > summary");
   await wait("Undisposed 1");
   await wait("discard × 1");
   await browser("screenshot", "/tmp/admin-returns.png", "--full");
@@ -228,6 +313,14 @@ try {
   );
 } finally {
   await browser("close").catch(() => {});
+  if (receiptLocation)
+    await checked(
+      api(`/rest/v1/locations?id=eq.${receiptLocation}`, {
+        service: true,
+        method: "PATCH",
+        body: { is_active: false },
+      }),
+    );
   if (product)
     await checked(
       api(`/rest/v1/products?id=eq.${product}`, {

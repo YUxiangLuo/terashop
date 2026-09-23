@@ -19,7 +19,13 @@ export type FulfillmentUpdateCommand = {
 // No credentials or customer addresses are stored here. Callers scope by Auth user.
 export function commandKey(
   user: string,
-  kind: "stock" | "shipment" | "fulfillment-update" | "transfer" | "return",
+  kind:
+    | "stock"
+    | "shipment"
+    | "fulfillment-update"
+    | "transfer"
+    | "return"
+    | "return-receipt",
   resource: string,
 ) {
   return `tera-admin-command:${user}:${kind}:${resource}`;

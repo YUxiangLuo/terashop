@@ -1,6 +1,102 @@
 import type { orderReturns } from "../../../mcp/src/schemas";
 
 export type OrderReturns = typeof orderReturns._output;
+export type ReturnAuthorization = OrderReturns["returns"][number];
+export interface ReceiveCommand {
+  return_id: string;
+  location_id: string;
+  items: { return_line_id: string; quantity: number }[];
+  note: string;
+  idempotency_key: string;
+}
+export function isReceiveCommand(v: unknown): v is ReceiveCommand {
+  return (
+    object(v) &&
+    Object.keys(v).every((k) =>
+      ["return_id", "location_id", "items", "note", "idempotency_key"].includes(
+        k,
+      ),
+    ) &&
+    uuid(v.return_id) &&
+    uuid(v.location_id) &&
+    uuid(v.idempotency_key) &&
+    typeof v.note === "string" &&
+    [...v.note].length <= 2000 &&
+    Array.isArray(v.items) &&
+    v.items.length > 0 &&
+    v.items.length <= 100 &&
+    v.items.every(
+      (i) =>
+        object(i) &&
+        Object.keys(i).every((k) =>
+          ["return_line_id", "quantity"].includes(k),
+        ) &&
+        uuid(i.return_line_id) &&
+        Number.isInteger(i.quantity) &&
+        Number(i.quantity) > 0 &&
+        Number(i.quantity) <= 2147483647,
+    ) &&
+    new Set(v.items.map((i) => i.return_line_id.toLowerCase())).size ===
+      v.items.length
+  );
+}
+export function receiveItems(
+  authorization: ReturnAuthorization,
+  quantities: Record<string, number | undefined>,
+): ReceiveCommand["items"] {
+  if (authorization.status !== "open")
+    throw Error("Only open returns can receive new items.");
+  const items: ReceiveCommand["items"] = [];
+  for (const [return_line_id, quantity] of Object.entries(quantities)) {
+    if (quantity === undefined || quantity === 0) continue;
+    const line = authorization.lines.find((l) => l.id === return_line_id);
+    if (
+      !line ||
+      !Number.isInteger(quantity) ||
+      quantity < 1 ||
+      quantity > line.receivable_quantity
+    )
+      throw Error(
+        "Receipt quantities must be whole numbers within the remaining receivable quantity.",
+      );
+    items.push({ return_line_id, quantity });
+  }
+  if (!items.length || items.length > 100)
+    throw Error("Select between 1 and 100 receipt lines.");
+  return items;
+}
+export function acknowledgesReceipt(
+  v: unknown,
+  command: ReceiveCommand,
+  orderId: string,
+): boolean {
+  if (
+    !object(v) ||
+    !uuid(v.id) ||
+    v.order_id !== orderId ||
+    v.return_id !== command.return_id ||
+    v.location_id !== command.location_id ||
+    v.note !== command.note ||
+    !Array.isArray(v.lines) ||
+    v.lines.length !== command.items.length
+  )
+    return false;
+  const remaining = new Map(
+    command.items.map((i) => [i.return_line_id, i.quantity]),
+  );
+  for (const line of v.lines) {
+    if (
+      !object(line) ||
+      !uuid(line.id) ||
+      typeof line.return_line_id !== "string" ||
+      !remaining.has(line.return_line_id) ||
+      remaining.get(line.return_line_id) !== line.quantity
+    )
+      return false;
+    remaining.delete(line.return_line_id);
+  }
+  return remaining.size === 0;
+}
 export interface ReturnCommand {
   fulfillment_id: string;
   items: { order_item_id: string; quantity: number }[];

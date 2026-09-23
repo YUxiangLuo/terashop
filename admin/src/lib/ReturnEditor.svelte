@@ -289,6 +289,9 @@
       <div class="actions">
         <h3>Return {authorization.id}</h3>
         <span class="badge">{authorization.status}</span>
+        <a href={`/orders/${id}/returns/${authorization.id}/receive`}
+          >Receive items / recover request</a
+        >
       </div>
       <p class="small muted">
         {dateTime(authorization.created_at)} · Shipment {authorization.fulfillment_id}{authorization.closed_at

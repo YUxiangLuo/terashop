@@ -4,6 +4,11 @@ import {
   acknowledgesReturn,
   returnItems,
   type ReturnCommand,
+  isReceiveCommand,
+  receiveItems,
+  acknowledgesReceipt,
+  type ReturnAuthorization,
+  type ReceiveCommand,
 } from "../../admin/src/lib/returns";
 import { dispatchCommand } from "../../admin/src/lib/commands";
 const a = "aaaaaaaa-1111-4111-8111-111111111111",
@@ -31,6 +36,93 @@ const receipt = () => ({
     received_quantity: 0,
     receivable_quantity: i.quantity,
   })),
+});
+test("receipt selection uses return-line IDs and remaining receipt balance, only while open", () => {
+  const authorization: ReturnAuthorization = {
+    ...receipt(),
+    created_at: new Date().toISOString(),
+    closed_at: null,
+    receipts: [],
+    status: "open",
+    lines: [
+      {
+        id: b,
+        order_item_id: a,
+        quantity: 5,
+        received_quantity: 3,
+        receivable_quantity: 2,
+      },
+    ],
+  };
+  expect(receiveItems(authorization, { [b]: 2 })).toEqual([
+    { return_line_id: b, quantity: 2 },
+  ]);
+  for (const quantities of [
+    { [b]: 3 },
+    { [a]: 1 },
+    { [b]: 0 },
+    { [b]: 1.5 },
+    { [b]: -1 },
+  ])
+    expect(() => receiveItems(authorization, quantities)).toThrow();
+  expect(() =>
+    receiveItems({ ...authorization, status: "closed" }, { [b]: 1 }),
+  ).toThrow();
+});
+test("receipt commands and acknowledgments reject wrong ownership, duplicates, location, note or quantities", () => {
+  const command: ReceiveCommand = {
+    return_id: shipment,
+    location_id: order,
+    items: [
+      { return_line_id: a, quantity: 2 },
+      { return_line_id: b, quantity: 1 },
+    ],
+    note: "Inspection",
+    idempotency_key: crypto.randomUUID(),
+  };
+  expect(isReceiveCommand(command)).toBe(true);
+  for (const change of [
+    { location_id: "" },
+    { note: "x".repeat(2001) },
+    { items: [] },
+    { items: [command.items[0], command.items[0]] },
+    { items: [{ return_line_id: a, quantity: 2147483648 }] },
+    { extra: 1 },
+  ])
+    expect(isReceiveCommand({ ...command, ...change })).toBe(false);
+  const result = {
+    id: crypto.randomUUID(),
+    order_id: order,
+    return_id: shipment,
+    location_id: order,
+    note: "Inspection",
+    lines: [
+      {
+        id: crypto.randomUUID(),
+        return_line_id: b,
+        quantity: 1,
+        undisposed_quantity: 0,
+      },
+      {
+        id: crypto.randomUUID(),
+        return_line_id: a,
+        quantity: 2,
+        undisposed_quantity: 1,
+      },
+    ],
+  };
+  expect(acknowledgesReceipt(result, command, order)).toBe(true);
+  for (const change of [
+    { order_id: b },
+    { return_id: b },
+    { location_id: b },
+    { note: "Other" },
+    { lines: [result.lines[0], result.lines[0]] },
+    { lines: result.lines.map((l) => ({ ...l, quantity: 3 })) },
+  ])
+    expect(acknowledgesReceipt({ ...result, ...change }, command, order)).toBe(
+      false,
+    );
 });
 test("saved return validates exact shape, distinct items and numeric boundaries", () => {
   expect(isReturnCommand(command)).toBe(true);
