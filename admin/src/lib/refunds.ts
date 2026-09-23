@@ -1,5 +1,47 @@
-import type { orderLedger } from "../../../mcp/src/schemas";
+import type { orderLedger, orderPricing } from "../../../mcp/src/schemas";
 export type OrderLedger = typeof orderLedger._output;
+export type RefundPricing = typeof orderPricing._output;
+export function refundItemLabel(
+  pricing: RefundPricing | null,
+  id: string,
+): string {
+  const line = pricing?.lines.find((line) => line.id === id);
+  return line
+    ? [line.name, line.variant_title, line.sku].filter(Boolean).join(" · ")
+    : `Item ${id}`;
+}
+export function refundComponentLabel(
+  pricing: RefundPricing | null,
+  component: OrderLedger["refunds"][number]["components"][number],
+): string {
+  if (component.kind === "unallocated") return "Unallocated amount";
+  const shipping = pricing?.shipping_line;
+  if (component.kind === "shipping")
+    return shipping && shipping.id === component.shipping_line_id
+      ? `Shipping · ${shipping.name}`
+      : `Shipping · ${component.shipping_line_id ?? "Unknown source"}`;
+  for (const line of pricing?.lines ?? []) {
+    const tax = line.tax_lines.find((tax) => tax.id === component.tax_line_id);
+    if (tax)
+      return `Item tax · ${tax.name} · ${refundItemLabel(pricing, line.id)}`;
+  }
+  const tax = shipping?.tax_lines.find(
+    (tax) => tax.id === component.tax_line_id,
+  );
+  return tax
+    ? `Shipping tax · ${tax.name} · ${shipping!.name}`
+    : `Tax · ${component.tax_line_id ?? "Unknown source"}`;
+}
+export function refundAllocatedTotal(
+  refund: OrderLedger["refunds"][number],
+): number {
+  return (
+    [...refund.lines, ...refund.components].reduce(
+      (cents, part) => cents + Math.round(part.amount * 100),
+      0,
+    ) / 100
+  );
+}
 export interface ManualRefundCommand {
   order_id: string;
   amount: number;

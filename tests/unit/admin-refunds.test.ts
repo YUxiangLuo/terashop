@@ -5,10 +5,74 @@ import {
   manualRefundBlock,
   isManualRefundCommand,
   acknowledgesManualRefund,
+  refundItemLabel,
+  refundComponentLabel,
+  refundAllocatedTotal,
+  type RefundPricing,
   type OrderLedger,
   type ManualRefundCommand,
 } from "../../admin/src/lib/refunds";
 const id = crypto.randomUUID();
+test("refund labels resolve historical source IDs, not array positions or current products", () => {
+  const pricing = {
+    lines: [
+      {
+        id: "other",
+        name: "Other",
+        tax_lines: [{ id: "tax-other", name: "VAT" }],
+      },
+      {
+        id: "item",
+        name: "Historical shirt",
+        variant_title: "Blue",
+        sku: "OLD-SKU",
+        tax_lines: [{ id: "tax-item", name: "VAT" }],
+      },
+    ],
+    shipping_line: {
+      id: "shipping",
+      name: "Ground",
+      tax_lines: [{ id: "tax-shipping", name: "VAT" }],
+    },
+  } as unknown as RefundPricing;
+  const label = (
+    kind: "tax" | "shipping" | "unallocated",
+    tax_line_id: string | null,
+    shipping_line_id: string | null = null,
+  ) =>
+    refundComponentLabel(pricing, {
+      kind,
+      tax_line_id,
+      shipping_line_id,
+      amount: 0.2,
+    });
+  expect(refundItemLabel(pricing, "item")).toBe(
+    "Historical shirt · Blue · OLD-SKU",
+  );
+  expect(refundItemLabel(null, "item")).toBe("Item item");
+  expect(label("tax", "tax-item")).toBe(
+    "Item tax · VAT · Historical shirt · Blue · OLD-SKU",
+  );
+  expect(label("tax", "tax-shipping")).toBe("Shipping tax · VAT · Ground");
+  expect(label("shipping", null, "shipping")).toBe("Shipping · Ground");
+  expect(label("shipping", null, "missing")).toBe("Shipping · missing");
+  expect(label("tax", "missing")).toBe("Tax · missing");
+  expect(label("unallocated", null)).toBe("Unallocated amount");
+});
+test("refund allocation sums net lines and each component once using integer cents", () => {
+  const refund = {
+    amount: 99,
+    lines: [{ amount: 0.1 }, { amount: 1.17 }],
+    components: [
+      { kind: "tax", amount: 0.2 },
+      { kind: "shipping", amount: 2.03 },
+    ],
+  } as OrderLedger["refunds"][number];
+  expect(refundAllocatedTotal(refund)).toBe(3.5);
+  expect(refundAllocatedTotal({ ...refund, lines: [], components: [] })).toBe(
+    0,
+  );
+});
 const ledger = () =>
   ({
     order: {

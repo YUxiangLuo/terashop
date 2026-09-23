@@ -1659,6 +1659,19 @@ export type Database = {
         Args: { cancel?: boolean; return_id: string }
         Returns: Json
       }
+      commit_manual_refund: {
+        Args: {
+          amount?: number
+          idempotency_key: string
+          items?: Json
+          order_id: string
+          preview_token: string
+          reason?: string
+          restock?: boolean
+          shipping_amount?: number
+        }
+        Returns: Json
+      }
       complete_outbox_event: {
         Args: {
           error_message?: string
@@ -2295,6 +2308,16 @@ export type Database = {
       }
       preview_cart: {
         Args: { cart_id: string; guest_token?: string }
+        Returns: Json
+      }
+      preview_manual_refund: {
+        Args: {
+          amount?: number
+          items?: Json
+          order_id: string
+          restock?: boolean
+          shipping_amount?: number
+        }
         Returns: Json
       }
       price_checkout: {

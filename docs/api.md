@@ -435,6 +435,46 @@ SSG 页面、游客会话、PayPal 返回页及错误重试见 [Storefront PayPa
 PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复用同一个键。支付/退款响应 `pending_reconciliation=true` 也可能表示可重试的本地数据库故障，不能当作已完成交易。
 渠道密钥、Webhook 和 Worker 接入见 [支付与部署](../supabase/functions/README.md)。
 
+### 手工退款试算与受保护提交
+
+仅管理员可调用以下两个 RPC，仅支持 USD、账目已对平且没有支付意图、非 manual 交易或渠道退款请求的手工订单。两者都不会调用支付渠道；提交是已完成线下退款的记账。旧 `refund_order` 保留兼容，但不具备试算校验；需要“确认什么就执行什么”的调用方必须使用新提交接口。
+
+| RPC | 参数 / 返回 |
+| --- | --- |
+| `preview_manual_refund` | `order_id`、`items`/`shipping_amount` 或互斥的 `amount`、`restock`（默认 false）。必须显式指定退款范围，不支持全省略即退余额。返回下述试算 DTO |
+| `commit_manual_refund` | 相同范围参数，加 `preview_token`、`idempotency_key`、非空 `reason`（最多 2000 字符，客户可见）。返回 `{order_id, preview_token, refund}`，`refund` 与 `get_order_ledger.refunds[]` 同结构，含稳定退款 ID |
+
+试算 DTO：`order_id`、`currency`、`available_amount`（当前成功实收可退余额）、`source`、`amount`（本次含税总额）、`restock`、`lines`、`components`、`preview_token`。
+
+- `lines` 包含 `order_item_id`、`quantity`、商品净额 `amount`、预计 `cancelled_quantity` 和 `restocked_quantity`；后者只释放取消的未发货库存，不替代退货验收。
+- `components` 包含 `kind`、`tax_line_id`、`shipping_line_id`、`amount`，包括商品税、配送税、净运费或未分配金额。商品行净额与全部组件合计等于本次退款总额。
+- 试算在事务内锁定订单、复用既有分摊算法，不插入退款/事件/预占，不修改库存。锁随请求结束释放；试算不是额度预留或执行成功保证。
+- `preview_token` 是当前试算内容的校验值，不是授权凭证或一次性票据，无固定时间有效期。提交在同一事务中重新锁定、重新计算，比较金额、分配、可退余额和库存影响；不匹配或已不具备退款资格则整体拒绝。即使总金额不变，取消/释放数量变化也会拒绝。写入后再核对实际分配与库存数量，发现不一致则整体回滚。
+- 首次明确失败后必须重新试算并让管理员再次确认，不自动替换 token。网络失败、超时或未知结果必须保留原参数、token 和幂等键，只重放原请求；不能直接重新试算换键，否则可能重复退款记账。
+- 新旧退款接口共用退款幂等键命名空间，同键不同参数或跨接口混用会拒绝。新接口先查已成功命令，再校验当前资格与试算，因此全额退款后仍可恢复原请求，返回原退款记录；每次重放仍校验管理员权限。
+
+调用示例（`supabase` 为已登录管理员客户端）：
+
+```ts
+const scope = {
+  order_id: orderId,
+  items: [{ order_item_id: itemId, quantity: 1 }],
+  shipping_amount: 4, // 净运费；试算还会加入相应配送税
+  restock: true,
+};
+const { data: preview, error } = await supabase.rpc('preview_manual_refund', scope);
+if (error) throw error;
+// 展示 preview 的完整金额分配和库存影响，确认线下退款完成。
+// 发送前持久保存下列完整 command；未知结果只能原样重放。
+const command = {
+  ...scope, preview_token: preview.preview_token,
+  idempotency_key: crypto.randomUUID(), reason: '线下退款已完成',
+};
+const result = await supabase.rpc('commit_manual_refund', command);
+```
+
+本合同尚未接入 Admin 商品退款表单，也不适用于 PayPal Edge 退款；渠道退款需独立接入试算与异步请求校验。数据库回归：`bun run test:current tests/manual-refund-preview.test.ts`，覆盖税费尾差、库存影响、原键恢复、权限、受控并发及旧事务快照。
+
 ## Return / Receipt / Disposition
 
 三种事实与资金退款分开：Return 是管理员的退货授权，Receipt 是实际收货，Disposition 是验收后处置。当前每个 Return 对应**一次已 shipped/delivered 的 fulfillment**，通过 `order_item_id` 定位该次发货中的商业行；跨发货退回需多个 Return。客户自助申请/审批、退货面单、换货补发、序列号/批次与退货政策自动判定尚未实现。

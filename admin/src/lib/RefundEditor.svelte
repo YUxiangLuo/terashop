@@ -9,10 +9,16 @@
     acknowledgesManualRefund,
     ledgerRemaining,
     manualRefundBlock,
+    refundItemLabel,
+    refundComponentLabel,
+    refundAllocatedTotal,
+    type RefundPricing,
     type ManualRefundCommand,
     type OrderLedger,
   } from "./refunds";
   let { id }: { id: string } = $props();
+  let pricing = $state.raw<RefundPricing | null>(null),
+    pricingError = $state("");
   let ledger = $state.raw<OrderLedger | null>(null),
     pending = $state<ManualRefundCommand | null>(null);
   let busy = $state(true),
@@ -54,13 +60,14 @@
       const saved = readCommand(sessionStorage, key, isManualRefundCommand);
       if (saved && saved.order_id !== id)
         throw Error("Saved refund does not belong to this order.");
-      const [result, operations] = await Promise.all([
+      const [result, operations, snapshot] = await Promise.all([
         supabase.rpc("get_order_ledger", { order_id: id }),
         supabase.rpc("list_admin_payment_operations", {
           order_id: id,
           kind: "refund_request",
           page_size: 1,
         }),
+        supabase.rpc("get_order_pricing", { order_id: id }),
       ]);
       if (!alive) return;
       if (result.error) throw result.error;
@@ -69,6 +76,11 @@
       const requests = operations.data as unknown as { items: unknown[] };
       if (!next || next.order.id !== id || !Array.isArray(requests?.items))
         throw Error("Refund facts could not be verified.");
+      const prices = snapshot.data as unknown as RefundPricing | null;
+      pricing = !snapshot.error && prices?.order_id === id ? prices : null;
+      pricingError = pricing
+        ? ""
+        : "Price snapshot unavailable. Source IDs are shown instead of names. Reload refund ledger to retry.";
       ledger = next;
       pending = saved;
       block = manualRefundBlock(next, requests.items.length > 0);
@@ -243,29 +255,90 @@
 </section>
 <section class="card">
   <h2>Refund records</h2>
+  {#if pricingError}<p class="notice" role="status">{pricingError}</p>{/if}
+  <p class="muted">
+    Item amounts are net of discounts and exclude tax. Tax and shipping are
+    separate components. Stock released means cancelled unshipped stock, not
+    received returns.
+  </p>
   {#if !ready || pending}<p class="muted">
       Last loaded facts only; unresolved requests may not appear yet.
     </p>{/if}
   {#if ledger && !ledger.refunds.length}<p class="muted">
       No refund records.
     </p>{/if}
-  {#each ledger?.refunds ?? [] as refund}<article>
+  {#each ledger?.refunds ?? [] as refund}
+    {@const transaction = ledger?.transactions.find(
+      (t) => t.id === refund.payment_transaction_id,
+    )}
+    <article>
       <h3>{money(refund.amount)} · {refund.status} · {refund.source}</h3>
       <p class="small">{dateTime(refund.created_at)} · {refund.id}</p>
       <p>{refund.reason || "No reason"}</p>
+      <p class="small">
+        {transaction
+          ? `${transaction.provider} · ${transaction.kind} · ${transaction.status} · ${money(transaction.amount)}`
+          : "No linked transaction in the loaded ledger."}
+      </p>
       <ul>
         {#each refund.lines as line}<li>
-            Item {line.order_item_id}: {line.quantity} × units · Net {money(
-              line.amount,
-            )} · Cancelled {line.cancelled_quantity} · Stock released {line.restocked_quantity}
+            {refundItemLabel(pricing, line.order_item_id)}: {line.quantity} units
+            · Net {money(line.amount)} · Cancelled {line.cancelled_quantity} · Stock
+            released {line.restocked_quantity}
+            <span class="small source-id">Item ID: {line.order_item_id}</span>
           </li>{/each}{#each refund.components as component}<li>
-            {component.kind}: {money(component.amount)}
+            {refundComponentLabel(pricing, component)}: {money(
+              component.amount,
+            )}
+            {#if component.tax_line_id || component.shipping_line_id}<span
+                class="small source-id"
+                >Source ID: {component.tax_line_id ??
+                  component.shipping_line_id}</span
+              >{/if}
           </li>{/each}
       </ul>
+      <p>Allocated total: {money(refundAllocatedTotal(refund))}</p>
+      {#if refundAllocatedTotal(refund) !== refund.amount}<p
+          class="notice error"
+        >
+          Allocation does not match the refund amount. Reconcile this record
+          before further bookkeeping.
+        </p>{/if}
+    </article>{/each}
+</section>
+<section class="card">
+  <h2>Recorded payment transactions</h2>
+  <p class="muted">
+    Ledger records only, not proof of external settlement. Only succeeded
+    captures and refunds contribute to the balances above. Provider references
+    are not displayed.
+  </p>
+  {#if !ready || pending}<p class="muted">
+      Last loaded facts; reload after resolving the request.
+    </p>{/if}
+  {#if ledger && !ledger.transactions.length}<p class="muted">
+      No recorded transactions.
+    </p>{/if}
+  {#each ledger?.transactions ?? [] as transaction}<article>
+      <h3>
+        {money(transaction.amount)} · {transaction.kind} · {transaction.status}
+      </h3>
+      <p>
+        {transaction.provider} · {dateTime(
+          transaction.processed_at ?? transaction.created_at,
+        )}
+      </p>
+      <p class="small">Transaction {transaction.id}</p>
+      {#if transaction.parent_transaction_id}<p class="small">
+          Parent transaction {transaction.parent_transaction_id}
+        </p>{/if}
     </article>{/each}
 </section>
 
 <style>
+  .source-id {
+    display: block;
+  }
   .card {
     margin-bottom: 1.25rem;
     overflow-wrap: anywhere;

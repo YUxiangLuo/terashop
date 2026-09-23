@@ -32,7 +32,7 @@ const ready = () =>
   browser(
     "wait",
     "--fn",
-    '!!document.querySelector("fieldset") && !document.querySelector("fieldset").disabled',
+    '!!document.querySelector("#refund-amount") && !document.querySelector("#refund-amount").closest("fieldset").disabled',
   );
 try {
   user = (
@@ -171,6 +171,90 @@ try {
   await click("Reload refund ledger");
   await browser("dialog", "accept");
   await ready();
+  // Historical item labels and linked payment records use owned real RPC facts.
+  const itemOrder = await fixtureOrder(fixture, actor, 2);
+  await checked(
+    rpc(
+      "mark_order_paid",
+      { order_id: itemOrder.id, idempotency_key: crypto.randomUUID() },
+      actor.token,
+    ),
+  );
+  await checked(
+    rpc(
+      "refund_order",
+      {
+        order_id: itemOrder.id,
+        items: [{ order_item_id: itemOrder.itemId, quantity: 1 }],
+        reason: "Historical item refund",
+        provider: "manual",
+        restock: false,
+        idempotency_key: crypto.randomUUID(),
+      },
+      actor.token,
+    ),
+  );
+  await browser("open", `${origin.origin}/orders/${itemOrder.id}/refunds`);
+  await ready();
+  await wait(fixture.sku);
+  await wait("Allocated total: $10.00");
+  await wait("manual · refund · succeeded · $10.00");
+  await wait("Recorded payment transactions");
+  await browser(
+    "eval",
+    'if (document.documentElement.scrollWidth > innerWidth) throw Error("Refund detail mobile overflow")',
+  );
+  await browser("screenshot", "/tmp/admin-refund-detail-mobile.png", "--full");
+  await browser("set", "viewport", "1280", "900");
+  await browser("screenshot", "/tmp/admin-refund-detail.png", "--full");
+  // A missing optional price snapshot must fall back to IDs, without hiding ledger facts.
+  await browser(
+    "eval",
+    `(() => { const original = window.fetch; window.fetch = async (...args) => {
+    if (String(args[0]).includes('/rpc/get_order_pricing')) { window.fetch = original; return new Response(JSON.stringify({message:'Simulated missing price snapshot'}), {status:400,headers:{'Content-Type':'application/json'}}); } return original(...args);
+  }; })()`,
+  );
+  await click("Reload refund ledger");
+  await wait("Price snapshot unavailable");
+  await wait(`Item ${itemOrder.itemId}: 1 units`);
+  await ready();
+  await browser(
+    "screenshot",
+    "/tmp/admin-refund-detail-fallback.png",
+    "--full",
+  );
+  await click("Reload refund ledger");
+  await ready();
+  await wait(fixture.sku);
+  await browser(
+    "eval",
+    'if (document.body.innerText.includes("Price snapshot unavailable")) throw Error("Snapshot warning not cleared")',
+  );
+  // Corrupt only the browser response; never mutate immutable accounting records.
+  await browser(
+    "eval",
+    `(() => { const original = window.fetch; window.fetch = async (...args) => {
+    const response = await original(...args);
+    if (!String(args[0]).includes('/rpc/get_order_ledger') || !response.ok) return response;
+    window.fetch = original;
+    const data = await response.json();
+    data.refunds[0].components.push({kind:'unallocated',amount:0.01,tax_line_id:null,shipping_line_id:null});
+    data.balances.is_balanced = false;
+    return new Response(JSON.stringify(data), {headers:{'Content-Type':'application/json'}});
+  }; })()`,
+  );
+  await click("Reload refund ledger");
+  await wait("Allocation does not match the refund amount");
+  await wait("Allocated total: $10.01");
+  await browser(
+    "eval",
+    'if (!document.querySelector("fieldset").disabled) throw Error("Unbalanced ledger allowed bookkeeping")',
+  );
+  await browser(
+    "screenshot",
+    "/tmp/admin-refund-detail-mismatch.png",
+    "--full",
+  );
   // A real local PayPal-settlement fixture is read-only in this UI; no provider network call.
   const online = await fixtureOrder(fixture, actor, 1);
   const intent = await fixtureIntent(online, actor);
@@ -181,9 +265,13 @@ try {
     "eval",
     'if (!document.querySelector("fieldset").disabled) throw Error("Provider refund allowed via manual form")',
   );
+  await browser(
+    "eval",
+    `if (document.body.innerText.includes(${JSON.stringify(intent.provider_reference)})) throw Error("Provider reference exposed")`,
+  );
   await browser("screenshot", "/tmp/admin-refund-online-blocked.png", "--full");
   console.log(
-    "Refund smoke passed: exact amount, lost-response replay once, unallocated record, stock/quantities unchanged, stale balance rejected, PayPal read-only, mobile.",
+    "Refund smoke passed: exact amount, lost-response replay once, unallocated record, stock/quantities unchanged, stale balance rejected, historical item details, snapshot fallback/recovery, linked transactions, hidden provider reference, PayPal read-only, mobile.",
   );
 } finally {
   await browser("close").catch(() => {});
