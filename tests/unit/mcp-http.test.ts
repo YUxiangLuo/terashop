@@ -20,6 +20,7 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
     anonKey: 'public',
     scopes: ['store:read', 'store:write'] as const,
     allowWrites: true,
+    adminOrigin: 'https://admin.example',
   };
   const users = await Promise.all(
     ['a', 'b'].map(async (token) => {
@@ -69,6 +70,24 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
       if (url.endsWith('/auth/v1/user'))
         return Response.json({ id: users[1].id, role: 'authenticated', is_anonymous: false });
       if (url.endsWith('/is_admin')) return Response.json(true);
+      if (url.endsWith('/list_admin_orders'))
+        return Response.json({
+          items: [
+            {
+              id: users[1].id,
+              order_number: '42',
+              customer_id: users[0].id,
+              email: 'private@example.test',
+              status: 'open',
+              financial_status: 'paid',
+              fulfillment_status: 'unfulfilled',
+              currency: 'USD',
+              total: 17.25,
+              created_at: '2026-09-23T00:00:00Z',
+            },
+          ],
+          next_cursor: null,
+        });
       if (url.endsWith('/get_admin_product'))
         return Response.json({ id: JSON.parse(String(init.body)).product_id });
       if (url.includes('/storage/v1/object/catalog-media/')) {
@@ -99,6 +118,31 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
   );
   return { handler, users, config, uploads, calls: () => calls, refreshClaims: () => refreshClaims };
 }
+
+test('remote SDK receives Admin links from trusted host config, not request headers', async () => {
+  const f = await fixture();
+  const client = new Client({ name: 'admin-links', version: '1' });
+  try {
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(f.config.resource), {
+        requestInit: { headers: { authorization: 'Bearer b', 'x-forwarded-host': 'evil.example' } },
+        fetch: (input, init) => f.handler(new Request(input, init)),
+      }),
+    );
+    const result = await client.callTool({ name: 'list_admin_orders', arguments: {} });
+    expect(result.isError).not.toBe(true);
+    expect(result.content).toHaveLength(2);
+    expect(result.content[1]).toMatchObject({
+      type: 'resource_link',
+      uri: `https://admin.example/orders/${f.users[1].id}`,
+    });
+    expect(JSON.stringify(result.content[1])).not.toContain('private@example.test');
+    f.users[1].active = false;
+    await expect(client.callTool({ name: 'list_admin_orders', arguments: {} })).rejects.toThrow();
+  } finally {
+    await client.close();
+  }
+});
 
 test('remote SDK uploads the full advertised 1 MiB media size after base64 expansion', async () => {
   const f = await fixture();

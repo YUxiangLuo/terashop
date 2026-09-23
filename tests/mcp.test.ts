@@ -27,7 +27,7 @@ beforeAll(async () => {
   admin = await signup();
   buyer = await signup();
   await makeAdmin(admin.userId);
-  session = await mcpSession(backend(admin.token), true);
+  session = await mcpSession(backend(admin.token), true, undefined, 'https://admin.example');
 });
 afterAll(async () => {
   try {
@@ -74,6 +74,15 @@ test('MCP 商品创建/读取/修改，版本冲突不覆盖，未知 UUID 返�
   });
   cleanup.defer(() => archiveProduct(productId));
   expect(created.id).toBe(productId);
+  const linked = await session.client.callTool({
+    name: 'get_admin_product',
+    arguments: { product_id: productId },
+  });
+  expect(linked.isError).not.toBe(true);
+  expect(linked.content[1]).toMatchObject({
+    type: 'resource_link',
+    uri: `https://admin.example/products/${productId}`,
+  });
   const updated = await toolData<{ revision: number; name: string }>(session.client, 'update_product', {
     product_id: productId,
     expected_revision: created.revision,

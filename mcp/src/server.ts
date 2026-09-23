@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 import { AdminBackend, BackendError, type Functions, type RpcArgs } from './backend';
 import { requiredToolScopes, permitsTool, type ToolAuthorization } from './permissions';
+import { adminRecordLinks, validateAdminOrigin } from './admin-links';
 import type { Json } from '../../types/database';
 import {
   id,
@@ -118,8 +119,9 @@ Returns, receipts, disposition, refunds and fulfillment cancellation are distinc
 
 export function createAdminServer(
   backend: AdminBackend,
-  options: { allowWrites?: boolean; authorization?: ToolAuthorization } = {},
+  options: { allowWrites?: boolean; authorization?: ToolAuthorization; adminOrigin?: string } = {},
 ) {
+  const adminOrigin = validateAdminOrigin(options.adminOrigin);
   const server = new McpServer({ name: 'tera-admin', version: '0.1.0' }, { instructions });
   const authorization = options.authorization;
 
@@ -163,7 +165,10 @@ export function createAdminServer(
           if (!parsed.success) throw new BackendError('INVALID_BACKEND_RESPONSE', mutation);
           const result = { data: parsed.data };
           return {
-            content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+            content: [
+              { type: 'text' as const, text: JSON.stringify(result) },
+              ...(!mutation ? adminRecordLinks(adminOrigin, name, parsed.data) : []),
+            ],
             structuredContent: result,
           };
         } catch (error) {

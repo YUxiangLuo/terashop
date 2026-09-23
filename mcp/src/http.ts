@@ -3,6 +3,7 @@ import { GrantAuthorizer, type AuthorizationConfig } from './authorization';
 import { AdminBackend } from './backend';
 import type { createCredentialCipher } from './credentials';
 import { createAdminServer } from './server';
+import { validateAdminOrigin } from './admin-links';
 
 // A 1 MiB media tool input expands to ~1.4 MiB in base64 plus its JSON envelope.
 export const MAX_MCP_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -10,12 +11,13 @@ export const MAX_MCP_REQUEST_BYTES = 2 * 1024 * 1024;
 // Web Request handler only. Deployment owns TLS, listener limits and shutdown.
 // No sessions, result replay, ambient administrator token or service-role business calls.
 export function createAdminHttpHandler(
-  config: AuthorizationConfig & { anonKey: string; allowWrites?: boolean },
+  config: AuthorizationConfig & { anonKey: string; allowWrites?: boolean; adminOrigin?: string },
   cipher: Awaited<ReturnType<typeof createCredentialCipher>>,
   request: (url: string, init: RequestInit) => Promise<Response> = fetch,
   admit?: (verifiedUserId: string) => number,
 ) {
   const c = { ...config, scopes: [...config.scopes], tokenProfile: 'oidc-provider' as const };
+  validateAdminOrigin(c.adminOrigin);
   const resource = new URL(c.resource);
   if (resource.protocol !== 'https:' || resource.pathname === '/' || !c.anonKey.trim())
     throw new Error('INVALID_MCP_HTTP_CONFIGURATION');
@@ -121,6 +123,7 @@ export function createAdminHttpHandler(
     );
     const server = createAdminServer(backend, {
       allowWrites: c.allowWrites,
+      adminOrigin: c.adminOrigin,
       authorization: identity.authorization,
     });
     const transport = new WebStandardStreamableHTTPServerTransport({

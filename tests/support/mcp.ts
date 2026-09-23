@@ -7,8 +7,9 @@ export async function mcpSession(
   backend: AdminBackend,
   allowWrites = false,
   authorization?: ToolAuthorization,
+  adminOrigin?: string,
 ) {
-  const server = createAdminServer(backend, { allowWrites, authorization });
+  const server = createAdminServer(backend, { allowWrites, authorization, adminOrigin });
   const client = new Client({ name: 'tera-tests', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

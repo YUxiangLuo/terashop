@@ -10,7 +10,10 @@ try {
   });
   await backend.assertAdmin();
   await serveStdio(() =>
-    createAdminServer(backend, { allowWrites: process.env.TERA_MCP_ALLOW_WRITES === 'true' }),
+    createAdminServer(backend, {
+      allowWrites: process.env.TERA_MCP_ALLOW_WRITES === 'true',
+      adminOrigin: process.env.TERA_ADMIN_ORIGIN,
+    }),
   );
 } catch {
   // stdout is reserved for the protocol. Never print credentials or raw errors.

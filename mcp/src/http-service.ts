@@ -26,6 +26,7 @@ const configuration = z.strictObject({
       .min(1)
       .max(5),
     allowWrites: z.boolean(),
+    adminOrigin: z.string().optional(),
   }),
   credentialKeys: z.record(z.string(), z.string()).refine((keys) => Object.keys(keys).length <= 8),
   activeCredentialKey: secret,

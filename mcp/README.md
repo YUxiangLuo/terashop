@@ -20,7 +20,9 @@
 
 已提供跨页授权撤销预览：单次数据库快照读取本人最多 100 条尚无清理请求的记录，确认与重试复用明确 ID 集合，不扩大到新连接。超过 100 条整体拒绝，不截断；原分页撤销入口保留。预览不是持久任务或批准凭据，无新增 MCP 工具，仍使用原子个人撤销接口。
 
-后续按融合计划推进：其他关键业务契约对照、业务记录互通与可信来源审计；角色降级是否永久撤销、SSO/PAT、跨用户管理及逐笔审批分别定义，不能混入本批默认行为。公网与目标客户端验收仍需域名／证书和部署批准。
+已提供可选的 MCP → Admin 记录导航：受信宿主配置 Admin origin 后，`get_admin_product/order/customer` 及对应三个列表工具在成功、非空结果中追加标准 `resource_link`。目标仅为固定商品／订单／商业客户详情路由，使用已校验结果中的 UUID，不用客户 Auth UUID、订单号或自由文本拼接地址；不附带 token、邮箱、查询串或批准参数。文本 JSON 和 `structuredContent.data` 保持原合同，未配置则不返回链接，写入／错误／缺失结果不附加链接。客户端是否显示链接取决于其 MCP 支持，不提供 `resources/read` 或自动打开／抓取网页。用户仍须在 Admin 独立登录，链接不证明权限、批准、业务成功或可信调用来源。
+
+后续按融合计划推进：其他关键业务契约对照、更多资源互通与可信来源审计；现有事件 `actor_id` 只能证明数据库识别的用户，不能区分 Admin 与 MCP。不得用 tool 参数、浏览器 header 或备注中的自报来源冒充可信审计。角色降级是否永久撤销、SSO/PAT、跨用户管理及逐笔审批分别定义，不能混入本批默认行为。公网与目标客户端验收仍需域名／证书和部署批准。
 
 验证入口：`bun run test:current tests/mcp-connections.test.ts` 覆盖本人权限、脱敏分页、原子撤销、快照重试与凭据写入竞争；`tests/mcp-oidc-interaction.test.ts` 的 Node 场景验证真实授权后的个人撤销、轮询清理及其他用户隔离；`bun scripts/admin-connections-smoke.ts` 验证真实 Admin 登录、丢失回执、原 ID 重试及降级后的安全页。单测另验证清理失败不确认、回执丢失重放和退出停止后续清理。
 
@@ -102,6 +104,7 @@ MCP_BROWSER=1 MCP_BROWSER_EXPIRY=1 bun run test:current tests/mcp-oidc-interacti
 | `TERA_SUPABASE_ANON_KEY` | 项目公开 anon / publishable key；不是 service-role secret |
 | `TERA_ADMIN_ACCESS_TOKEN` | 非匿名管理员用户的有效 Supabase access token |
 | `TERA_MCP_ALLOW_WRITES` | 只有精确值 `true` 才注册写工具；省略时仅注册只读工具 |
+| `TERA_ADMIN_ORIGIN` | 可选 Admin HTTPS origin，如 `https://admin.example.com`，不可带结尾 `/`、路径、query、fragment 或凭据；无配置则不返回导航链接 |
 
 首次管理员初始化沿用 [Admin 文档](../admin/README.md)。通过现有 Supabase Auth 登录取得短期会话；stdio 不提供登录工具，不接受密码/令牌作为 tool 参数，不保存或自动刷新 refresh token。stdio 令牌到期后在宿主安全配置中替换，并重启 MCP；远程服务使用下文的逐用户凭据流程。不要把令牌放进对话、版本库、URL 或启动参数。
 

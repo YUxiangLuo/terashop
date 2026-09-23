@@ -152,6 +152,7 @@ test('real Bun TLS service enforces private configuration and serves an authenti
         anonKey: 'public',
         scopes: ['store:read'],
         allowWrites: false,
+        adminOrigin: 'https://admin.example',
       },
       credentialKeys: { test: Buffer.from(material).toString('base64url') },
       activeCredentialKey: 'test',
@@ -166,6 +167,10 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     await chmod(path, 0o600);
     for (const invalid of [
       { ...config, activeCredentialKey: 'missing' },
+      {
+        ...config,
+        authorization: { ...config.authorization, adminOrigin: 'https://admin.example/?token=secret' },
+      },
       { ...config, authorization: { ...config.authorization, resource: 'https://wrong.example/mcp' } },
       { ...config, unexpected: true },
     ]) {
