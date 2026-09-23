@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { beforeNavigate } from "$app/navigation";
   import FulfillmentEditor from "./FulfillmentEditor.svelte";
+  import OrderActivity from "./OrderActivity.svelte";
   import {
     supabase,
     message,
@@ -468,6 +469,7 @@
       </p>
     </aside>
   </div>
+  {#key id}<OrderActivity orderId={id} />{/key}
 {:else if busy}<p role="status">Loading order…</p>{:else if !error}<p
     class="empty"
   >
