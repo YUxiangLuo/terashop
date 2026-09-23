@@ -71,3 +71,59 @@ export function confirmsRevocation(value: unknown, ids: string[]): boolean {
       JSON.stringify([...new Set(ids)].sort())
   );
 }
+
+export interface ToolCallCursor {
+  admitted_at: string;
+  id: string;
+}
+export interface McpToolCall extends ToolCallCursor {
+  grant_id: string;
+  client_id: string;
+  resource: string;
+  tool_name: string;
+  mutation: boolean;
+  finished_at: string | null;
+  outcome: "pending" | "returned" | "rejected" | "unknown";
+}
+const timestamp = (value: unknown): value is string =>
+  typeof value === "string" && Number.isFinite(Date.parse(value));
+
+export function toolCallPage(value: unknown): {
+  items: McpToolCall[];
+  next_cursor: ToolCallCursor | null;
+} {
+  if (
+    !object(value) ||
+    !Array.isArray(value.items) ||
+    value.items.length > 100 ||
+    !value.items.every(
+      (item: unknown) =>
+        object(item) &&
+        uuid(item.id) &&
+        uuid(item.grant_id) &&
+        typeof item.client_id === "string" &&
+        typeof item.resource === "string" &&
+        typeof item.tool_name === "string" &&
+        typeof item.mutation === "boolean" &&
+        timestamp(item.admitted_at) &&
+        typeof item.outcome === "string" &&
+        ["pending", "returned", "rejected", "unknown"].includes(item.outcome) &&
+        (item.outcome === "pending"
+          ? item.finished_at === null
+          : timestamp(item.finished_at)),
+    ) ||
+    (value.next_cursor !== null &&
+      (!object(value.next_cursor) ||
+        !uuid(value.next_cursor.id) ||
+        !timestamp(value.next_cursor.admitted_at) ||
+        !value.items.length ||
+        value.next_cursor.id !== value.items.at(-1).id ||
+        value.next_cursor.admitted_at !== value.items.at(-1).admitted_at))
+  )
+    throw Error("The call records could not be verified.");
+  // Keep the original timestamp strings, including PostgreSQL microseconds.
+  return value as unknown as {
+    items: McpToolCall[];
+    next_cursor: ToolCallCursor | null;
+  };
+}

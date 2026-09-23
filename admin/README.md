@@ -38,6 +38,8 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 “Preview all eligible connections” 单次读取本人所有尚无清理请求的记录，跨越列表分页；含本地已撤销但未请求上游清理的记录。最多 100 条，超过则整体拒绝，须先撤销明确分页再重新预览。预览不撤销、不保存服务端任务。确认区显示完整集合，提交及结果未知后的重试复用同一组 ID，不纳入后来创建的连接；刷新丢弃页面内的预览，不能将旧确认用于新集合。此功能先部署 `20260923000002_mcp_revocation_preview.sql` 再发布 Admin；无需更新授权服务，生产迁移仍须批准。
 
+“My Agent call records” 只读展示本人远程调用摘要，降级后仍可查看；按准入时间及 UUID 倒序，每页 20 条，游标保留微秒，不是快照。刷新回到最新页；读取失败保留旧数据并标记可能过时。四种观察状态不等同于业务结算或交付成功，没有重放按钮；空列表不能证明没有调用。授权删除不会移除历史记录。先部署 `20260923000003_mcp_tool_audit.sql`、`20260923000004_my_mcp_tool_calls.sql`；实际采集仍须运维显式开启 MCP `authorization.auditTools`。不显示参数、结果、凭据或完整授权 binding。浏览器回归覆盖空列表、21 条记录分页、读取失败恢复、本人隔离、降级访问及手机横向滚动；截图为 `/tmp/admin-call-records*.png`。
+
 接入继续由客户端发起 OAuth/PKCE，客户端及回调地址需预注册。可选公开构建变量 `PUBLIC_MCP_CONNECTION` 在页面展示运维提供的 MCP 地址、预期 issuer 和允许申请的业务 scopes；未配置时不推断地址。示例（仅文档占位，须替换为受信部署配置）：
 
 ```bash

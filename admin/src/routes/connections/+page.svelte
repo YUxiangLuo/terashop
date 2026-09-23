@@ -3,6 +3,7 @@
   import * as publicEnv from "$env/static/public";
   import { mcpOnboarding } from "$lib/mcp-onboarding";
   import { supabase, dateTime } from "$lib/api";
+  import McpToolCalls from "$lib/McpToolCalls.svelte";
   import {
     connectionPage,
     revocationPreview,
@@ -255,6 +256,7 @@
     an existing cleanup request. New connections after the preview are excluded.
   </p>
 </section>
+<McpToolCalls />
 <section class="card">
   <h2>Connect an Agent</h2>
   {#if onboarding}

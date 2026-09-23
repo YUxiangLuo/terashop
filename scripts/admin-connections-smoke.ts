@@ -82,6 +82,52 @@ try {
     'eval',
     `if(document.body.textContent.includes('Other user connection')) throw Error('Cross-user disclosure'); if(document.querySelector('main [role=alert]')) throw Error('List failed');`,
   );
+  await wait('No recorded calls found.');
+  const auditSection = '[aria-label="My Agent call records"]';
+  await browser(
+    'eval',
+    `document.querySelector('${auditSection}').scrollIntoView();`,
+  );
+  await browser('screenshot', '/tmp/admin-call-records-empty.png');
+  for (let i = 0; i < 22; i++) {
+    const outcome = ['pending', 'returned', 'rejected', 'unknown'][i % 4];
+    const admitted = new Date(Date.now() - i * 1000).toISOString();
+    await db`insert into private.mcp_tool_audit(id,user_id,grant_id,client_id,issuer,resource,project,tool_name,mutation,admitted_at,finished_at,outcome)
+      values(${crypto.randomUUID()},${i === 21 ? other : owner},${first.id},${i === 21 ? 'Other private audit' : 'Desktop Agent'},'https://auth.example','https://shop.example/mcp',${session},${outcome === 'unknown' ? 'update_order_admin_note' : i === 20 ? 'get_admin_customer' : 'get_admin_product'},${outcome === 'unknown'},${admitted},${outcome === 'pending' ? null : admitted},${outcome})`;
+  }
+  await click('Refresh call records');
+  await wait('Older call records');
+  await browser(
+    'eval',
+    `(() => {const s=document.querySelector('${auditSection}'); if(s.querySelectorAll('tbody tr').length!==20 || s.textContent.includes('Other private audit'))throw Error('Audit page/isolation'); s.scrollIntoView();})()`,
+  );
+  await browser('screenshot', '/tmp/admin-call-records.png');
+  await click('Older call records');
+  await wait('get_admin_customer');
+  await browser(
+    'eval',
+    `if(document.querySelector('${auditSection}').querySelectorAll('tbody tr').length!==1)throw Error('Wrong older page');
+    const sendAudit=window.fetch; let failAudit=true; window.fetch=async (...args)=>{
+      if(String(args[0]).includes('/list_my_mcp_tool_calls') && failAudit){failAudit=false;return new Response('{}',{status:503});}
+      return sendAudit(...args);
+    };`,
+  );
+  await click('Refresh call records');
+  await wait('Could not load current call records.');
+  await browser(
+    'eval',
+    `(() => {const s=document.querySelector('${auditSection}'); if(!s.textContent.includes('get_admin_customer'))throw Error('Failed read discarded existing records'); s.scrollIntoView();})()`,
+  );
+  await browser('screenshot', '/tmp/admin-call-records-error.png');
+  await click('Refresh call records');
+  await wait('Older call records');
+  await browser('set', 'viewport', '390', '844');
+  await browser(
+    'eval',
+    `(() => {const s=document.querySelector('${auditSection}'); s.scrollIntoView(); if(document.documentElement.scrollWidth>innerWidth)throw Error('Audit page overflow'); const t=s.querySelector('.table-wrap'); t.scrollLeft=t.scrollWidth; if(t.scrollLeft<=0)throw Error('Audit table cannot scroll'); t.scrollLeft=0;})()`,
+  );
+  await browser('screenshot', '/tmp/admin-call-records-mobile.png');
+  await browser('set', 'viewport', '1440', '1000');
   const configured = process.env.PUBLIC_MCP_CONNECTION
     ? JSON.parse(process.env.PUBLIC_MCP_CONNECTION)
     : null;
@@ -173,6 +219,7 @@ try {
   );
   await browser('reload');
   await wait('Read-only Assistant');
+  await wait('Older call records');
   await browser(
     'eval',
     `if(document.querySelector('nav a[href="/orders"]'))throw Error('Business navigation exposed after demotion');`,
@@ -238,10 +285,16 @@ try {
     `document.querySelector('[aria-label="Confirm revocation"]').scrollIntoView(); if(document.documentElement.scrollWidth>innerWidth)throw Error('Snapshot overflow'); const list=document.querySelector('.revocation-selection'); list.scrollTop=list.scrollHeight; if(list.scrollTop<=0 || list.tabIndex!==0)throw Error('Selection not accessible'); list.scrollTop=0;`,
   );
   await browser('screenshot', '/tmp/admin-connections-snapshot-mobile.png');
-  await browser('eval', `document.querySelector('.revocation-selection').focus();`);
+  await browser(
+    'eval',
+    `document.querySelector('.revocation-selection').focus();`,
+  );
   await browser('press', 'PageDown');
   await browser('wait', '200');
-  await browser('eval', `if(document.querySelector('.revocation-selection').scrollTop<=0)throw Error('Keyboard cannot scroll selected connections');`);
+  await browser(
+    'eval',
+    `if(document.querySelector('.revocation-selection').scrollTop<=0)throw Error('Keyboard cannot scroll selected connections');`,
+  );
   const afterPreview = await grant(owner, 'Created after snapshot');
   await click('Confirm revocation');
   await wait('Revocation was not confirmed.');
@@ -268,6 +321,7 @@ try {
   try {
     await browser('close');
   } finally {
+    await db`delete from private.mcp_tool_audit where project=${session}`;
     await db`delete from private.mcp_grants where binding->>'project'=${session}`;
     await db`delete from private.mcp_grant_fences where binding->>'project'=${session}`;
     for (const id of users)

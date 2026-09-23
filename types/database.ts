@@ -2217,6 +2217,10 @@ export type Database = {
         Args: { after_id?: string; page_size?: number }
         Returns: Json
       }
+      list_my_mcp_tool_calls: {
+        Args: { before_at?: string; before_id?: string; page_size?: number }
+        Returns: Json
+      }
       list_pending_paypal_captures: {
         Args: { max_requests?: number }
         Returns: Json

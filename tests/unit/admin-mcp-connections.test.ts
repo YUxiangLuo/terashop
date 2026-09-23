@@ -4,7 +4,46 @@ import {
   confirmsRevocation,
   connectionPage,
   revocationPreview,
+  toolCallPage,
 } from '../../admin/src/lib/mcp-connections';
+
+test('tool call pages preserve microsecond cursors and reject misleading states', () => {
+  const row = {
+    id: crypto.randomUUID(),
+    grant_id: crypto.randomUUID(),
+    client_id: '<script>not markup</script>',
+    resource: 'https://shop.example/mcp',
+    tool_name: 'get_admin_product',
+    mutation: false,
+    admitted_at: '2026-09-23T01:02:03.123456+00:00',
+    finished_at: null,
+    outcome: 'pending',
+  };
+  const cursor = { id: row.id, admitted_at: row.admitted_at };
+  expect(
+    toolCallPage({ items: [row], next_cursor: cursor }).next_cursor,
+  ).toEqual(cursor);
+  for (const changes of [
+    { outcome: 'success' },
+    { outcome: ['pending'] },
+    { finished_at: row.admitted_at },
+    { outcome: 'returned' },
+    { mutation: 'false' },
+    { admitted_at: 'bad' },
+    { grant_id: null },
+  ])
+    expect(() =>
+      toolCallPage({ items: [{ ...row, ...changes }], next_cursor: null }),
+    ).toThrow();
+  for (const invalid of [
+    { ...cursor, admitted_at: '2026-09-23T01:02:03.123Z' },
+    { ...cursor, id: crypto.randomUUID() },
+  ])
+    expect(() =>
+      toolCallPage({ items: [row], next_cursor: invalid }),
+    ).toThrow();
+  expect(toolCallPage({ items: [], next_cursor: null }).items).toEqual([]);
+});
 
 test('onboarding preserves exact endpoints and offers only permitted non-sensitive presets', () => {
   const config = {

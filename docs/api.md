@@ -34,6 +34,10 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 
 `mcp_connection_cleanup_command(p_action,p_issuer,p_resource,p_project,p_grant_id?)` 仅供 service-role 宿主：`list` 每次最多 20 条待清理的 `{id,upstream_grant_id}`；`complete` 需指定匹配部署的 revoked grant，幂等返回 `{id,cleanup:"completed"}`。它不执行上游撤销，只有完成真实持久撤销的宿主才能确认；用户 JWT 无权调用。不是 MCP tool，也不是公共客户端注册或 token 签发 API。
 
+`list_my_mcp_tool_calls(page_size=20,before_at?,before_id?)` 为独立的本人调用记录只读入口，同样只允许非匿名 authenticated 用户，降级后仍可访问。页大小 1–100；两个游标字段须同时提供，按 `(admitted_at,id)` 倒序，续页使用严格小于。返回 `{items,next_cursor}`，游标为 `{admitted_at,id}` 或 null；须原样保留 PostgreSQL 微秒时间字符串，不通过 JavaScript Date 重建。每项仅含 `id,grant_id,client_id,resource,tool_name,mutation,admitted_at,finished_at,outcome`，不返回 user/issuer/project、参数、结果或凭据。没有用户选择器、跨页快照、总数、写入或重放能力；记录保留不依赖 grant 仍存在。
+
+`pending` 不证明失败，`returned` 不证明结算或客户端送达，`rejected` 为明确调用失败，`unknown` 为写入结果不明。空列表不证明没有调用（审计可能未开启或记录已按运维策略删除）。底表仍无客户端直接权限；需先部署 `20260923000004_my_mcp_tool_calls.sql`。这是个人安全查询，不新增 MCP 工具，也不授予业务权限。
+
 ## Storefront / Admin 商品读取合同
 
 新客户端优先使用以下显式 DTO，而不是把底表结构作为商城合同。RPC 均位于 `public`；命名不授予权限，数据库独立验证身份、发布状态和输出字段。
