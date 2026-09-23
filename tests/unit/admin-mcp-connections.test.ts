@@ -1,8 +1,54 @@
 import { expect, test } from 'bun:test';
+import { mcpOnboarding } from '../../admin/src/lib/mcp-onboarding';
 import {
   confirmsRevocation,
   connectionPage,
 } from '../../admin/src/lib/mcp-connections';
+
+test('onboarding preserves exact endpoints and offers only permitted non-sensitive presets', () => {
+  const config = {
+    resource: 'https://shop.example/mcp',
+    issuer: 'https://auth.example',
+    scopes: ['store:write', 'store:read', 'store:payments'],
+  };
+  const parsed = mcpOnboarding(JSON.stringify(config))!;
+  expect(parsed.resource).toBe(config.resource);
+  expect(parsed.issuer).toBe(config.issuer);
+  expect(parsed.presets.map((p) => p.scopes)).toEqual([
+    ['store:read'],
+    ['store:read', 'store:write'],
+  ]);
+  expect(
+    mcpOnboarding(JSON.stringify({ ...config, scopes: ['store:read'] }))!
+      .presets,
+  ).toHaveLength(1);
+  expect(
+    mcpOnboarding(JSON.stringify({ ...config, scopes: ['store:write'] }))!
+      .presets,
+  ).toHaveLength(0);
+  expect(mcpOnboarding(undefined)).toBeNull();
+  expect(mcpOnboarding('')).toBeNull();
+  for (const change of [
+    { resource: 'http://shop.example/mcp' },
+    { resource: 'https://shop.example/' },
+    { resource: 'https://user:secret@shop.example/mcp' },
+    { resource: 'https://shop.example/mcp?token=x' },
+    { resource: 'https://shop.example/mcp#fragment' },
+    { resource: 'https://shop.example/a/../mcp' },
+    { resource: ' https://shop.example/mcp' },
+    { issuer: 'javascript:alert(1)' },
+    { issuer: 'https://auth.example/?secret=x' },
+    { access_token: 'secret' },
+    { scopes: ['store:read', 'store:read'] },
+    { scopes: ['store:unknown'] },
+    { scopes: [] },
+  ])
+    expect(() =>
+      mcpOnboarding(JSON.stringify({ ...config, ...change })),
+    ).toThrow('Invalid PUBLIC_MCP_CONNECTION');
+  for (const raw of ['null', '[]', '{}', 'not json'])
+    expect(() => mcpOnboarding(raw)).toThrow();
+});
 
 test('revocation receipt must contain the exact selected IDs, regardless of ordering', () => {
   const a = crypto.randomUUID(),

@@ -82,6 +82,40 @@ try {
     'eval',
     `if(document.body.textContent.includes('Other user connection')) throw Error('Cross-user disclosure'); if(document.querySelector('main [role=alert]')) throw Error('List failed');`,
   );
+  const configured = process.env.PUBLIC_MCP_CONNECTION
+    ? JSON.parse(process.env.PUBLIC_MCP_CONNECTION)
+    : null;
+  await browser(
+    'eval',
+    `(() => {
+    const config = ${JSON.stringify(configured)};
+    const section = [...document.querySelectorAll('section')].find(s => s.querySelector('h2')?.textContent === 'Connect an Agent');
+    if (!section) throw Error('Missing onboarding');
+    const inputs = [...section.querySelectorAll('input')];
+    if (config) {
+      if (inputs[0]?.value !== config.resource || inputs[1]?.value !== config.issuer || inputs.some(i => !i.readOnly)) throw Error('Incorrect endpoints');
+      const presets = inputs.slice(2).map(i => i.value);
+      const expected = ['store:read', 'store:read store:write'].filter(p => p.split(' ').every(s => config.scopes.includes(s)));
+      if (JSON.stringify(presets) !== JSON.stringify(expected)) throw Error('Missing or changed presets');
+      if (presets.some(p => p.split(' ').some(s => !config.scopes.includes(s) || ['store:payments','store:access','store:privacy'].includes(s)))) throw Error('Elevated preset');
+    } else if (inputs.length || !section.textContent.includes('not published')) throw Error('Invented configuration');
+    section.scrollIntoView();
+  })()`,
+  );
+  await browser(
+    'screenshot',
+    `/tmp/admin-onboarding-${configured ? 'configured' : 'unset'}.png`,
+  );
+  await browser('set', 'viewport', '390', '844');
+  await browser(
+    'eval',
+    `[...document.querySelectorAll('h2')].find(h => h.textContent === 'Connect an Agent').scrollIntoView(); if(document.documentElement.scrollWidth>innerWidth)throw Error('Onboarding overflows');`,
+  );
+  await browser(
+    'screenshot',
+    `/tmp/admin-onboarding-${configured ? 'configured' : 'unset'}-mobile.png`,
+  );
+  await browser('set', 'viewport', '1440', '1000');
   await click('Revoke Desktop Agent');
   await wait('Revoke 1 selected connection(s)?');
   await browser('screenshot', '/tmp/admin-connections-confirm.png', '--full');

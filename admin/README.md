@@ -36,9 +36,17 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 列表按 UUID 每页 20 条，不是跨页快照。`active` 显示为“Not revoked locally”，不声称连接健康；`cleanup` 分别表示未在此申请清理、待清理、上游清理已确认。撤销成功先停止该授权的新 MCP 准入并删除密文，上游清理由 OAuth 服务异步完成；不能取消已经派发的业务请求。超时保留原 ID 集合，只能重试同一集合；新建的连接不会被旧请求覆盖。页面重载后重新读取事实，不跨标签页持久保存待决操作。Admin 退出不等于撤销 MCP。
 
-接入继续由客户端发起 OAuth/PKCE，服务器地址由运维提供，客户端及回调地址需预注册。页面只提供接入说明，不验证公网可用性，不推测授权期限，不实现 SSO、PAT 或健康监控。先应用 `20260923000001_mcp_connection_management.sql`，再更新 OAuth 服务，最后发布 Admin；共享/生产迁移须另行批准。
+接入继续由客户端发起 OAuth/PKCE，客户端及回调地址需预注册。可选公开构建变量 `PUBLIC_MCP_CONNECTION` 在页面展示运维提供的 MCP 地址、预期 issuer 和允许申请的业务 scopes；未配置时不推断地址。示例（仅文档占位，须替换为受信部署配置）：
 
-运行 `bun scripts/admin-connections-smoke.ts`（需本地 Supabase 和运行中的 `bun run admin:dev`）可验证真实登录、本人隔离、已提交回执丢失后的原 ID 重试、新连接不受重试影响、降级后自助撤销及业务门禁。截图保存到 `/tmp/admin-connections*.png`；测试使用并清理合成账号与授权，不执行店铺业务写入。真实上游 token 家族清理另由 `tests/mcp-oidc-interaction.test.ts` 的 Node 场景验证。
+```bash
+PUBLIC_MCP_CONNECTION='{"resource":"https://mcp.example.com/mcp","issuer":"https://auth.example.com","scopes":["store:read","store:write"]}' bun run admin:build
+```
+
+配置必须且只能包含这三个字段；地址为精确 HTTPS URL，无用户名、密码、query 或 fragment，resource 必须包含非根路径。构建拒绝未知字段、无效地址、重复或未知 scope。只读／日常操作预设仅在所需 scopes 全部允许时展示，不默认申请支付、权限或隐私能力，不改变实际 OAuth 授权。`openid` 和 `offline_access` 等协议 scopes 由预注册客户端及授权服务配置管理，不放入业务预设。这些值会公开打包，不能填写任何 token 或 client secret。更新需重新构建；运维负责与实际服务的 resource、issuer、scopes 和写开关保持一致。
+
+页面不获取远程元数据、不发起授权、不验证公网可用性、不推测授权期限，不实现 SSO、PAT 或健康监控；配置展示不证明当前账号有管理员权限。先应用 `20260923000001_mcp_connection_management.sql`，再更新 OAuth 服务，最后发布 Admin；共享/生产迁移须另行批准。
+
+运行 `bun scripts/admin-connections-smoke.ts`（需本地 Supabase 和运行中的 `bun run admin:dev`）可验证真实登录、本人隔离、已提交回执丢失后的原 ID 重试、新连接不受重试影响、降级后自助撤销及业务门禁。接入信息验证时，服务和脚本使用相同 `PUBLIC_MCP_CONNECTION`，未设置则验证空配置；可用 `ADMIN_URL` 指定其他本地端口。截图保存到 `/tmp/admin-connections*.png` 和 `/tmp/admin-onboarding*.png`；测试使用并清理合成账号与授权，不执行店铺业务写入。真实上游 token 家族清理另由 `tests/mcp-oidc-interaction.test.ts` 的 Node 场景验证。
 
 ## MVP 范围
 

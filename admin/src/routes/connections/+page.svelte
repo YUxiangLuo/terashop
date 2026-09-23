@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import * as publicEnv from "$env/static/public";
+  import { mcpOnboarding } from "$lib/mcp-onboarding";
   import { supabase, dateTime } from "$lib/api";
   import {
     connectionPage,
@@ -7,6 +9,9 @@
     type McpConnection,
   } from "$lib/mcp-connections";
 
+  const onboarding = mcpOnboarding(
+    (publicEnv as Record<string, string>).PUBLIC_MCP_CONNECTION,
+  );
   let items = $state<McpConnection[]>([]);
   let cursor = $state<string | null>(null);
   let busy = $state(false);
@@ -209,6 +214,46 @@
 </section>
 <section class="card">
   <h2>Connect an Agent</h2>
+  {#if onboarding}
+    <p class="notice">
+      Operator-provided build configuration, not a live health check. Verify
+      these values with your operator before connecting.
+    </p>
+    <label
+      >MCP server address<input readonly value={onboarding.resource} /></label
+    >
+    <label
+      >Expected authorization issuer<input
+        readonly
+        value={onboarding.issuer}
+      /></label
+    >
+    <p>
+      Configured business scopes: <code>{onboarding.scopes.join(" ")}</code>
+    </p>
+    {#each onboarding.presets as preset}
+      <label
+        >{preset.name}<input readonly value={preset.scopes.join(" ")} /></label
+      >
+    {/each}
+    <p class="muted">
+      Presets are suggestions for your OAuth client, not granted permissions.
+      Read only excludes mutations; routine operations permits changes but
+      excludes payment, access and privacy operations. Request sensitive scopes
+      only for an explicit need. Your client may not support scope selection.
+    </p>
+    <p class="muted">
+      Copy the server address into your client's remote MCP configuration. The
+      client must create its own OAuth/PKCE request. Check the issuer, account
+      and scopes on the consent page; this page does not start authorization or
+      provide credentials.
+    </p>
+  {:else}
+    <p class="muted">
+      Connection configuration is not published in this Admin build. Ask your
+      operator for the MCP address and registered client setup.
+    </p>
+  {/if}
   <p>
     Use the MCP HTTPS address supplied by your operator in a supported OAuth
     client. The client starts authorization; verify the account and requested
