@@ -261,6 +261,10 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonC
         assert.equal(result.status, 303, result.text);
         assert.equal(result.headers.get('location'), `${origin}/login/status`);
         assert.equal(JSON.parse((await call('/login/status')).text).status, 'authenticated');
+        const page = await call('/login/status', undefined, undefined, { accept: 'text/html' });
+        assert.equal(page.status, 200);
+        assert.match(page.text, /邮箱验证已完成/);
+        assert(!page.text.includes(entry[0]));
         return entry;
       },
     };
@@ -306,6 +310,18 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonC
       scopes: ['store:read'],
       offlineAccess: true,
     });
+    const page = await a.b.call(a.path, undefined, undefined, { accept: 'text/html,application/xhtml+xml' });
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-type')!, /^text\/html/);
+    assert.match(page.headers.get('content-security-policy')!, /script-src 'sha256-/);
+    assert.equal(page.headers.get('vary'), 'Accept');
+    assert.match(page.text, /store:read/);
+    assert(!page.text.includes('store:write'));
+    assert.equal(page.headers.get('set-cookie'), null); // Rendering does not bootstrap login.
+    const rejectedPage = await a.b.call(a.path, undefined, undefined, { accept: 'text/html', cookie: '' });
+    assert.equal(rejectedPage.status, 403);
+    assert.match(rejectedPage.text, /无法继续授权/);
+    assert(!rejectedPage.text.includes(resource));
     assert.equal(
       (await a.b.call(b.path, undefined, undefined, { cookie: a.b.cookieHeader(a.path) })).status,
       403,
