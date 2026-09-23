@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { request, createServer } from 'node:https';
 import { createServer as createHttpServer } from 'node:http';
+import { connect as connectTcp } from 'node:net';
+import { connect as connectTls } from 'node:tls';
 import { spawn } from 'node:child_process';
 import postgres from 'postgres';
 import { startOidcService } from '../../mcp/src/oidc-service';
@@ -101,6 +103,54 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     const jwks = (await get(port, '/jwks')).data;
     assert.equal(jwks.keys[0].kid, 'stable');
     assert.equal(jwks.keys[0].d, undefined);
+    // Incomplete TLS record / HTTP header, with traffic to exclude idle timeout.
+    await Promise.all(
+      ['handshake', 'headers'].map(
+        (phase) =>
+          new Promise<void>((resolve, reject) => {
+            const socket =
+              phase === 'handshake'
+                ? connectTcp({ host: '127.0.0.1', port })
+                : connectTls({ host: '127.0.0.1', port, servername: 'auth.example', ca: tls.cert });
+            let started = 0;
+            let response = '';
+            let interval: ReturnType<typeof setInterval> | undefined;
+            const timer = setTimeout(() => {
+              reject(new Error(`Slow ${phase} survived its deadline`));
+              socket.destroy();
+            }, 15000);
+            socket.once(phase === 'handshake' ? 'connect' : 'secureConnect', () => {
+              started = performance.now();
+              socket.write(
+                phase === 'handshake'
+                  ? Buffer.from([22, 3, 3, 0, 200])
+                  : 'GET /jwks HTTP/1.1\r\nHost: auth.example\r\nX-Slow: ',
+              );
+              interval = setInterval(() => socket.write(phase === 'handshake' ? Buffer.from([0]) : 'a'), 250);
+            });
+            socket.on('data', (part) => {
+              response += part.toString();
+            });
+            socket.on('error', (error: NodeJS.ErrnoException) => {
+              if (error.code !== 'ECONNRESET') reject(error);
+            });
+            socket.once('close', () => {
+              clearTimeout(timer);
+              clearInterval(interval);
+              try {
+                assert(started > 0);
+                assert(performance.now() - started >= 9000, `${phase} closed before timeout`);
+                if (phase === 'headers') assert.match(response, /^HTTP\/1\.1 408 /);
+                else assert.equal(response, '');
+                resolve();
+              } catch (error) {
+                reject(error);
+              }
+            });
+          }),
+      ),
+    );
+    assert.equal((await get(port, '/jwks')).status, 200);
     // Node sends 100 Continue and synchronously invokes the request handler.
     // Waiting for every continue proves admission without timing-based sleeps.
     const held = Array.from({ length: 32 }, () => {

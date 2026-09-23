@@ -129,30 +129,39 @@ export async function startOidcService(path: string) {
     );
     const handler = createOidcTlsHandler(provider, interaction);
     // Constructing HTTPS validates the certificate/private-key pair before any DB IO.
-    server = createServer({ ...c.tls, minVersion: 'TLSv1.2', handshakeTimeout: 10_000 }, (req, res) => {
-      if (closing || ownerClosed) {
-        res.writeHead(503, { 'Cache-Control': 'no-store', Connection: 'close' });
-        res.end();
-        return;
-      }
-      // Keep capacity until the handler (including failure cleanup) settles.
-      // Close rejected connections because their request bodies remain unread.
-      if (pending.size >= 32) {
-        res.writeHead(503, {
-          'Cache-Control': 'no-store',
-          'Retry-After': '1',
-          Connection: 'close',
-          'Content-Type': 'application/json',
+    server = createServer(
+      {
+        ...c.tls,
+        minVersion: 'TLSv1.2',
+        handshakeTimeout: 10_000,
+        // Node otherwise checks incomplete requests only every 30 seconds.
+        connectionsCheckingInterval: 1_000,
+      },
+      (req, res) => {
+        if (closing || ownerClosed) {
+          res.writeHead(503, { 'Cache-Control': 'no-store', Connection: 'close' });
+          res.end();
+          return;
+        }
+        // Keep capacity until the handler (including failure cleanup) settles.
+        // Close rejected connections because their request bodies remain unread.
+        if (pending.size >= 32) {
+          res.writeHead(503, {
+            'Cache-Control': 'no-store',
+            'Retry-After': '1',
+            Connection: 'close',
+            'Content-Type': 'application/json',
+          });
+          res.end(JSON.stringify({ error: 'service_busy' }));
+          return;
+        }
+        const operation = handler(req, res).catch(() => {
+          res.destroy();
         });
-        res.end(JSON.stringify({ error: 'service_busy' }));
-        return;
-      }
-      const operation = handler(req, res).catch(() => {
-        res.destroy();
-      });
-      pending.add(operation);
-      void operation.finally(() => pending.delete(operation));
-    });
+        pending.add(operation);
+        void operation.finally(() => pending.delete(operation));
+      },
+    );
     server.requestTimeout = 15_000;
     server.headersTimeout = 10_000;
     server.setTimeout(30_000, (socket) => socket.destroy());
