@@ -29,6 +29,12 @@ export function adminRecordLinks(origin: string | undefined, tool: string, data:
       route = 'customers';
       label = 'customer';
       break;
+    case 'get_admin_checkout_quote':
+    case 'list_admin_checkout_quotes':
+    case 'get_order_checkout_quote':
+      route = 'quotes';
+      label = 'checkout quote';
+      break;
     default:
       return [];
   }

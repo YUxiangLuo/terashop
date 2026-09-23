@@ -22,6 +22,8 @@
 
 已提供可选的 MCP → Admin 记录导航：受信宿主配置 Admin origin 后，`get_admin_product/order/customer` 及对应三个列表工具在成功、非空结果中追加标准 `resource_link`。目标仅为固定商品／订单／商业客户详情路由，使用已校验结果中的 UUID，不用客户 Auth UUID、订单号或自由文本拼接地址；不附带 token、邮箱、查询串或批准参数。文本 JSON 和 `structuredContent.data` 保持原合同，未配置则不返回链接，写入／错误／缺失结果不附加链接。客户端是否显示链接取决于其 MCP 支持，不提供 `resources/read` 或自动打开／抓取网页。用户仍须在 Admin 独立登录，链接不证明权限、批准、业务成功或可信调用来源。
 
+报价导航现覆盖 `get_admin_checkout_quote`、`list_admin_checkout_quotes`、`get_order_checkout_quote`，目标固定为 `/quotes/<报价 UUID>`；从订单读取报价时也不使用订单 UUID，不跳到取消页面，不把过期显示当成清理完成。沿用相同可选配置和数据合同。`get_inventory_transfer` 暂无导航：SPA `/inventory/transfer/[id]` 接收的是商品 UUID，用于发起调拨，不是调拨记录详情。不能仅凭相似路由名拼接链接。
+
 已提供可选的远程工具调用审计底座：先部署店铺迁移，再设置 `authorization.auditTools: true`（默认关闭）。宿主生成调用 UUID，数据库核对有效绑定并复制 user/grant/client 身份；不使用客户端声明的来源，不保存参数、业务结果或 token。登记失败不派发业务，完成回执不明不自动重试写操作。`pending/returned/rejected/unknown` 是宿主观察状态，不是原子业务审计或送达证明；不覆盖 stdio、非法输入和登记前拒绝，也不新增工具。Admin `/connections` 已通过本人只读 RPC 展示脱敏摘要，降级后仍可查看，不能跨用户查询、重放或删除记录。底表仍限制运维访问，没有自动清理；启用前须批准个人数据保留策略。完整语义与验证命令见 [运维说明](OPERATIONS.md#logs-incidents-and-public-acceptance)。
 
 后续按融合计划推进：其他关键业务契约对照、更多资源互通与可信来源审计；现有事件 `actor_id` 只能证明数据库识别的用户，不能区分 Admin 与 MCP。不得用 tool 参数、浏览器 header 或备注中的自报来源冒充可信审计。角色降级是否永久撤销、SSO/PAT、跨用户管理及逐笔审批分别定义，不能混入本批默认行为。公网与目标客户端验收仍需域名／证书和部署批准。

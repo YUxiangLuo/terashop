@@ -46,6 +46,42 @@ test('Admin links use fixed routes and validated UUIDs, never merchant text or A
   expect(adminRecordLinks(origin, 'get_admin_order', { id: '../login?token=x' })).toEqual([]);
 });
 
+test('quote navigation uses the quote UUID, never its linked order or a cancellation route', () => {
+  const quoteId = crypto.randomUUID(),
+    orderId = crypto.randomUUID(),
+    customerId = crypto.randomUUID();
+  const row = {
+    id: quoteId,
+    order_id: orderId,
+    customer_id: customerId,
+    customer_note: 'https://evil.example',
+    status: 'expired',
+  };
+  for (const name of ['get_admin_checkout_quote', 'get_order_checkout_quote']) {
+    const links = adminRecordLinks(origin, name, row);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({
+      uri: `${origin}/quotes/${quoteId}`,
+      name: `Open checkout quote ${quoteId} in Admin`,
+    });
+    expect(JSON.stringify(links)).not.toContain(orderId);
+    expect(JSON.stringify(links)).not.toContain(customerId);
+    expect(JSON.stringify(links)).not.toContain('evil');
+    expect(adminRecordLinks(undefined, name, row)).toEqual([]);
+    expect(adminRecordLinks(origin, name, null)).toEqual([]);
+  }
+  expect(
+    adminRecordLinks(origin, 'list_admin_checkout_quotes', {
+      items: [row, { ...row, id: customerId, order_id: null }],
+    }).map((x) => x.uri),
+  ).toEqual([`${origin}/quotes/${quoteId}`, `${origin}/quotes/${customerId}`]);
+  expect(adminRecordLinks(origin, 'list_admin_checkout_quotes', { items: [] })).toEqual([]);
+  expect(adminRecordLinks(origin, 'get_admin_checkout_quote', { ...row, id: '../cancel' })).toEqual([]);
+  expect(adminRecordLinks(origin, 'cancel_checkout_quote', row)).toEqual([]);
+  // This SPA route accepts a product UUID to start a transfer, not a transfer record UUID.
+  expect(adminRecordLinks(origin, 'get_inventory_transfer', { id: quoteId })).toEqual([]);
+});
+
 test('SDK receives optional resource links without changing data; invalid DTOs never publish links', async () => {
   const id = crypto.randomUUID();
   const page = {

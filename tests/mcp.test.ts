@@ -224,12 +224,35 @@ test('MCP 创建和修改保留四类子资源的负数排序位置', async () =
 test('MCP 零对价订单报价与取消回执保留独立事实和幂等结果', async () => {
   const product = await stockedProduct(admin, { onHand: 9, price: 0, cleanup });
   const order = await fixtureOrder(product, buyer, 2);
-  expect(await toolData(session.client, 'get_order_checkout_quote', { order_id: order.id })).toMatchObject({
+  const quote = await toolData<{ id: string }>(session.client, 'get_order_checkout_quote', {
+    order_id: order.id,
+  });
+  expect(quote).toMatchObject({
     order_id: order.id,
     currency: 'USD',
     total: 0,
     lines: [{ variant_id: product.variantId, quantity: 2, unit_price: 0 }],
   });
+  expect(quote.id).not.toBe(order.id);
+  for (const [name, args] of [
+    ['get_order_checkout_quote', { order_id: order.id }],
+    ['get_admin_checkout_quote', { quote_id: quote.id }],
+    ['list_admin_checkout_quotes', { customer_id_filter: buyer.customerId }],
+  ] as const) {
+    const direct = await checked(command(name, args, admin.token));
+    const result = await session.client.callTool({ name, arguments: args });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({ data: direct });
+    expect(result.content).toContainEqual({
+      type: 'resource_link',
+      uri: `https://admin.example/quotes/${quote.id}`,
+      name: `Open checkout quote ${quote.id} in Admin`,
+      mimeType: 'text/html',
+      description:
+        'Navigation only. Requires your separate Admin login and current permissions. Not an authorization or approval receipt.',
+    });
+    expect(JSON.stringify(result.content.filter((x) => x.type === 'resource_link'))).not.toContain(order.id);
+  }
   const args = {
     order_id: order.id,
     order_item_id: order.itemId,
