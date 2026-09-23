@@ -57,7 +57,13 @@ Realtime 前置迁移为 `20260923000005_admin_realtime.sql`。`bun run test:cur
 
 库存通知需 `20260923000007_admin_inventory_realtime.sql`。`bun scripts/admin-transfer-smoke.ts` 验证已提交但回执丢失的调整，在另一笔调整把余额变回原值后仍保留原请求；显式刷新不解锁、不改参数，原键重试不重复生效。还验证调拨草稿遇到通知后不被覆盖，Refresh balances 保留输入及未知调拨；保留原有停用仓库后的幂等重试回归。截图为 `/tmp/admin-stock-live-pending.png`、`/tmp/admin-transfer-*.png`。库存测试沿用不可变流水夹具约定：归档测试商品、停用测试仓库，保留历史审计，不删除业务流水。`tests/admin-realtime.test.ts` 使用真实报价预占／取消和调整验证通知与余额、回滚无通知、非管理员与降级后的订阅／读取拒绝；自然时间到期不保证产生通知。
 
-该验收覆盖一条代表性跨客户端业务链路，不等于全部 113 个工具的端到端覆盖，也不替代真实域名、SMTP、生产 Edge CORS、目标 Agent 产品客户端与上线运维验收。未设置 `MCP_ADMIN_URL` 时保持原有浏览器只读验收。
+其余页面与个人连接需继续应用 `20260923000008`～`00010`。运行 `bun run test:current tests/admin-domain-realtime.test.ts tests/mcp-connection-realtime.test.ts` 验证五个管理员域的真实订阅隔离、事务提交与最小载荷，以及本人连接创建／更新／删除、清理完成、跨用户拒绝和降级后的自助访问；凭据 envelope 更新不触发连接通知。来源表覆盖包含促销兑换记录、订单页渠道资金记录与商品规格选项，避免仅监听主表。
+
+`bun scripts/admin-page-changes-smoke.ts` 验证远端商品修改不会替换本地草稿，并通过 SPA 导航遍历订单、报价、客户、仓库、配送、税率、促销、Outbox、支付事件和对账列表，验证页面提示不会导航或重建业务页面。列表通知探针使用零行 UPDATE，不改动已有业务行；代表性真实业务写通知另由数据库集成测试验证。`bun scripts/admin-connections-smoke.ts` 还覆盖连接第一页自动更新、后续页保留、撤销确认集合不随新授权扩张、未知撤销原参数重试。`bun scripts/admin-returns-smoke.ts` 验证仓库配置变化通知收货页，同时保留所选仓库、实收数量和备注。截图为 `/tmp/admin-page-live-*.png` 和原有连接截图；桌面及手机均需检查。`tests/unit/admin-page-changes.test.ts` 锁定路由到业务域的覆盖，避免与已有页面订阅重复；`tests/unit/admin-realtime.test.ts` 验证同名频道退订未完成时的新挂载等待、等待中的页面卸载以及旧回调失效。
+
+完整本地验收建议串行运行 `bun run typecheck`、`bun run admin:check`、`bun run test:unit`、`bun run test:current`、`bun run db:lint`、`bun run admin:build`、上述浏览器回归及实际 OAuth/MCP/Admin 联动；不要为追求速度并发启动多套浏览器、OAuth 宿主或重建数据库。测试历史数据不是生产资料，仍按各脚本的不可变账本清理约定处理。生产部署清单和自动刷新／提示矩阵见 [Admin 实时通知说明](../admin/README.md#当前覆盖与上线边界)。
+
+这些验收不等于全部 113 个工具的端到端覆盖，也不替代真实域名、SMTP、生产 Edge CORS、目标 Agent 产品客户端、WebSocket 代理、生产负载与上线运维验收。未设置 `MCP_ADMIN_URL` 时保持原有浏览器只读验收。
 
 ## Storefront 验证与演示数据
 

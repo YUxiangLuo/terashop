@@ -181,6 +181,21 @@ try {
   );
   await browser("fill", "input[type=number]", "2");
   await browser("fill", "#receipt-note", "Received for inspection");
+  await wait("Live page notifications connected.");
+  await browser("wait", "250"); // Let initial subscription reconciliation coalesce.
+  await click("Dismiss change reminder");
+  await checked(
+    api(`/rest/v1/locations?id=eq.${receiptLocation}`, {
+      service: true,
+      method: "PATCH",
+      body: { name: "Updated returns inspection" },
+    }),
+  );
+  await wait("Data used by this page may have changed.");
+  await browser(
+    "eval",
+    `if(document.querySelector('#receipt-location').value!==${JSON.stringify(receiptLocation)} || document.querySelector('input[type=number]').value!=='2' || document.querySelector('#receipt-note').value!=='Received for inspection')throw Error('Warehouse notification replaced receipt draft')`,
+  );
   await browser(
     "eval",
     `(() => { const original = window.fetch; window.fetch = async (...args) => {

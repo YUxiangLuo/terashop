@@ -41,7 +41,7 @@ async function create(changes: Record<string, unknown> = {}) {
   const id = crypto.randomUUID();
   const result = await toolData<Location>(session.client, 'create_location', {
     location_id: id,
-    changes: { code: id, name: 'Warehouse', ...changes },
+    changes: { code: id, name: 'Warehouse', is_active: true, ...changes },
   });
   cleanup.defer(() => checked(api(`/rest/v1/locations?id=eq.${id}`, { service: true, method: 'DELETE' })));
   return result;

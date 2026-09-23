@@ -107,6 +107,7 @@ try {
     `document.querySelector('input[placeholder="No threshold"]').value === "0.00"`,
   );
   await browser("click", 'a[href^="/shipping?"]');
+  await browser("wait", 'input[placeholder="US"]');
   await wait(name);
   await fill("Destination country", "DE");
   await click("Apply filters");
@@ -163,6 +164,7 @@ try {
   if (saved.free_above !== null || saved.is_active || saved.price !== 9.87)
     throw Error("Clear/deactivation lost current price");
   await browser("click", 'a[href^="/shipping?"]');
+  await browser("wait", 'input[placeholder="US"]');
   await wait(name);
   await fill("Destination country", "DE");
   await browser("select", "select", "no");

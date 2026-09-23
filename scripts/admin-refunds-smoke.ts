@@ -25,7 +25,10 @@ async function browser(...args: string[]) {
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
-  if (code) throw Error(`Browser ${args[0]} failed: ${err || out}`);
+  if (code)
+    throw Error(
+      `Browser ${args[0]} ${args[0] === "wait" ? args.slice(1).join(" ") : ""} failed: ${err || out}`,
+    );
 }
 const click = (name: string) =>
   browser("find", "role", "button", "click", "--name", name, "--exact");
@@ -98,6 +101,14 @@ try {
   await browser("fill", "input[type=password]", password);
   await click("Sign in");
   await browser("wait", `a[href="/orders/${order.id}/refunds"]`);
+  await wait("Data used by this page may have changed.");
+  // Links render before the order read finishes; its navigation guard blocks
+  // leaving while busy, so wait for the actual ready state rather than the link.
+  await browser(
+    "wait",
+    "--fn",
+    'Array.from(document.querySelectorAll("button")).some(b => b.textContent.trim() === "Reload order" && !b.disabled)',
+  );
   await browser("click", `a[href="/orders/${order.id}/refunds"]`);
   await ready();
   await browser("fill", "#refund-amount", "7.251");
@@ -396,6 +407,11 @@ try {
   console.log(
     "Refund smoke passed: exact amount, lost-response replay once, unallocated record, stock/quantities unchanged, stale balance rejected, historical item details, snapshot fallback/recovery, linked transactions, hidden provider reference, PayPal read-only, mobile.",
   );
+} catch (error) {
+  await browser("screenshot", "/tmp/admin-refund-failure.png", "--full").catch(
+    () => {},
+  );
+  throw error;
 } finally {
   await browser("close").catch(() => {});
   for (const [table, id] of [

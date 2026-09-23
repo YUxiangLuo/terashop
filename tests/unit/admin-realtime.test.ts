@@ -2,6 +2,86 @@ import { expect, test } from 'bun:test';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { watchAdminChanges } from '../../admin/src/lib/realtime';
 
+test('same-topic remount waits for removal and abandoned mounts never subscribe', async () => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() });
+  Object.defineProperty(globalThis, 'document', {
+    configurable: true,
+    value: Object.assign(new EventTarget(), { visibilityState: 'visible' }),
+  });
+  const callbacks: (() => void)[] = [];
+  const removal = Promise.withResolvers<void>();
+  let created = 0,
+    removed = 0,
+    refreshes = 0;
+  const client = {
+    auth: {
+      getSession: async () => ({ data: { session: { user: { id: 'owner' }, access_token: 'token' } } }),
+    },
+    realtime: { setAuth: async () => {} },
+    channel(topic: string) {
+      expect(topic).toBe('admin:orders');
+      created++;
+      return {
+        on(_type: string, _filter: unknown, callback: () => void) {
+          callbacks.push(callback);
+          return this;
+        },
+        subscribe() {
+          return this;
+        },
+      };
+    },
+    removeChannel() {
+      removed++;
+      return removal.promise;
+    },
+  } as unknown as SupabaseClient;
+  const stops: (() => void)[] = [];
+  const mount = () => {
+    const stop = watchAdminChanges(
+      client,
+      'orders',
+      () => refreshes++,
+      () => {},
+    );
+    stops.push(stop);
+    return stop;
+  };
+  try {
+    const first = mount();
+    await Bun.sleep(0);
+    expect(created).toBe(1);
+    first();
+    first();
+    expect(removed).toBe(1);
+    const abandoned = mount();
+    await Bun.sleep(0);
+    expect(created).toBe(1);
+    abandoned();
+    mount();
+    await Bun.sleep(0);
+    expect(created).toBe(1);
+    removal.resolve();
+    await Bun.sleep(0);
+    expect(created).toBe(2);
+    callbacks[0]();
+    await Bun.sleep(250);
+    expect(refreshes).toBe(0);
+    callbacks[1]();
+    await Bun.sleep(250);
+    expect(refreshes).toBe(1);
+  } finally {
+    removal.resolve();
+    for (const stop of stops) stop();
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow);
+    else Reflect.deleteProperty(globalThis, 'window');
+    if (originalDocument) Object.defineProperty(globalThis, 'document', originalDocument);
+    else Reflect.deleteProperty(globalThis, 'document');
+  }
+});
+
 test('invalidation coalesces bursts, reconciles reconnect/focus, and cancels work on unmount', async () => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const originalDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');

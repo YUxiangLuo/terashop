@@ -227,7 +227,7 @@ test('MCP 取消 open/converted 报价仅释放预占，重复取消保留原原
         ),
       );
       cleanup.defer(() => checked(rpc('cancel_checkout_quote', { quote_id: q.id }, admin.token)));
-      const args = { quote_id: q.id, reason: converted ? '😀'.repeat(500) : '' };
+      const args = { quote_id: q.id, reason: converted ? '😀'.repeat(500) : 'Customer requested cancellation' };
       await expect(
         session.client.callTool({ name: 'cancel_checkout_quote', arguments: args }),
       ).rejects.toThrow('Tool cancel_checkout_quote not found');

@@ -447,5 +447,5 @@ describe('关键完整性：并发、库存和审计', () => {
         service: true, method: 'PATCH', body: { role: 'customer' },
       });
     }
-  });
+  }, 30000); // Includes demoting/restoring all pre-existing local fixture admins.
 });

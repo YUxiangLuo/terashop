@@ -165,6 +165,18 @@ try {
     `/tmp/admin-onboarding-${configured ? 'configured' : 'unset'}-mobile.png`,
   );
   await browser('set', 'viewport', '1440', '1000');
+  await click('Revoke Read-only Assistant');
+  await wait('Revoke 1 selected connection(s)?');
+  const realtimeGrant = await grant(owner, 'Realtime connection');
+  await wait('Connections may have changed.');
+  await browser(
+    'eval',
+    `(() => {const s=document.querySelector('[aria-label="Confirm revocation"]'); if(!s || !s.textContent.includes('Read-only Assistant') || s.textContent.includes('Realtime connection'))throw Error('Realtime changed selected snapshot');})()`,
+  );
+  await click('Cancel');
+  await wait('Realtime connection');
+  await db`delete from private.mcp_grants where id=${realtimeGrant.id}`;
+  await browser('wait', '500');
   await click('Revoke Desktop Agent');
   await wait('Revoke 1 selected connection(s)?');
   await browser('screenshot', '/tmp/admin-connections-confirm.png', '--full');
@@ -249,6 +261,20 @@ try {
     acrossPages.push((await grant(owner, `Snapshot Agent ${i + 1}`)).id);
   await browser('open', `${origin.origin}/connections`);
   await wait('Preview all eligible connections');
+  await click('Next connections');
+  await browser(
+    'eval',
+    `window.connectionPageIds=[...document.querySelector('section.card tbody').querySelectorAll('tr')].map(r=>r.querySelector('td .muted').textContent.trim());`,
+  );
+  const pageGrant = await grant(owner, 'Realtime pagination connection');
+  await wait('Connections may have changed.');
+  await browser(
+    'eval',
+    `(() => {const rows=[...document.querySelector('section.card tbody').querySelectorAll('tr')]; const ids=rows.map(r=>r.querySelector('td .muted').textContent.trim()); if(JSON.stringify(ids)!==JSON.stringify(connectionPageIds) || rows.some(r=>r.textContent.includes('Realtime pagination connection')))throw Error('Realtime replaced later page');})()`,
+  );
+  await db`delete from private.mcp_grants where id=${pageGrant.id}`;
+  await click('Refresh connections');
+  await wait('Snapshot Agent');
   await browser(
     'eval',
     `(() => {
@@ -318,7 +344,7 @@ try {
   if (remaining.length !== 1 || remaining[0].id !== afterPreview.id)
     throw Error('Cross-page revocation incomplete');
   console.log(
-    'PASS: login, isolation, exact retries, demoted self-revocation, business gate, cross-page snapshot and later grant exclusion',
+    'PASS: login, isolation, realtime refresh/snapshot/page preservation, exact retries, demoted self-revocation, business gate, cross-page snapshot and later grant exclusion',
   );
 } finally {
   try {
