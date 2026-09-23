@@ -48,6 +48,8 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 - 仓库更新携带读取时的 `revision`，切换默认还携带读取时的默认仓库 ID；冲突或未知结果锁定命令，要求显式重读，不自动换版本重试。默认仓库必须先切换才能停用，未保存或停用仓库不能设为默认。新建 UUID 留在 URL，刷新按同一 ID 核对创建结果。
 - `/shipping` 支持配送方式名称/状态/目的地国家筛选、UUID 游标分页及 URL 筛选保留。可创建（默认停用）、编辑名称/描述/预计时效、适用国家、USD 运费/免邮门槛、展示排序及启停。列表按 ID 分页，不冒充 position 排序或结账报价。国家留空表示全球适用；代码格式校验不代表承运商覆盖。
 - 配送金额最多两位小数，不自动舍入；免邮门槛留空为 `null`（无门槛），0 为始终免邮，按折后商品净额达到门槛（含等号）计算，不含运费和税。活跃配置保存需确认，使用原 `revision`；冲突或未知结果锁定保存，须显式重读，新建 URL 保留同一 UUID。修改可能使旧报价失效，不重写历史订单金额。不提供删除、承运商接入或面单购买。
+- `/taxes` 支持名称/状态/国家精确筛选、UUID 游标分页和 URL 筛选保留；国家筛选不混入 `*` 兜底。创建默认停用，可编辑名称、国家或兜底、税率、运费计税及启停。界面输入 0–100 的百分数，最多两位小数，精确转换为 API 的四位小数比例（7.25% → 0.0725），拒绝超精度，不静默舍入。
+- 税率保存携带原 `revision`，冲突或未知结果锁定保存并要求显式重读；创建 UUID 保留在 URL，刷新按原 ID 核对。涉及活跃规则需确认，不自动替换另一启用规则。国家规则优先于兜底且不叠加；启用的 0% 覆盖兜底，停用不等于免税。运费计税基于折后净运费；配置不重写历史订单。不提供删除、复合税、含税价格、州/邮编规则或合规判断。
 - `/orders` 按订单、支付和履约状态组合筛选，使用原始字符串订单号游标分页。详情展示历史价格、地址、客户备注和发货记录；内部备注按原值比较保存，支持单独清空。
 - 订单详情底部提供只读事件和支付记录面板，独立刷新不清除备注/发货表单。事件按 ID 倒序分页，类型精确匹配（保留大小写与空格），bigint ID/游标保持字符串，不展示载荷或用户资料。支付意图、退款请求、渠道资金变动分别按 UUID 分页，切换类型清空游标；金额原样保留十进制字符串与币种，不使用 USD 格式化或浮点转换。字段明细仅展示脱敏白名单。
 - 退款请求不等于退款成功；渠道资金变动不等于已对账；诊断标记不等于终态失败或允许重试，回库请求不证明已回库。此面板不包含手工资金账本或未关联订单的渠道资金，不发起支付、退款或渠道重试。事件顺序不是事务提交顺序，支付记录顺序不是时间顺序，均无跨页快照。
@@ -101,5 +103,7 @@ location / {
 订单活动回归：`bun run test:current tests/admin-order-operations.test.ts tests/admin-payment-operations.test.ts` 验证真实 RPC 权限、脱敏、金额和分页；随后在本地 Admin 运行时执行 `bun scripts/admin-order-activity-smoke.ts`（同样支持 `ADMIN_URL`）。浏览器使用临时管理员读取已有本地测试订单，再用浏览器内模拟响应验证超安全整数游标、精确类型筛选、类型切换、八位非 USD 金额、脱敏及失败重试；不写订单或支付数据，最后删除临时账号。截图为模拟活动记录，保存于 `/tmp/admin-order-*.png`。
 
 调拨回归：`bun test tests/unit/admin-transfers.test.ts tests/unit/admin-commands.test.ts` 与 `bun run test:current tests/inventory-transfer.test.ts`；本地 Admin 运行后执行 `bun scripts/admin-transfer-smoke.ts`（支持 `ADMIN_URL`）。浏览器只操作自建商品与仓库，真实调拨后故意丢失成功响应，刷新并在目标仓停用后重试，验证库存只移动一次且恰好一对守恒流水。结束归档商品、停用临时仓库并删除临时账号，保留不可变库存审计；截图写入 `/tmp/admin-transfer-*.png`。
+
+税率回归：`bun test tests/unit/admin-taxes.test.ts`、`bun run test:current tests/admin-tax-rates.test.ts`；本地 Admin 运行后执行 `bun scripts/admin-taxes-smoke.ts`（支持 `ADMIN_URL`）。浏览器验证百分数转换/精度拒绝、创建成功但响应丢失后的原 ID 恢复、运费计税、启停、旧版本锁定与重读、启用零税率、国家/兜底精确筛选及移动端布局。只创建并清理临时账号和税率，不替换现有启用规则；截图写入 `/tmp/admin-tax-*.png`。
 
 自动检查：`admin:check`、`admin:build`、`bun test tests/unit/admin-commands.test.ts tests/unit/admin-catalog.test.ts`；数据库回归可运行 `bun run test:current tests/product-edit.test.ts tests/admin-order-operations.test.ts tests/admin-retry.test.ts tests/storage-admin.test.ts`。浏览器验收应包含登录失败、普通客户拒绝、管理员恢复会话、创建/发布/归档、规格组合增删及原 ID 保留、图片上传和变体归属、分类跨搜索保留、库存搜索/流水分页、仓库/变体切换、备注冲突、部分发货、未知写结果刷新后原键重试，以及桌面/移动端与深链接刷新。整个回归套件会写入额外目录数据；恢复演示环境需重新 setup（会清空账号）并构建 Storefront。
