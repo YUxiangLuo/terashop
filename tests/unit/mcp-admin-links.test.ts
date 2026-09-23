@@ -82,6 +82,131 @@ test('quote navigation uses the quote UUID, never its linked order or a cancella
   expect(adminRecordLinks(origin, 'get_inventory_transfer', { id: quoteId })).toEqual([]);
 });
 
+test('configuration read tools link exact records while preserving SDK data and rejecting invalid results', async () => {
+  const id = crypto.randomUUID(),
+    parent = crypto.randomUUID();
+  const created_at = '2026-09-23T00:00:00Z';
+  const common = { id, name: 'https://evil.example?token=secret', is_active: false, created_at };
+  const cases = [
+    {
+      entity: 'category',
+      plural: 'categories',
+      route: 'categories',
+      row: {
+        ...common,
+        slug: 'private-slug',
+        description: '',
+        parent_id: parent,
+        image_url: null,
+        position: -1,
+        updated_at: created_at,
+      },
+    },
+    {
+      entity: 'location',
+      plural: 'locations',
+      route: 'locations',
+      row: {
+        ...common,
+        code: 'private-code',
+        address: { private: 'address' },
+        is_default: false,
+        revision: 2,
+      },
+    },
+    {
+      entity: 'shipping_method',
+      plural: 'shipping_methods',
+      route: 'shipping',
+      row: {
+        ...common,
+        revision: 3,
+        description: '',
+        countries: ['US'],
+        price: 3.75,
+        free_above: null,
+        estimated_days: '2–5',
+        position: 2,
+        updated_at: created_at,
+      },
+    },
+    {
+      entity: 'tax_rate',
+      plural: 'tax_rates',
+      route: 'taxes',
+      row: { ...common, revision: 4, country: 'US', rate: 0.13, include_shipping: false },
+    },
+    {
+      entity: 'promotion',
+      plural: 'promotions',
+      route: 'promotions',
+      row: {
+        ...common,
+        revision: 5,
+        code: 'private-discount',
+        type: 'order_fixed',
+        params: { amount: 5 },
+        priority: 2,
+        stackable: false,
+        apply_scope: 'all',
+        get_scope: 'same_as_apply',
+        usage_limit: null,
+        used_count: 0,
+        per_customer_limit: 1,
+        starts_at: null,
+        ends_at: null,
+        updated_at: created_at,
+      },
+    },
+  ];
+  let data: unknown;
+  const backend = new AdminBackend(
+    { url: 'https://db.example', anonKey: 'public', accessToken: 'secret' },
+    async (url) => {
+      if (url.endsWith('/auth/v1/user'))
+        return Response.json({ id, role: 'authenticated', is_anonymous: false });
+      if (url.endsWith('/is_admin')) return Response.json(true);
+      return Response.json(data);
+    },
+  );
+  const linked = await mcpSession(backend, false, undefined, origin);
+  const unlinked = await mcpSession(backend);
+  try {
+    for (const item of cases) {
+      for (const list of [false, true]) {
+        const name = list ? `list_admin_${item.plural}` : `get_admin_${item.entity}`;
+        const args = list ? {} : { [`${item.entity}_id`]: id };
+        data = list ? { items: [item.row], next_cursor: null } : item.row;
+        const result = await linked.client.callTool({ name, arguments: args });
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toEqual({ data });
+        expect(result.content).toHaveLength(2);
+        expect(result.content[1]).toMatchObject({
+          type: 'resource_link',
+          uri: `${origin}/${item.route}/${id}`,
+        });
+        expect(JSON.stringify(result.content[1])).not.toMatch(/evil|private|new=|targets|secret/);
+        expect(JSON.stringify(result.content[1])).not.toContain(parent);
+        expect((await unlinked.client.callTool({ name, arguments: args })).content).toHaveLength(1);
+        data = list ? { items: [], next_cursor: null } : null;
+        expect((await linked.client.callTool({ name, arguments: args })).content).toHaveLength(1);
+        data = list
+          ? { items: [{ ...item.row, id: 'invalid' }], next_cursor: null }
+          : { ...item.row, id: 'invalid' };
+        const invalid = await linked.client.callTool({ name, arguments: args });
+        expect(invalid.isError).toBe(true);
+        expect(invalid.content).toHaveLength(1);
+      }
+      for (const action of ['create', 'update'])
+        expect(adminRecordLinks(origin, `${action}_${item.entity}`, item.row)).toEqual([]);
+    }
+    expect(adminRecordLinks(origin, 'list_admin_promotion_targets', { items: [{ id }] })).toEqual([]);
+  } finally {
+    await linked.close();
+    await unlinked.close();
+  }
+});
+
 test('SDK receives optional resource links without changing data; invalid DTOs never publish links', async () => {
   const id = crypto.randomUUID();
   const page = {

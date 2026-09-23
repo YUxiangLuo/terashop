@@ -35,6 +35,31 @@ export function adminRecordLinks(origin: string | undefined, tool: string, data:
       route = 'quotes';
       label = 'checkout quote';
       break;
+    case 'get_admin_category':
+    case 'list_admin_categories':
+      route = 'categories';
+      label = 'category';
+      break;
+    case 'get_admin_location':
+    case 'list_admin_locations':
+      route = 'locations';
+      label = 'warehouse';
+      break;
+    case 'get_admin_shipping_method':
+    case 'list_admin_shipping_methods':
+      route = 'shipping';
+      label = 'shipping method';
+      break;
+    case 'get_admin_tax_rate':
+    case 'list_admin_tax_rates':
+      route = 'taxes';
+      label = 'tax rate';
+      break;
+    case 'get_admin_promotion':
+    case 'list_admin_promotions':
+      route = 'promotions';
+      label = 'promotion';
+      break;
     default:
       return [];
   }
