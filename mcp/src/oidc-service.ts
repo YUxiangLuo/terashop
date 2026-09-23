@@ -135,6 +135,18 @@ export async function startOidcService(path: string) {
         res.end();
         return;
       }
+      // Keep capacity until the handler (including failure cleanup) settles.
+      // Close rejected connections because their request bodies remain unread.
+      if (pending.size >= 32) {
+        res.writeHead(503, {
+          'Cache-Control': 'no-store',
+          'Retry-After': '1',
+          Connection: 'close',
+          'Content-Type': 'application/json',
+        });
+        res.end(JSON.stringify({ error: 'service_busy' }));
+        return;
+      }
       const operation = handler(req, res).catch(() => {
         res.destroy();
       });

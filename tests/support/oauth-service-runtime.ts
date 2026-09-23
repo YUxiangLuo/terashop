@@ -42,37 +42,39 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
   let service: Awaited<ReturnType<typeof startOidcService>> | undefined;
   const observer = postgres(databaseUrl, { max: 1, connect_timeout: 5 });
   const get = (port: number, route: string, host = 'auth.example') =>
-    new Promise<{ status: number; data: any }>((resolve, reject) => {
-      const req = request(
-        {
-          hostname: '127.0.0.1',
-          port,
-          path: route,
-          servername: 'auth.example',
-          ca: tls.cert,
-          headers: { host },
-          agent: false,
-        },
-        (res) => {
-          let body = '';
-          res.setEncoding('utf8');
-          res.on('data', (part) => {
-            body += part;
-          });
-          res.on('error', reject);
-          res.on('end', () => {
-            try {
-              resolve({ status: res.statusCode!, data: JSON.parse(body) });
-            } catch (error) {
-              reject(error);
-            }
-          });
-        },
-      );
-      req.on('error', reject);
-      req.setTimeout(5000, () => req.destroy(new Error('Fixture timeout')));
-      req.end();
-    });
+    new Promise<{ status: number; data: any; headers: import('node:http').IncomingHttpHeaders }>(
+      (resolve, reject) => {
+        const req = request(
+          {
+            hostname: '127.0.0.1',
+            port,
+            path: route,
+            servername: 'auth.example',
+            ca: tls.cert,
+            headers: { host },
+            agent: false,
+          },
+          (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (part) => {
+              body += part;
+            });
+            res.on('error', reject);
+            res.on('end', () => {
+              try {
+                resolve({ status: res.statusCode!, data: JSON.parse(body), headers: res.headers });
+              } catch (error) {
+                reject(error);
+              }
+            });
+          },
+        );
+        req.on('error', reject);
+        req.setTimeout(5000, () => req.destroy(new Error('Fixture timeout')));
+        req.end();
+      },
+    );
   try {
     const readonly = new URL(databaseUrl);
     readonly.username = 'oidc_readonly';
@@ -99,6 +101,61 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     const jwks = (await get(port, '/jwks')).data;
     assert.equal(jwks.keys[0].kid, 'stable');
     assert.equal(jwks.keys[0].d, undefined);
+    // Node sends 100 Continue and synchronously invokes the request handler.
+    // Waiting for every continue proves admission without timing-based sleeps.
+    const held = Array.from({ length: 32 }, () => {
+      const admitted = Promise.withResolvers<void>();
+      const completed = Promise.withResolvers<number>();
+      const body = 'grant_type=unsupported';
+      const req = request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/token',
+          method: 'POST',
+          servername: 'auth.example',
+          ca: tls.cert,
+          agent: false,
+          headers: {
+            host: 'auth.example',
+            Expect: '100-continue',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on('error', completed.reject);
+          res.on('end', () => completed.resolve(res.statusCode!));
+        },
+      );
+      req.once('continue', admitted.resolve);
+      req.on('error', (error) => {
+        admitted.reject(error);
+        completed.reject(error);
+      });
+      // Install rejection observers even if an assertion fails before awaiting.
+      void admitted.promise.catch(() => {});
+      void completed.promise.catch(() => {});
+      req.setTimeout(5000, () => req.destroy(new Error('Capacity fixture timeout')));
+      req.flushHeaders();
+      return { req, body, admitted: admitted.promise, completed: completed.promise };
+    });
+    try {
+      await Promise.all(held.map((item) => item.admitted));
+      const busy = await get(port, '/jwks');
+      assert.equal(busy.status, 503);
+      assert.deepEqual(busy.data, { error: 'service_busy' });
+      assert.equal(busy.headers['retry-after'], '1');
+      assert.equal(busy.headers['cache-control'], 'no-store');
+      assert.equal(busy.headers.connection, 'close');
+      held[0].req.end(held[0].body);
+      assert.equal(await held[0].completed, 400);
+      assert.equal((await get(port, '/jwks')).status, 200);
+    } finally {
+      for (const item of held) if (!item.req.writableEnded) item.req.end(item.body);
+      await Promise.allSettled(held.map((item) => item.completed));
+    }
     // Still port 0: rejection must be database ownership, not a TCP bind conflict.
     await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
     assert.equal((await get(port, '/jwks')).status, 200);
