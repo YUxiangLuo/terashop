@@ -15,6 +15,8 @@ export async function verifyOidcBrowser(input: {
   email: string;
   interruptedEmail: string;
   offlineEmail: string;
+  lostResponseEmail: string;
+  interruptApproval: (submit: () => Promise<void>, disconnect: () => Promise<void>) => Promise<void>;
 }) {
   const { node, origin, resource, redirect, email } = input;
   const session = `mcp-consent-${crypto.randomUUID()}`;
@@ -160,6 +162,35 @@ export async function verifyOidcBrowser(input: {
     assert.equal(callback, undefined, 'Restoring connectivity must not approve');
     if (process.env.MCP_BROWSER_OFFLINE_SCREENSHOT)
       await browser('screenshot', '--full', process.env.MCP_BROWSER_OFFLINE_SCREENSHOT);
+    await login(input.lostResponseEmail);
+    // Add only a cancellation signal to the actual approval Fetch. Chromium's
+    // offline toggle need not abort a request already in flight.
+    await browser(
+      'eval',
+      `(() => {
+      const original = window.fetch.bind(window);
+      window.approvalAbort = new AbortController();
+      window.approvalRequests = 0;
+      window.fetch = (url, init) => {
+        if (typeof url === 'string' && url.endsWith('/approve')) {
+          window.approvalRequests++;
+          return original(url, {...init, signal: window.approvalAbort.signal});
+        }
+        return original(url, init);
+      };
+    })()`,
+    );
+    await input.interruptApproval(
+      () => click('#approve'),
+      async () => {
+        await browser('eval', 'window.approvalAbort.abort()');
+      },
+    );
+    await browser('wait', '2200');
+    await assertStopped();
+    assert.equal(await browser('eval', 'window.approvalRequests'), '1');
+    if (process.env.MCP_BROWSER_LOST_RESPONSE_SCREENSHOT)
+      await browser('screenshot', '--full', process.env.MCP_BROWSER_LOST_RESPONSE_SCREENSHOT);
     // A new authorization and a fresh real email login must still work after
     // losing the page's approval proof; do not reuse the old transaction.
     await login(email);

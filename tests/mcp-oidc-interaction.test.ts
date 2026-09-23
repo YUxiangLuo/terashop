@@ -1044,14 +1044,77 @@ for (const runtime of ['bun', 'node'] as const)
           const offline = await signup();
           users.push(offline);
           await makeAdmin(offline.userId);
+          const lostResponse = await signup();
+          users.push(lostResponse);
+          await makeAdmin(lostResponse.userId);
           await verifyOidcBrowser({
             node, origin, resource, redirect: browserRedirect,
             email: user.email, interruptedEmail: interrupted.email, offlineEmail: offline.email,
+            lostResponseEmail: lostResponse.email,
+            interruptApproval: async (submit, disconnect) => {
+              const blocker = postgres(process.env.DB_URL!, { max: 1 });
+              try {
+                await blocker`begin`;
+                await blocker`set local statement_timeout='30s'`;
+                await blocker`lock table private.mcp_credentials in access exclusive mode`;
+                const [owner] = await blocker`select pg_backend_pid() as pid`;
+                await submit();
+                const deadline = Date.now() + 5000;
+                for (;;) {
+                  const [waiter] = await db`select exists(select 1 from pg_stat_activity
+                    where ${owner.pid}::integer=any(pg_blocking_pids(pid))) as blocked`;
+                  if (waiter.blocked) break;
+                  if (Date.now() >= deadline) throw new Error('Browser approval did not reach credential barrier');
+                  await Bun.sleep(10);
+                }
+                const [before] = await db`select state from private.mcp_grants
+                  where binding->>'project'=${project} and user_id=${lostResponse.userId}::uuid`;
+                expect(before.state).toBe('active');
+                await disconnect();
+              } finally {
+                await blocker`rollback`;
+                await blocker.end();
+              }
+              const deadline = Date.now() + 10_000;
+              for (;;) {
+                const [grant] = await db`select id,state,binding from private.mcp_grants
+                  where binding->>'project'=${project} and user_id=${lostResponse.userId}::uuid`;
+                const [attempt] = await store!`select state from oidc.approval_attempts
+                  where binding->>'subject'=${lostResponse.userId}`;
+                if (attempt?.state === 'revoked' || attempt?.state === 'completed') {
+                  const credentials = await db`select revision from private.mcp_credentials where grant_id=${grant.id}`;
+                  const upstream = await new (createOidcAdapter(store!))('Grant').find(grant.binding.session_id);
+                  if (attempt.state === 'revoked') {
+                    expect(grant.state).toBe('revoked');
+                    expect(credentials).toHaveLength(0);
+                    expect(upstream).toBeUndefined();
+                  } else {
+                    // A successful server send is not proof the browser received
+                    // it. This legitimate outcome must not be called rollback.
+                    expect(grant.state).toBe('active');
+                    expect(credentials).toHaveLength(1);
+                    expect(Number(credentials[0].revision)).toBe(1);
+                    expect(upstream?.accountId).toBe(lostResponse.userId);
+                  }
+                  expect(await store!`select 1 from oidc.artifacts
+                    where grant_id=${grant.binding.session_id} and not destroyed
+                    and model in ('AuthorizationCode','AccessToken','RefreshToken')`).toHaveLength(0);
+                  console.log(`Browser lost-response terminal journal: ${attempt.state}`);
+                  break;
+                }
+                if (Date.now() >= deadline) throw new Error(
+                  `Disconnected approval terminal state: grant=${grant?.state}, journal=${attempt?.state}`,
+                );
+                await Bun.sleep(20);
+              }
+            },
           });
           expect(await db`select id from private.mcp_grants
             where binding->>'project'=${project} and user_id=${interrupted.userId}::uuid`).toHaveLength(0);
           expect(await db`select id from private.mcp_grants
             where binding->>'project'=${project} and user_id=${offline.userId}::uuid`).toHaveLength(0);
+          expect(await db`select id from private.mcp_grants
+            where binding->>'project'=${project} and user_id=${lostResponse.userId}::uuid`).toHaveLength(1);
           const approvedGrants = await db`select state from private.mcp_grants
             where binding->>'project'=${project} and user_id=${user.userId}::uuid`;
           expect(approvedGrants).toHaveLength(1);
