@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { request, createServer } from 'node:https';
 import { createServer as createHttpServer } from 'node:http';
+import { connect as connectTcp } from 'node:net';
+import { connect as connectTls } from 'node:tls';
 import { spawn } from 'node:child_process';
 import postgres from 'postgres';
 import { startOidcService } from '../../mcp/src/oidc-service';
@@ -15,15 +17,17 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
   const directory = await mkdtemp(join(tmpdir(), 'tera-service-'));
   const path = join(directory, 'config.json');
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+  const originalCookieKey = randomBytes(32).toString('base64url');
+  const originalIntrospectionSecret = randomBytes(32).toString('base64url');
   const config = {
     provider: {
       issuer: 'https://auth.example',
       resource: 'https://shop.example/mcp',
       scopes: ['store:read'],
       signingKey: { ...privateKey.export({ format: 'jwk' }), kid: 'stable', alg: 'ES256', use: 'sig' },
-      cookieKeys: [randomBytes(32).toString('base64url')],
+      cookieKeys: [originalCookieKey],
       clients: [{ id: 'agent', applicationType: 'web', redirectUris: ['https://client.example/cb'] }],
-      introspectionClient: { id: 'resource', secret: randomBytes(32).toString('base64url') },
+      introspectionClient: { id: 'resource', secret: originalIntrospectionSecret },
     },
     databaseUrl,
     downstream: {
@@ -42,37 +46,70 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
   let service: Awaited<ReturnType<typeof startOidcService>> | undefined;
   const observer = postgres(databaseUrl, { max: 1, connect_timeout: 5 });
   const get = (port: number, route: string, host = 'auth.example') =>
-    new Promise<{ status: number; data: any }>((resolve, reject) => {
-      const req = request(
-        {
-          hostname: '127.0.0.1',
-          port,
-          path: route,
-          servername: 'auth.example',
-          ca: tls.cert,
-          headers: { host },
-          agent: false,
-        },
-        (res) => {
-          let body = '';
-          res.setEncoding('utf8');
-          res.on('data', (part) => {
-            body += part;
-          });
-          res.on('error', reject);
-          res.on('end', () => {
-            try {
-              resolve({ status: res.statusCode!, data: JSON.parse(body) });
-            } catch (error) {
-              reject(error);
-            }
-          });
-        },
-      );
-      req.on('error', reject);
-      req.setTimeout(5000, () => req.destroy(new Error('Fixture timeout')));
-      req.end();
-    });
+    new Promise<{ status: number; data: any; headers: import('node:http').IncomingHttpHeaders }>(
+      (resolve, reject) => {
+        const req = request(
+          {
+            hostname: '127.0.0.1',
+            port,
+            path: route,
+            servername: 'auth.example',
+            ca: tls.cert,
+            headers: { host },
+            agent: false,
+          },
+          (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (part) => {
+              body += part;
+            });
+            res.on('error', reject);
+            res.on('end', () => {
+              try {
+                resolve({ status: res.statusCode!, data: JSON.parse(body), headers: res.headers });
+              } catch (error) {
+                reject(error);
+              }
+            });
+          },
+        );
+        req.on('error', reject);
+        req.setTimeout(5000, () => req.destroy(new Error('Fixture timeout')));
+        req.end();
+      },
+    );
+  const call = (
+    port: number,
+    route: string,
+    options: { method?: string; body?: string; headers?: Record<string, string> } = {},
+  ) =>
+    new Promise<{ status: number; body: string; headers: import('node:http').IncomingHttpHeaders }>(
+      (resolve, reject) => {
+        const req = request(
+          {
+            hostname: '127.0.0.1',
+            port,
+            path: route,
+            method: options.method,
+            servername: 'auth.example',
+            ca: tls.cert,
+            headers: { host: 'auth.example', ...options.headers },
+            agent: false,
+          },
+          (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (part) => (body += part));
+            res.on('error', reject);
+            res.on('end', () => resolve({ status: res.statusCode!, body, headers: res.headers }));
+          },
+        );
+        req.on('error', reject);
+        req.setTimeout(5000, () => req.destroy(new Error('Fixture timeout')));
+        req.end(options.body);
+      },
+    );
   try {
     const readonly = new URL(databaseUrl);
     readonly.username = 'oidc_readonly';
@@ -87,6 +124,26 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
       await save(invalid);
       await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
     }
+    const canary = `cli-canary-${randomBytes(12).toString('hex')}`;
+    await save({
+      ...config,
+      activeCredentialKey: 'missing',
+      provider: {
+        ...config.provider,
+        introspectionClient: { ...config.provider.introspectionClient, secret: canary },
+      },
+    });
+    const failedCli = spawn(process.execPath, ['/check/auth.mjs', path], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let failedStdout = '',
+      failedStderr = '';
+    failedCli.stdout.on('data', (part) => (failedStdout += part));
+    failedCli.stderr.on('data', (part) => (failedStderr += part));
+    assert.equal(await new Promise<number | null>((resolve) => failedCli.once('exit', resolve)), 1);
+    assert.equal(failedStdout, '');
+    assert.equal(failedStderr, 'OIDC_SERVICE_START_FAILED\n');
+    assert.equal(`${failedStdout}${failedStderr}`.includes(canary), false);
     await save(config);
     service = await startOidcService(path);
     assert(service.address && typeof service.address !== 'string');
@@ -96,9 +153,182 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     assert.equal(metadata.data.issuer, config.provider.issuer);
     assert.equal(metadata.data.token_endpoint, 'https://auth.example/token');
     assert.equal((await get(port, '/.well-known/openid-configuration', 'evil.example')).status, 403);
-    const jwks = (await get(port, '/jwks')).data;
+    let jwks = (await get(port, '/jwks')).data;
     assert.equal(jwks.keys[0].kid, 'stable');
     assert.equal(jwks.keys[0].d, undefined);
+    const params = new URLSearchParams({
+      client_id: 'agent',
+      redirect_uri: 'https://client.example/cb',
+      response_type: 'code',
+      scope: 'openid offline_access store:read',
+      resource: config.provider.resource,
+      state: 'rotation',
+      prompt: 'consent',
+      code_challenge_method: 'S256',
+      code_challenge: createHash('sha256').update(randomBytes(32).toString('base64url')).digest('base64url'),
+    });
+    const authorization = await call(port, `/auth?${params}`);
+    assert.equal(authorization.status, 303);
+    const interactionPath = new URL(authorization.headers.location!, config.provider.issuer).pathname;
+    assert(interactionPath.startsWith('/interaction/'));
+    const oldCookies = authorization.headers['set-cookie']!.map((value) => value.split(';')[0]).join('; ');
+    assert(oldCookies);
+    assert.equal((await call(port, interactionPath, { headers: { cookie: oldCookies } })).status, 200);
+    // Offline rotation is picked up only by a new service process. Exercise the
+    // real provider introspection endpoint rather than replacing provider I/O.
+    await service.close();
+    service = undefined;
+    const { privateKey: nextPrivateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+    const nextCookieKey = randomBytes(32).toString('base64url');
+    const nextIntrospectionSecret = randomBytes(32).toString('base64url');
+    config.provider.signingKey = {
+      ...nextPrivateKey.export({ format: 'jwk' }),
+      kid: 'rotated',
+      alg: 'ES256',
+      use: 'sig',
+    } as typeof config.provider.signingKey;
+    config.provider.cookieKeys = [nextCookieKey, originalCookieKey];
+    config.provider.introspectionClient.secret = nextIntrospectionSecret;
+    config.listen.port = port;
+    await save(config);
+    service = await startOidcService(path);
+    const rotatedMetadata = await get(port, '/.well-known/openid-configuration');
+    assert.equal(rotatedMetadata.data.issuer, config.provider.issuer);
+    jwks = (await get(port, '/jwks')).data;
+    assert.equal(jwks.keys.length, 1);
+    assert.equal(jwks.keys[0].kid, 'rotated');
+    assert.equal(jwks.keys[0].d, undefined);
+    assert.equal((await call(port, interactionPath, { headers: { cookie: oldCookies } })).status, 200);
+    const introspect = async (secret: string) => {
+      const body = new URLSearchParams({
+        token: 'unknown-rotation-token',
+        token_type_hint: 'access_token',
+        client_id: 'resource',
+        client_secret: secret,
+      }).toString();
+      const response = await call(port, '/token/introspection', {
+        method: 'POST',
+        body,
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'content-length': String(Buffer.byteLength(body)),
+        },
+      });
+      return { status: response.status, data: JSON.parse(response.body) };
+    };
+    assert.equal((await introspect(originalIntrospectionSecret)).status, 401);
+    assert.deepEqual(await introspect(nextIntrospectionSecret), { status: 200, data: { active: false } });
+
+    await service.close();
+    service = undefined;
+    config.provider.cookieKeys = [nextCookieKey];
+    await save(config);
+    service = await startOidcService(path);
+    assert.equal((await get(port, '/.well-known/openid-configuration')).status, 200);
+    assert.equal((await call(port, interactionPath, { headers: { cookie: oldCookies } })).status, 403);
+    // Incomplete TLS record / HTTP header, with traffic to exclude idle timeout.
+    await Promise.all(
+      ['handshake', 'headers'].map(
+        (phase) =>
+          new Promise<void>((resolve, reject) => {
+            const socket =
+              phase === 'handshake'
+                ? connectTcp({ host: '127.0.0.1', port })
+                : connectTls({ host: '127.0.0.1', port, servername: 'auth.example', ca: tls.cert });
+            let started = 0;
+            let response = '';
+            let interval: ReturnType<typeof setInterval> | undefined;
+            const timer = setTimeout(() => {
+              reject(new Error(`Slow ${phase} survived its deadline`));
+              socket.destroy();
+            }, 15000);
+            socket.once(phase === 'handshake' ? 'connect' : 'secureConnect', () => {
+              started = performance.now();
+              socket.write(
+                phase === 'handshake'
+                  ? Buffer.from([22, 3, 3, 0, 200])
+                  : 'GET /jwks HTTP/1.1\r\nHost: auth.example\r\nX-Slow: ',
+              );
+              interval = setInterval(() => socket.write(phase === 'handshake' ? Buffer.from([0]) : 'a'), 250);
+            });
+            socket.on('data', (part) => {
+              response += part.toString();
+            });
+            socket.on('error', (error: NodeJS.ErrnoException) => {
+              if (error.code !== 'ECONNRESET') reject(error);
+            });
+            socket.once('close', () => {
+              clearTimeout(timer);
+              clearInterval(interval);
+              try {
+                assert(started > 0);
+                assert(performance.now() - started >= 9000, `${phase} closed before timeout`);
+                if (phase === 'headers') assert.match(response, /^HTTP\/1\.1 408 /);
+                else assert.equal(response, '');
+                resolve();
+              } catch (error) {
+                reject(error);
+              }
+            });
+          }),
+      ),
+    );
+    assert.equal((await get(port, '/jwks')).status, 200);
+    // Node sends 100 Continue and synchronously invokes the request handler.
+    // Waiting for every continue proves admission without timing-based sleeps.
+    const held = Array.from({ length: 32 }, () => {
+      const admitted = Promise.withResolvers<void>();
+      const completed = Promise.withResolvers<number>();
+      const body = 'grant_type=unsupported';
+      const req = request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/token',
+          method: 'POST',
+          servername: 'auth.example',
+          ca: tls.cert,
+          agent: false,
+          headers: {
+            host: 'auth.example',
+            Expect: '100-continue',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          res.resume();
+          res.on('error', completed.reject);
+          res.on('end', () => completed.resolve(res.statusCode!));
+        },
+      );
+      req.once('continue', admitted.resolve);
+      req.on('error', (error) => {
+        admitted.reject(error);
+        completed.reject(error);
+      });
+      // Install rejection observers even if an assertion fails before awaiting.
+      void admitted.promise.catch(() => {});
+      void completed.promise.catch(() => {});
+      req.setTimeout(5000, () => req.destroy(new Error('Capacity fixture timeout')));
+      req.flushHeaders();
+      return { req, body, admitted: admitted.promise, completed: completed.promise };
+    });
+    try {
+      await Promise.all(held.map((item) => item.admitted));
+      const busy = await get(port, '/jwks');
+      assert.equal(busy.status, 503);
+      assert.deepEqual(busy.data, { error: 'service_busy' });
+      assert.equal(busy.headers['retry-after'], '1');
+      assert.equal(busy.headers['cache-control'], 'no-store');
+      assert.equal(busy.headers.connection, 'close');
+      held[0].req.end(held[0].body);
+      assert.equal(await held[0].completed, 400);
+      assert.equal((await get(port, '/jwks')).status, 200);
+    } finally {
+      for (const item of held) if (!item.req.writableEnded) item.req.end(item.body);
+      await Promise.allSettled(held.map((item) => item.completed));
+    }
     // Still port 0: rejection must be database ownership, not a TCP bind conflict.
     await assert.rejects(startOidcService(path), /^Error: OIDC_SERVICE_START_FAILED$/);
     assert.equal((await get(port, '/jwks')).status, 200);
@@ -346,6 +576,20 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     }
     service = await startOidcService(path); // Lost owner never reacquires; a new process may start.
     assert.equal((await get(port, '/jwks')).status, 200);
+    let limited = false;
+    for (let i = 0; i < 200; i++) {
+      const response = await get(port, '/jwks');
+      if (response.status === 429) {
+        assert.deepEqual(response.data, { error: 'rate_limited' });
+        assert.equal(response.headers['retry-after'], '1');
+        assert.equal(response.headers['cache-control'], 'no-store');
+        assert.equal(response.headers.connection, 'close');
+        limited = true;
+        break;
+      }
+      assert.equal(response.status, 200);
+    }
+    assert(limited, 'TLS peer budget was never enforced');
   } finally {
     await service?.close();
     await observer.end({ timeout: 5 });

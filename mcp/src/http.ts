@@ -10,6 +10,7 @@ export function createAdminHttpHandler(
   config: AuthorizationConfig & { anonKey: string; allowWrites?: boolean },
   cipher: Awaited<ReturnType<typeof createCredentialCipher>>,
   request: (url: string, init: RequestInit) => Promise<Response> = fetch,
+  admit?: (verifiedUserId: string) => number,
 ) {
   const c = { ...config, scopes: [...config.scopes], tokenProfile: 'oidc-provider' as const };
   const resource = new URL(c.resource);
@@ -54,6 +55,8 @@ export function createAdminHttpHandler(
     } catch {
       return unauthorized();
     }
+    const retry = admit?.(identity.expectedUserId) ?? 0;
+    if (retry) return reply(429, 'rate_limited', { 'Retry-After': String(retry) });
     if (req.method !== 'POST') return reply(405, 'method_not_allowed', { Allow: 'POST' });
     if (req.headers.has('mcp-session-id')) return reply(400, 'sessions_not_supported');
     // Bound the body even when Content-Length is missing or false.

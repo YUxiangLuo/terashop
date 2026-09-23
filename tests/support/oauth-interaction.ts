@@ -8,7 +8,7 @@ import { createOidcProvider } from '../../mcp/src/oidc-provider';
 
 // Real provider HTTP/cookies/code/token, synthetic Supabase HTTP responses.
 // The loopback fixture impersonates a trusted TLS proxy; NOT a deployment entrypoint.
-export async function verifyOAuthInteraction(adapter?: AdapterConstructor) {
+export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonCompletion = false) {
   const origin = 'https://auth.example';
   const resource = 'https://shop.example/mcp';
   const redirect = 'https://client.example/callback';
@@ -226,6 +226,9 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor) {
             ? { origin, 'x-csrf-token': csrf, 'x-tera-login': 'start', 'x-tera-consent': action }
             : {}),
           ...(body ? { 'content-type': 'application/json' } : {}),
+          ...(jsonCompletion && (action === 'approve' || action === 'deny')
+            ? { accept: 'application/json' }
+            : {}),
           ...overrides,
         },
       });
@@ -258,6 +261,10 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor) {
         assert.equal(result.status, 303, result.text);
         assert.equal(result.headers.get('location'), `${origin}/login/status`);
         assert.equal(JSON.parse((await call('/login/status')).text).status, 'authenticated');
+        const page = await call('/login/status', undefined, undefined, { accept: 'text/html' });
+        assert.equal(page.status, 200);
+        assert.match(page.text, /邮箱验证已完成/);
+        assert(!page.text.includes(entry[0]));
         return entry;
       },
     };
@@ -303,6 +310,18 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor) {
       scopes: ['store:read'],
       offlineAccess: true,
     });
+    const page = await a.b.call(a.path, undefined, undefined, { accept: 'text/html,application/xhtml+xml' });
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get('content-type')!, /^text\/html/);
+    assert.match(page.headers.get('content-security-policy')!, /script-src 'sha256-/);
+    assert.equal(page.headers.get('vary'), 'Accept');
+    assert.match(page.text, /store:read/);
+    assert(!page.text.includes('store:write'));
+    assert.equal(page.headers.get('set-cookie'), null); // Rendering does not bootstrap login.
+    const rejectedPage = await a.b.call(a.path, undefined, undefined, { accept: 'text/html', cookie: '' });
+    assert.equal(rejectedPage.status, 403);
+    assert.match(rejectedPage.text, /无法继续授权/);
+    assert(!rejectedPage.text.includes(resource));
     assert.equal(
       (await a.b.call(b.path, undefined, undefined, { cookie: a.b.cookieHeader(a.path) })).status,
       403,
@@ -357,9 +376,20 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor) {
       result = await pending;
       onWrite = async () => {};
     }
-    assert.equal(result.status, 303, result.text);
+    assert.equal(result.status, jsonCompletion ? 200 : 303, result.text);
+    assert.equal(result.headers.get('vary'), 'Accept');
+    assert.equal(result.headers.get('cache-control'), 'no-store');
+    const completionLocation = jsonCompletion
+      ? JSON.parse(result.text).redirectTo
+      : result.headers.get('location')!;
+    if (jsonCompletion) {
+      assert.deepEqual(Object.keys(JSON.parse(result.text)), ['redirectTo']);
+      assert.equal(result.headers.get('location'), null);
+      assert.match(result.headers.get('content-type')!, /^application\/json/);
+      assert.equal(new URL(completionLocation, origin).origin, origin);
+    }
     assert.equal(completions, 1);
-    const authorization = await resume(a.b, result.headers.get('location')!);
+    const authorization = await resume(a.b, completionLocation);
     assert(!authorization.has('error'), authorization.toString());
     const token = await exchange(`${endpoint}/token`, {
       method: 'POST',
@@ -399,8 +429,17 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor) {
     );
     assert.equal(saved.state, 'active');
     const denied = await b.b.call(`${b.path}/cancel`, 'deny');
-    assert.equal(denied.status, 303, denied.text);
-    assert.equal((await resume(b.b, denied.headers.get('location')!)).get('error'), 'access_denied');
+    assert.equal(denied.status, jsonCompletion ? 200 : 303, denied.text);
+    assert.equal(denied.headers.get('vary'), 'Accept');
+    const deniedLocation = jsonCompletion
+      ? JSON.parse(denied.text).redirectTo
+      : denied.headers.get('location')!;
+    if (jsonCompletion) {
+      assert.deepEqual(Object.keys(JSON.parse(denied.text)), ['redirectTo']);
+      assert.equal(denied.headers.get('location'), null);
+      assert.match(denied.headers.get('set-cookie')!, /Max-Age=0/);
+    }
+    assert.equal((await resume(b.b, deniedLocation)).get('error'), 'access_denied');
     assert.equal(grants.size, 1);
     const changed = await begin();
     await changed.b.start(changed.path);

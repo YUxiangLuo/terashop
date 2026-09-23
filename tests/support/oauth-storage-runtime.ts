@@ -9,6 +9,7 @@ import { createOidcAdapter } from '../../mcp/src/oidc-adapter';
 import { verifyOAuthProvider } from './oauth-provider-compat';
 import { verifyOAuthInteraction } from './oauth-interaction';
 import { verifyOidcService } from './oauth-service-runtime';
+import { verifyOidcMaintenance } from './oauth-maintenance-runtime';
 import { createOidcApprovalJournal } from '../../mcp/src/oidc-journal';
 import { journalFixture, verifyApprovalJournal } from './oauth-journal';
 
@@ -74,6 +75,8 @@ try {
     console.log('PASS: Node LTS PostgreSQL protocol and barrier-controlled HTTP code/refresh races');
     await verifyOAuthInteraction(Adapter);
     console.log('PASS: Node LTS PostgreSQL interaction binding, consent and completion cleanup');
+    await verifyOAuthInteraction(Adapter, true);
+    console.log('PASS: Node LTS PostgreSQL JSON consent completion and explicit resume');
     const local = new URL(url);
     local.hostname = '127.0.0.1'; // Node shares only this disposable database's network namespace.
     await verifyOidcService(local.href, {
@@ -83,6 +86,8 @@ try {
     console.log(
       'PASS: direct TLS service startup, private configuration, failure cleanup, CLI restart and SIGTERM',
     );
+    await verifyOidcMaintenance(local.href);
+    console.log('PASS: maintenance ownership loss rolls back on the lock-owning connection');
   }
 } finally {
   await db.end({ timeout: 5 });

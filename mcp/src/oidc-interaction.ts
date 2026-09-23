@@ -5,6 +5,7 @@ import { createLoginHttpHandler } from './login-http';
 import { createOidcApproval } from './oidc-approval';
 import type { AdminScope } from './permissions';
 import type { createOidcApprovalJournal } from './oidc-journal';
+import { consentPage, consentErrorPage, loginStatusPage } from './consent-page';
 
 type Config = Omit<Parameters<typeof createOidcApproval>[1], 'clientId' | 'scopes'> & {
   publicOrigin: string;
@@ -73,6 +74,15 @@ export function createOidcInteractionHandler(
   function json(body: unknown, status = 200) {
     return Response.json(body, { status });
   }
+  function completion(req: Request, location: string, headers = new Headers()) {
+    headers.set('Vary', 'Accept');
+    // Browser fetch must receive a result before deliberately navigating to
+    // the provider resume URL; do not make it follow the client's redirect.
+    if (req.headers.get('accept') === 'application/json')
+      return Response.json({ redirectTo: location }, { headers });
+    headers.set('Location', location);
+    return new Response(null, { status: 303, headers });
+  }
   async function send(res: ServerResponse, response: Response) {
     const body = await response.text();
     // end() may silently succeed after disconnect. Approval must instead enter
@@ -85,13 +95,16 @@ export function createOidcInteractionHandler(
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+    if (!response.headers.has('Content-Security-Policy'))
+      res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
     res.end(body);
   }
 
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<boolean> {
     const raw = req.url ?? '';
     const path = raw.split('?')[0];
+    const html =
+      req.method === 'GET' && req.headers.accept?.split(',').some((value) => value.trim() === 'text/html');
     if (!path.startsWith('/interaction/') && !path.startsWith('/login/') && path !== callbackPath)
       return false;
     try {
@@ -127,10 +140,24 @@ export function createOidcInteractionHandler(
         const uid = login.interactionId(web);
         if (!uid) throw new Error('Unbound login');
         if (current(uid).state !== 'pending') {
-          await send(res, json({ error: 'INTERACTION_ALREADY_ATTEMPTED' }, 409));
+          await send(
+            res,
+            html ? consentErrorPage(409) : json({ error: 'INTERACTION_ALREADY_ATTEMPTED' }, 409),
+          );
           return true;
         }
-        await send(res, await login.handle(web));
+        const response = await login.handle(web);
+        if (path === '/login/status') response.headers.set('Vary', 'Accept');
+        if (html && path === '/login/status') {
+          await send(
+            res,
+            response.ok
+              ? loginStatusPage((await response.json()).status === 'authenticated', uid)
+              : consentErrorPage(response.status),
+          );
+        } else if (html && response.status >= 400) {
+          await send(res, consentErrorPage(response.status));
+        } else await send(res, response);
         return true;
       }
       const [, uid, action] = match;
@@ -138,7 +165,9 @@ export function createOidcInteractionHandler(
       if (web.method !== (action ? 'POST' : 'GET')) throw new Error('Unexpected method');
       const verified = await details(req, res, uid);
       if (!action) {
-        await send(res, json(verified.consent));
+        const response = html ? consentPage(verified.consent) : json(verified.consent);
+        response.headers.set('Vary', 'Accept');
+        await send(res, response);
         return true;
       }
       if (web.headers.get('origin') !== origin) throw new Error('Unexpected origin');
@@ -184,8 +213,7 @@ export function createOidcInteractionHandler(
               mergeWithLastSubmission: false,
             },
           );
-          cancelled.headers.set('Location', location);
-          await send(res, new Response(null, { status: 303, headers: cancelled.headers }));
+          await send(res, completion(web, location, cancelled.headers));
         } finally {
           tx.state = 'finished';
         }
@@ -220,7 +248,7 @@ export function createOidcInteractionHandler(
         current(uid, latest.fingerprint);
         if (identity.credentials.expiresAt <= Math.floor(Date.now() / 1000))
           throw new Error('Login expired during completion');
-        await send(res, new Response(null, { status: 303, headers: { Location: location } }));
+        await send(res, completion(web, location));
         await journal?.finish(uid, 'completed');
       } catch (error) {
         if (persisted) await approval.revoke();
@@ -235,7 +263,8 @@ export function createOidcInteractionHandler(
         error instanceof Error && error.message === 'APPROVAL_CLEANUP_UNCONFIRMED'
           ? 'APPROVAL_CLEANUP_UNCONFIRMED'
           : 'INTERACTION_REQUEST_REJECTED';
-      await send(res, json({ error: code }, code === 'APPROVAL_CLEANUP_UNCONFIRMED' ? 503 : 403));
+      const status = code === 'APPROVAL_CLEANUP_UNCONFIRMED' ? 503 : 403;
+      await send(res, html ? consentErrorPage(status) : json({ error: code }, status));
       return true;
     }
   };

@@ -3,7 +3,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { createAdminHttpHandler } from '../../mcp/src/http';
 import { createCredentialCipher } from '../../mcp/src/credentials';
 
-async function fixture(expired = false) {
+async function fixture(expired = false, admit?: (userId: string) => number) {
   const cipher = await createCredentialCipher(
     new Map([['test', crypto.getRandomValues(new Uint8Array(32))]]),
     'test',
@@ -44,45 +44,81 @@ async function fixture(expired = false) {
   );
   let calls = 0;
   let refreshClaims = 0;
-  const handler = createAdminHttpHandler(config, cipher, async (url, init) => {
-    calls++;
-    if (url === config.introspectionEndpoint) {
-      const user = users.find((u) => u.token === new URLSearchParams(init.body as string).get('token'));
-      if (!user?.active) return Response.json({ active: false });
-      return Response.json({
-        active: true,
-        token_type: 'Bearer',
-        token_kind: 'AccessToken',
-        iss: config.issuer,
-        aud: config.resource,
-        sub: user.id,
-        client_id: 'agent',
-        grant_id: user.grantId,
-        exp: Math.floor(Date.now() / 1000) + 300,
-        scope: user.scopes.join(' '),
-      });
-    }
-    expect(new Headers(init.headers).get('authorization')).toBe('Bearer service-secret');
-    const body = JSON.parse(init.body as string);
-    const user = users.find((u) => u.id === body.p_binding.subject)!;
-    if (url.endsWith('/mcp_grant_command'))
-      return Response.json({
-        id: user.grantId,
-        user_id: user.id,
-        state: 'active',
-        version: 1,
-        scopes: user.scopes,
-      });
-    if (url.endsWith('/mcp_credential_command') && body.p_action === 'claim_refresh') {
-      refreshClaims++;
-      throw new Error('Lost refresh claim receipt: secret');
-    }
-    if (url.endsWith('/mcp_credential_command'))
-      return Response.json({ revision: 1, envelope: user.envelope });
-    throw new Error('Unexpected backend call');
-  });
+  const handler = createAdminHttpHandler(
+    config,
+    cipher,
+    async (url, init) => {
+      calls++;
+      if (url === config.introspectionEndpoint) {
+        const user = users.find((u) => u.token === new URLSearchParams(init.body as string).get('token'));
+        if (!user?.active) return Response.json({ active: false });
+        return Response.json({
+          active: true,
+          token_type: 'Bearer',
+          token_kind: 'AccessToken',
+          iss: config.issuer,
+          aud: config.resource,
+          sub: user.id,
+          client_id: 'agent',
+          grant_id: user.grantId,
+          exp: Math.floor(Date.now() / 1000) + 300,
+          scope: user.scopes.join(' '),
+        });
+      }
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer service-secret');
+      const body = JSON.parse(init.body as string);
+      const user = users.find((u) => u.id === body.p_binding.subject)!;
+      if (url.endsWith('/mcp_grant_command'))
+        return Response.json({
+          id: user.grantId,
+          user_id: user.id,
+          state: 'active',
+          version: 1,
+          scopes: user.scopes,
+        });
+      if (url.endsWith('/mcp_credential_command') && body.p_action === 'claim_refresh') {
+        refreshClaims++;
+        throw new Error('Lost refresh claim receipt: secret');
+      }
+      if (url.endsWith('/mcp_credential_command'))
+        return Response.json({ revision: 1, envelope: user.envelope });
+      throw new Error('Unexpected backend call');
+    },
+    admit,
+  );
   return { handler, users, config, calls: () => calls, refreshClaims: () => refreshClaims };
 }
+
+test('identity admission follows verified authorization and precedes credentials or body work', async () => {
+  const seen: string[] = [];
+  const f = await fixture(false, (userId) => {
+    seen.push(userId);
+    return 2;
+  });
+  const response = await f.handler(
+    new Request(f.config.resource, {
+      method: 'POST',
+      headers: { authorization: 'Bearer a' },
+      body: 'not-json',
+    }),
+  );
+  expect(response.status).toBe(429);
+  expect(response.headers.get('retry-after')).toBe('2');
+  expect(response.headers.get('cache-control')).toBe('no-store');
+  expect(await response.json()).toEqual({ error: 'rate_limited' });
+  expect(seen).toEqual([f.users[0].id]);
+  expect(f.calls()).toBe(2); // Introspection and grant only, no credentials/business calls.
+  expect(
+    (
+      await f.handler(
+        new Request(f.config.resource, {
+          headers: { authorization: 'Bearer untrusted' },
+        }),
+      )
+    ).status,
+  ).toBe(401);
+  expect(seen).toHaveLength(1);
+});
 
 test('HTTP boundary advertises protected resource and rejects untrusted requests before credentials', async () => {
   const f = await fixture();

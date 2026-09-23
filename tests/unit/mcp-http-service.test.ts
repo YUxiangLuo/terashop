@@ -3,6 +3,8 @@ import { mkdtemp, writeFile, chmod, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpsRequest } from 'node:https';
+import { connect as connectTcp } from 'node:net';
+import { connect as connectTls } from 'node:tls';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { startAdminHttpService } from '../../mcp/src/http-service';
 import { createCredentialCipher } from '../../mcp/src/credentials';
@@ -60,8 +62,16 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     const slowArrived = Promise.withResolvers<void>();
     const arrived = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
+    let capacity:
+      | {
+          gates: ReturnType<typeof Promise.withResolvers<void>>[];
+          arrived: ReturnType<typeof Promise.withResolvers<void>>;
+          calls: number;
+        }
+      | undefined;
     let stalled:
       | {
+          path: string;
           arrived: ReturnType<typeof Promise.withResolvers<void>>;
           aborted: ReturnType<typeof Promise.withResolvers<void>>;
           release: ReturnType<typeof Promise.withResolvers<void>>;
@@ -73,18 +83,23 @@ test('real Bun TLS service enforces private configuration and serves an authenti
       port: 0,
       async fetch(req) {
         const path = new URL(req.url).pathname;
+        if (stalled?.path === path) {
+          const current = stalled;
+          current.calls++;
+          const aborted = () => current.aborted.resolve();
+          req.signal.addEventListener('abort', aborted, { once: true });
+          current.arrived.resolve();
+          try {
+            await current.release.promise;
+          } finally {
+            req.signal.removeEventListener('abort', aborted);
+          }
+        }
         if (path === '/introspect') {
-          if (stalled) {
-            const current = stalled;
-            current.calls++;
-            const aborted = () => current.aborted.resolve();
-            req.signal.addEventListener('abort', aborted, { once: true });
-            current.arrived.resolve();
-            try {
-              await current.release.promise;
-            } finally {
-              req.signal.removeEventListener('abort', aborted);
-            }
+          if (capacity) {
+            const gate = capacity.gates[capacity.calls++];
+            if (capacity.calls === 32) capacity.arrived.resolve();
+            await gate?.promise;
           }
           if (slowBody) slowArrived.resolve();
           if (hold) {
@@ -118,6 +133,9 @@ test('real Bun TLS service enforces private configuration and serves an authenti
           credentialReads++;
           return Response.json({ revision: 1, envelope });
         }
+        if (path === '/auth/v1/user')
+          return Response.json({ id: userId, role: 'authenticated', is_anonymous: false });
+        if (path.endsWith('/is_admin')) return Response.json(true);
         return new Response(null, { status: 404 });
       },
     });
@@ -166,6 +184,55 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     const metadata = await local('/.well-known/oauth-protected-resource/mcp');
     expect(metadata.status).toBe(200);
     expect((await metadata.json()).resource).toBe(resource);
+    // Pin Bun's pre-handler timeout behavior: streaming an incomplete record or
+    // header must not keep a socket alive by resetting the 35s idle timeout.
+    await Promise.all(
+      ['handshake', 'headers'].map(
+        (phase) =>
+          new Promise<void>((resolve, reject) => {
+            const socket =
+              phase === 'handshake'
+                ? connectTcp({ host: '127.0.0.1', port: service!.port! })
+                : connectTls({ host: '127.0.0.1', port: service!.port!, ca: cert });
+            let started = 0;
+            let response = '';
+            let interval: ReturnType<typeof setInterval> | undefined;
+            const timer = setTimeout(() => {
+              reject(new Error(`Slow ${phase} deadline`));
+              socket.destroy();
+            }, 18000);
+            socket.once(phase === 'handshake' ? 'connect' : 'secureConnect', () => {
+              started = performance.now();
+              socket.write(
+                phase === 'handshake'
+                  ? Buffer.from([22, 3, 3, 0, 200])
+                  : 'GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: ',
+              );
+              interval = setInterval(() => socket.write(phase === 'handshake' ? Buffer.from([0]) : 'a'), 250);
+            });
+            socket.on('data', (part) => {
+              response += part.toString();
+            });
+            socket.on('error', (error: NodeJS.ErrnoException) => {
+              if (error.code !== 'ECONNRESET') reject(error);
+            });
+            socket.once('close', () => {
+              clearTimeout(timer);
+              clearInterval(interval);
+              try {
+                expect(started).toBeGreaterThan(0);
+                expect(performance.now() - started).toBeGreaterThanOrEqual(9000);
+                expect(response).toBe('');
+                resolve();
+              } catch (error) {
+                reject(error);
+              }
+            });
+          }),
+      ),
+    );
+    expect(credentialReads).toBe(0);
+    expect(grantReads).toBe(0);
     const missing = await local('/mcp');
     expect(missing.status).toBe(401);
     await missing.body?.cancel();
@@ -192,63 +259,137 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     expect(denied.status).toBe(401);
     await denied.body?.cancel();
     await client.close();
+    // Hold exactly the limit in actual TLS requests. The 33rd must be rejected
+    // before touching authorization; releasing one must admit exactly one more.
+    const budget = {
+      gates: Array.from({ length: 32 }, () => Promise.withResolvers<void>()),
+      arrived: Promise.withResolvers<void>(),
+      calls: 0,
+    };
+    capacity = budget;
+    const grantsBeforeCapacity = grantReads;
+    const credentialsBeforeCapacity = credentialReads;
+    const requests = budget.gates.map(() =>
+      local('/mcp', {
+        headers: { authorization: 'Bearer opaque' },
+      }).then(async (response) => {
+        const status = response.status;
+        await response.body?.cancel();
+        return status;
+      }),
+    );
+    for (const request of requests) void request.catch(() => {});
+    let capacityWatchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        budget.arrived.promise,
+        new Promise<never>((_, reject) => {
+          capacityWatchdog = setTimeout(() => reject(new Error('Concurrency barrier not reached')), 3000);
+        }),
+      ]);
+      const excess = await local('/mcp', { headers: { authorization: 'Bearer opaque' } });
+      expect(excess.status).toBe(503);
+      expect(excess.headers.get('retry-after')).toBe('1');
+      expect(excess.headers.get('cache-control')).toBe('no-store');
+      expect(await excess.json()).toEqual({ error: 'service_busy' });
+      expect(budget.calls).toBe(32);
+      budget.gates[0].resolve();
+      // Request arrival order is not required to equal array order.
+      expect(await Promise.race(requests)).toBe(401);
+      const admitted = await local('/mcp', { headers: { authorization: 'Bearer opaque' } });
+      expect(admitted.status).toBe(401);
+      await admitted.body?.cancel();
+      expect(budget.calls).toBe(33);
+      expect(grantReads).toBe(grantsBeforeCapacity);
+      expect(credentialReads).toBe(credentialsBeforeCapacity);
+    } finally {
+      clearTimeout(capacityWatchdog);
+      for (const gate of budget.gates) gate.resolve();
+      await Promise.allSettled(requests);
+      capacity = undefined;
+    }
     active = true;
     // A live TCP connection must be cancelled, not just abandoned locally.
-    // The per-introspection deadline is shorter than the service deadline.
-    for (const mode of ['deadline', 'disconnect'] as const) {
-      const barrier = {
-        arrived: Promise.withResolvers<void>(),
-        aborted: Promise.withResolvers<void>(),
-        release: Promise.withResolvers<void>(),
-        calls: 0,
-      };
-      stalled = barrier;
-      const reads = credentialReads;
-      const grants = grantReads;
-      const started = performance.now();
-      const controller = new AbortController();
-      const request = local('/mcp', {
-        method: 'POST',
-        headers: { authorization: 'Bearer opaque' },
-        body: '{}',
-        signal: controller.signal,
-      });
-      void request.catch(() => {});
-      let watchdog: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          (async () => {
-            await barrier.arrived.promise;
-            if (mode === 'disconnect') {
-              controller.abort();
-              await expect(request).rejects.toThrow();
-            } else {
-              const denied = await request;
-              expect(denied.status).toBe(401);
-              expect(denied.headers.get('cache-control')).toBe('no-store');
-              expect(await denied.json()).toEqual({ error: 'unauthorized' });
-              expect(performance.now() - started).toBeGreaterThan(9000);
-            }
-            await barrier.aborted.promise;
-            await service!.close();
-            expect(barrier.calls).toBe(1);
-            expect(grantReads).toBe(grants);
-            expect(credentialReads).toBe(reads);
-          })(),
-          new Promise<never>((_, reject) => {
-            watchdog = setTimeout(
-              () => reject(new Error(`Stalled ${mode}`)),
-              mode === 'disconnect' ? 3000 : 14_000,
-            );
+    // Exercise each distinct downstream boundary without replaying a request.
+    for (const stage of [
+      '/introspect',
+      '/rest/v1/rpc/mcp_credential_command',
+      '/rest/v1/rpc/get_admin_shop_settings',
+    ]) {
+      for (const mode of ['deadline', 'disconnect'] as const) {
+        const barrier = {
+          path: stage,
+          arrived: Promise.withResolvers<void>(),
+          aborted: Promise.withResolvers<void>(),
+          release: Promise.withResolvers<void>(),
+          calls: 0,
+        };
+        stalled = barrier;
+        const reads = credentialReads;
+        const grants = grantReads;
+        const started = performance.now();
+        const controller = new AbortController();
+        const request = local('/mcp', {
+          method: 'POST',
+          headers: {
+            authorization: 'Bearer opaque',
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 88,
+            method: 'tools/call',
+            params: { name: 'get_admin_shop_settings', arguments: {} },
           }),
-        ]);
-      } finally {
-        clearTimeout(watchdog);
-        controller.abort();
-        barrier.release.resolve();
-        stalled = undefined;
+          signal: controller.signal,
+        });
+        void request.catch(() => {});
+        let watchdog: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            (async () => {
+              await barrier.arrived.promise;
+              if (mode === 'disconnect') {
+                controller.abort();
+                await expect(request).rejects.toThrow();
+              } else {
+                const denied = await request;
+                expect(denied.status).toBe(
+                  stage === '/introspect' ? 401 : stage.endsWith('mcp_credential_command') ? 503 : 200,
+                );
+                expect(denied.headers.get('cache-control')).toBe('no-store');
+                const body = await denied.json();
+                if (stage === '/introspect') expect(body).toEqual({ error: 'unauthorized' });
+                else if (stage.endsWith('mcp_credential_command'))
+                  expect(body).toEqual({ error: 'authorization_unavailable' });
+                else {
+                  expect(body.result.isError).toBe(true);
+                  expect(JSON.stringify(body)).toContain('BACKEND_UNAVAILABLE');
+                }
+                expect(performance.now() - started).toBeGreaterThan(9000);
+              }
+              await barrier.aborted.promise;
+              await service!.close();
+              expect(barrier.calls).toBe(1);
+              if (stage === '/introspect') expect(grantReads).toBe(grants);
+              expect(credentialReads).toBe(reads + (stage.endsWith('get_admin_shop_settings') ? 1 : 0));
+            })(),
+            new Promise<never>((_, reject) => {
+              watchdog = setTimeout(
+                () => reject(new Error(`Stalled ${mode}`)),
+                mode === 'disconnect' ? 3000 : 19_000,
+              );
+            }),
+          ]);
+        } finally {
+          clearTimeout(watchdog);
+          controller.abort();
+          barrier.release.resolve();
+          stalled = undefined;
+        }
+        service = await startAdminHttpService(path);
       }
-      service = await startAdminHttpService(path);
     }
     // Keep the socket active but never finish the chunked body. The total
     // request deadline, not the idle timer, must terminate this request.
@@ -344,6 +485,24 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     expect((await result).body.result.tools.length).toBeGreaterThan(0);
     await Promise.all([closing, service.close()]);
     await expect(local('/mcp')).rejects.toThrow();
+    service = await startAdminHttpService(path);
+    const beforeRate = { credentialReads, grantReads };
+    let limited = false;
+    for (let i = 0; i < 200; i++) {
+      const response = await local('/mcp');
+      if (response.status === 429) {
+        expect(response.headers.get('retry-after')).toBe('1');
+        expect(response.headers.get('cache-control')).toBe('no-store');
+        expect(await response.json()).toEqual({ error: 'rate_limited' });
+        limited = true;
+        break;
+      }
+      expect(response.status).toBe(401);
+      await response.body?.cancel();
+    }
+    expect(limited).toBe(true);
+    expect({ credentialReads, grantReads }).toEqual(beforeRate);
+    await service.close();
     // Real CLI, not only a same-process service object.
     const child = Bun.spawn([process.execPath, 'mcp/src/remote.ts', path], {
       stdout: 'pipe',
@@ -371,4 +530,4 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     await backend?.stop(true);
     await rm(directory, { recursive: true, force: true });
   }
-}, 60000);
+}, 120000);
