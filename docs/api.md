@@ -437,7 +437,7 @@ PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复
 
 ### 手工退款试算与受保护提交
 
-仅管理员可调用以下两个 RPC，仅支持 USD、账目已对平且没有支付意图、非 manual 交易或渠道退款请求的手工订单。两者都不会调用支付渠道；提交是已完成线下退款的记账。旧 `refund_order` 保留兼容，但不具备试算校验；需要“确认什么就执行什么”的调用方必须使用新提交接口。
+仅管理员可调用以下两个 RPC，仅支持 USD、账目已对平且没有支付意图、非 manual 交易或渠道退款请求的手工订单。两者都不会调用支付渠道；提交是已完成线下退款的记账。`refund_order` 不具备试算校验，不用于 Admin 的确认流程；Admin 只调用下述试算与提交接口，不回退其他接口。
 
 | RPC | 参数 / 返回 |
 | --- | --- |
@@ -473,7 +473,7 @@ const command = {
 const result = await supabase.rpc('commit_manual_refund', command);
 ```
 
-本合同尚未接入 Admin 商品退款表单，也不适用于 PayPal Edge 退款；渠道退款需独立接入试算与异步请求校验。数据库回归：`bun run test:current tests/manual-refund-preview.test.ts`，覆盖税费尾差、库存影响、原键恢复、权限、受控并发及旧事务快照。
+Admin 商品/运费及金额退款表单使用本合同；不适用于 PayPal Edge 退款，渠道退款需独立接入试算与异步请求校验。数据库回归：`bun run test:current tests/manual-refund-preview.test.ts`，覆盖税费尾差、库存影响、原键恢复、权限、受控并发及旧事务快照。
 
 ## Return / Receipt / Disposition
 

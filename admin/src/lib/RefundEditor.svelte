@@ -2,25 +2,36 @@
   import { onMount } from "svelte";
   import { beforeNavigate } from "$app/navigation";
   import { supabase, message, money, dateTime } from "./api";
-  import { shippingMoney } from "./shipping";
   import { commandKey, readCommand, dispatchCommand } from "./commands";
   import {
-    isManualRefundCommand,
-    acknowledgesManualRefund,
+    isRefundOperation,
+    isRefundPreview,
+    previewMatchesScope,
+    refundScope,
+    acknowledgesPreviewedRefund,
     ledgerRemaining,
     manualRefundBlock,
     refundItemLabel,
     refundComponentLabel,
     refundAllocatedTotal,
     type RefundPricing,
-    type ManualRefundCommand,
+    type PreviewedRefund,
+    type RefundPreview,
+    type RefundScope,
     type OrderLedger,
   } from "./refunds";
   let { id }: { id: string } = $props();
   let pricing = $state.raw<RefundPricing | null>(null),
     pricingError = $state("");
   let ledger = $state.raw<OrderLedger | null>(null),
-    pending = $state<ManualRefundCommand | null>(null);
+    pending = $state<PreviewedRefund | null>(null);
+  let mode = $state<"amount" | "items">("amount"),
+    quantities = $state<Record<string, string>>({}),
+    shipping = $state(""),
+    restock = $state(false),
+    preview = $state.raw<{ scope: RefundScope; result: RefundPreview } | null>(
+      null,
+    );
   let busy = $state(true),
     ready = $state(false),
     error = $state(""),
@@ -31,7 +42,15 @@
     confirmed = $state(false);
   let key = "",
     alive = true;
-  let dirty = $derived(!!amount || !!reason || confirmed);
+  let dirty = $derived(
+    !!amount ||
+      !!reason ||
+      confirmed ||
+      !!shipping ||
+      restock ||
+      Object.values(quantities).some(Boolean),
+  );
+  let displayedPreview = $derived(pending?.preview ?? preview?.result);
   onMount(() => {
     void load();
     return () => {
@@ -52,13 +71,14 @@
     busy = true;
     ready = false;
     error = "";
+    preview = null;
     try {
       const session = await supabase.auth.getSession();
       if (session.error || !session.data.session)
         throw Error("Sign in again to view refunds.");
       key = commandKey(session.data.session.user.id, "manual-refund", id);
-      const saved = readCommand(sessionStorage, key, isManualRefundCommand);
-      if (saved && saved.order_id !== id)
+      const saved = readCommand(sessionStorage, key, isRefundOperation);
+      if (saved && saved.request.order_id !== id)
         throw Error("Saved refund does not belong to this order.");
       const [result, operations, snapshot] = await Promise.all([
         supabase.rpc("get_order_ledger", { order_id: id }),
@@ -87,6 +107,10 @@
       amount = "";
       reason = "";
       confirmed = false;
+      quantities = {};
+      shipping = "";
+      restock = false;
+      mode = "amount";
       ready = true;
     } catch (cause) {
       if (alive) error = message(cause);
@@ -103,32 +127,68 @@
       void load();
     }
   }
+  async function calculate() {
+    if (busy || !ready || pending || block) return;
+    preview = null;
+    confirmed = false;
+    error = "";
+    notice = "";
+    busy = true;
+    try {
+      if (!reason.trim() || reason.length > 2000)
+        throw Error("Enter a reason (maximum 2000 characters).");
+      if (mode === "items" && !pricing)
+        throw Error(
+          "Reload the price snapshot before selecting items or shipping.",
+        );
+      const scope = refundScope(
+        id,
+        mode,
+        amount,
+        quantities,
+        shipping,
+        restock,
+      );
+      const response = await supabase.rpc("preview_manual_refund", scope);
+      if (!alive) return;
+      if (response.error) throw response.error;
+      if (
+        !isRefundPreview(response.data) ||
+        !previewMatchesScope(response.data, scope)
+      )
+        throw Error(
+          "Refund preview could not be verified. No refund was recorded.",
+        );
+      preview = { scope, result: response.data };
+    } catch (cause) {
+      if (alive) error = message(cause);
+    } finally {
+      if (alive) busy = false;
+    }
+  }
   async function submit() {
     if (busy || !ready || !ledger || (!pending && block)) return;
     error = "";
     notice = "";
-    let command: ManualRefundCommand;
+    let command: PreviewedRefund;
     try {
       if (!pending && !confirmed)
         throw Error(
           "Confirm that the offline refund has already been completed.",
         );
+      if (!pending && !preview)
+        throw Error("Preview the refund before confirming.");
       command = pending ?? {
-        order_id: id,
-        amount: shippingMoney(amount),
-        reason: reason.trim(),
-        restock: false,
-        provider: "manual",
-        idempotency_key: crypto.randomUUID(),
+        request: {
+          ...preview!.scope,
+          preview_token: preview!.result.preview_token,
+          reason: reason.trim(),
+          idempotency_key: crypto.randomUUID(),
+        },
+        preview: preview!.result,
       };
-      if (!isManualRefundCommand(command))
-        throw Error(
-          "Enter a positive USD amount and a reason (maximum 2000 characters).",
-        );
-      if (!pending && command.amount > ledgerRemaining(ledger))
-        throw Error(
-          "Amount exceeds the loaded succeeded-only ledger balance. Reload and reconcile the order.",
-        );
+      if (!isRefundOperation(command))
+        throw Error("Refund request could not be verified.");
     } catch (cause) {
       error = message(cause);
       return;
@@ -136,8 +196,8 @@
     if (
       !window.confirm(
         pending
-          ? `Replay the exact saved ${money(command.amount)} bookkeeping request? Do not refund the customer a second time.`
-          : `Record ${money(command.amount)} as already refunded offline? This marks a succeeded refund in the ledger but sends no money. It does not cancel items, allocate taxes or restock inventory.`,
+          ? `Replay the exact saved bookkeeping request? Do not refund the customer a second time.`
+          : `Record ${money(preview!.result.amount)} as already refunded offline, with the displayed item cancellation and stock release? This sends no money. Changed facts will reject this preview.`,
       )
     )
       return;
@@ -147,8 +207,8 @@
         sessionStorage,
         key,
         command,
-        (c) => supabase.rpc("refund_order", c),
-        (result) => acknowledgesManualRefund(result, command),
+        (c) => supabase.rpc("commit_manual_refund", c.request),
+        (result) => acknowledgesPreviewedRefund(result, command),
       );
       if (!alive) return;
       pending = null;
@@ -156,18 +216,20 @@
       reason = "";
       confirmed = false;
       notice =
-        "Manual refund bookkeeping confirmed. No provider funds were sent; no inventory or item quantities changed.";
+        "Manual refund bookkeeping confirmed. No provider funds were sent. See the recorded allocation and stock effects below.";
       await load();
     } catch (cause) {
       if (!alive) return;
       error = message(cause);
       try {
-        pending = readCommand(sessionStorage, key, isManualRefundCommand);
+        pending = readCommand(sessionStorage, key, isRefundOperation);
       } catch (cause) {
         ready = false;
         error = message(cause);
       }
       if (!pending) ready = false;
+      preview = null;
+      confirmed = false;
     } finally {
       if (alive) busy = false;
     }
@@ -191,8 +253,8 @@
       this exact request, even if the remaining balance changed. Saved only in
       this browser tab.
     </p>
-    <p>{money(pending.amount)} · {pending.reason}</p>
-    <p class="small">Request {pending.idempotency_key}</p>
+    <p>{pending.request.reason}</p>
+    <p class="small">Request {pending.request.idempotency_key}</p>
     <button class="primary" disabled={busy || !ready} onclick={submit}
       >Replay saved bookkeeping</button
     >
@@ -212,28 +274,73 @@
     </p>
   </section>{/if}
 <section class="card">
-  <h2>Record an offline amount refund</h2>
+  <h2>Preview an offline refund</h2>
   <p>
     This form only records an already completed offline refund for manual-only
-    orders. It does not send money. Amounts are unallocated: no item
-    cancellation, tax/shipping allocation or stock change. Real PayPal refunds
-    and item-based refunds are not available here.
+    orders. It does not send money. Item refunds include their tax and may
+    cancel unshipped quantities. Stock release only restores cancelled unshipped
+    stock, never physically returned goods. Real PayPal refunds are not
+    available here.
   </p>
   {#if block}<p class="notice">{block}</p>{/if}
   <form
     onsubmit={(e) => {
       e.preventDefault();
-      void submit();
+      void calculate();
     }}
   >
-    <fieldset disabled={busy || !ready || !!pending || !!block}>
-      <label for="refund-amount">Amount already refunded (USD)</label><input
-        id="refund-amount"
-        inputmode="decimal"
-        bind:value={amount}
-        required
-        placeholder="0.00"
-      />
+    <fieldset disabled={busy || !ready || !!pending || !!block || !!preview}>
+      <label for="refund-mode">Refund scope</label>
+      <select id="refund-mode" bind:value={mode}>
+        <option value="amount">Unallocated amount</option>
+        <option value="items" disabled={!pricing}>Items / net shipping</option>
+      </select>
+      {#if mode === "amount"}
+        <label for="refund-amount">Amount already refunded (USD)</label><input
+          id="refund-amount"
+          inputmode="decimal"
+          bind:value={amount}
+          required
+          placeholder="0.00"
+        />
+        <p class="muted">
+          Amount-only refunds do not cancel items, allocate taxes or release
+          stock.
+        </p>
+      {:else}
+        <p class="muted">
+          Enter quantities to refund, leaving others blank. Ordered quantities
+          are historical, not current refundable limits; the server checks
+          eligibility during preview.
+        </p>
+        {#each pricing?.lines ?? [] as line}
+          <label for={`refund-item-${line.id}`}
+            >{refundItemLabel(pricing, line.id)} · Ordered {line.quantity}</label
+          >
+          <input
+            id={`refund-item-${line.id}`}
+            data-refund-item
+            inputmode="numeric"
+            bind:value={quantities[line.id]}
+            placeholder="0"
+          />
+        {/each}
+        {#if pricing?.shipping_line}
+          <label for="refund-shipping"
+            >Net shipping to refund (USD, excluding tax)</label
+          >
+          <input
+            id="refund-shipping"
+            inputmode="decimal"
+            bind:value={shipping}
+            placeholder="Leave blank to exclude shipping"
+          />
+        {/if}
+        <label class="confirmation"
+          ><input id="refund-restock" type="checkbox" bind:checked={restock} /> Release
+          stock for cancelled unshipped quantities only.</label
+        >
+      {/if}
       <label for="refund-reason"
         >Reason / offline refund reference (visible to the customer)</label
       ><textarea
@@ -242,17 +349,51 @@
         bind:value={reason}
         rows="3"
         required></textarea>
-      <label class="confirmation"
-        ><input
-          id="refund-confirm"
-          type="checkbox"
-          bind:checked={confirmed}
-          required
-        /> I confirm the offline refund is complete and this is bookkeeping only.</label
-      ><button class="primary">Record manual refund</button>
+      <button class="primary">Preview refund</button>
     </fieldset>
   </form>
 </section>
+{#if displayedPreview}
+  <section class="card" aria-label="Refund preview">
+    <h2>Refund preview · {money(displayedPreview.amount)}</h2>
+    <p>
+      No funds sent. This preview reserves nothing; changes to balances or stock
+      effects require a new preview and confirmation.
+    </p>
+    <ul>
+      {#each displayedPreview.lines as line}<li>
+          {refundItemLabel(pricing, line.order_item_id)} · {line.quantity} units ·
+          Net {money(line.amount)} · Cancel {line.cancelled_quantity} · Release stock
+          {line.restocked_quantity}
+        </li>{/each}
+      {#each displayedPreview.components as component}<li>
+          {refundComponentLabel(pricing, component)}: {money(component.amount)}
+        </li>{/each}
+    </ul>
+    <p>Total including tax: {money(displayedPreview.amount)}</p>
+    {#if !pending}
+      <fieldset disabled={busy || !ready || !!block}>
+        <label class="confirmation"
+          ><input
+            id="refund-confirm"
+            type="checkbox"
+            bind:checked={confirmed}
+            required
+          /> I confirm this exact amount has been refunded offline and approve the
+          displayed cancellation and stock effects.</label
+        ><button class="primary" disabled={!confirmed} onclick={submit}
+          >Record manual refund</button
+        >
+        <button
+          onclick={() => {
+            preview = null;
+            confirmed = false;
+          }}>Change selection</button
+        >
+      </fieldset>
+    {/if}
+  </section>
+{/if}
 <section class="card">
   <h2>Refund records</h2>
   {#if pricingError}<p class="notice" role="status">{pricingError}</p>{/if}

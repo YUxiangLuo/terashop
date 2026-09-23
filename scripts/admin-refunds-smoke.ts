@@ -2,7 +2,7 @@
 import { localSupabase } from "./lib/local-supabase";
 import { strict as assert } from "node:assert";
 Object.assign(process.env, localSupabase());
-const { api, rpc, checked } = await import("../tests/helpers");
+const { api, rpc, checked, TEST_ADDRESS } = await import("../tests/helpers");
 const { paymentFixture, fixtureOrder, fixtureIntent, settleIntent } =
   await import("../tests/payment-fixtures");
 const origin = new URL(process.env.ADMIN_URL ?? "http://127.0.0.1:5174");
@@ -12,7 +12,9 @@ const session = `refund-${crypto.randomUUID()}`,
   email = `${session}@example.test`,
   password = crypto.randomUUID() + "Aa1!";
 let user = "",
-  product = "";
+  product = "",
+  shippingMethod = "",
+  taxRate = "";
 async function browser(...args: string[]) {
   const proc = Bun.spawn(["agent-browser", "--session", session, ...args], {
     stdout: "pipe",
@@ -100,15 +102,18 @@ try {
   await ready();
   await browser("fill", "#refund-amount", "7.251");
   await browser("fill", "#refund-reason", "Offline refund REF-001");
-  await browser("check", "#refund-confirm");
-  await click("Record manual refund");
+  await click("Preview refund");
   await wait("at most two decimal places");
   assert.equal((await ledger()).refunds.length, 0);
   await browser("fill", "#refund-amount", "7.25");
+  await click("Preview refund");
+  await wait("Total including tax: $7.25");
+  assert.equal((await ledger()).refunds.length, 0);
+  await browser("check", "#refund-confirm");
   await browser(
     "eval",
     `(() => { const original = window.fetch; window.fetch = async (...args) => {
-    if (String(args[0]).includes('/rpc/refund_order')) { window.fetch = original; const response = await original(...args); if (!response.ok) return response; return new Response(JSON.stringify({message:'Simulated lost refund response'}), {status:503,headers:{'Content-Type':'application/json'}}); } return original(...args);
+    if (String(args[0]).includes('/rpc/commit_manual_refund')) { window.fetch = original; const response = await original(...args); if (!response.ok) return response; return new Response(JSON.stringify({message:'Simulated lost refund response'}), {status:503,headers:{'Content-Type':'application/json'}}); } return original(...args);
   }; })()`,
   );
   await click("Record manual refund");
@@ -145,6 +150,8 @@ try {
   // Server-side balance race must reject a stale new request without an extra record.
   await browser("fill", "#refund-amount", "12.00");
   await browser("fill", "#refund-reason", "Offline REF-002");
+  await click("Preview refund");
+  await wait("Total including tax: $12.00");
   await browser("check", "#refund-confirm");
   await checked(
     rpc(
@@ -180,22 +187,77 @@ try {
       actor.token,
     ),
   );
+  await browser("open", `${origin.origin}/orders/${itemOrder.id}/refunds`);
+  await ready();
+  await browser("select", "#refund-mode", "items");
+  await browser("fill", "[data-refund-item]", "2");
+  await browser("fill", "#refund-reason", "Historical item refund");
+  await browser("check", "#refund-restock");
+  await click("Preview refund");
+  await wait("Total including tax: $20.00");
+  await wait("Cancel 2 · Release stock 2");
   await checked(
     rpc(
-      "refund_order",
+      "create_fulfillment",
       {
         order_id: itemOrder.id,
         items: [{ order_item_id: itemOrder.itemId, quantity: 1 }],
-        reason: "Historical item refund",
-        provider: "manual",
-        restock: false,
         idempotency_key: crypto.randomUUID(),
       },
       actor.token,
     ),
   );
-  await browser("open", `${origin.origin}/orders/${itemOrder.id}/refunds`);
+  await browser("check", "#refund-confirm");
+  await click("Record manual refund");
+  await browser("dialog", "accept");
+  await wait("refund preview changed");
+  assert.equal(
+    (
+      await checked<any>(
+        rpc("get_order_ledger", { order_id: itemOrder.id }, actor.token),
+      )
+    ).refunds.length,
+    0,
+  );
+  await click("Reload refund ledger");
+  await browser("dialog", "accept");
   await ready();
+  await browser("select", "#refund-mode", "items");
+  await browser("fill", "[data-refund-item]", "1");
+  await browser("fill", "#refund-reason", "Historical item refund");
+  await browser("check", "#refund-restock");
+  await click("Preview refund");
+  await wait("Total including tax: $10.00");
+  await wait("Cancel 1 · Release stock 1");
+  await browser("check", "#refund-confirm");
+  await click("Change selection");
+  await browser(
+    "eval",
+    'if (document.querySelector("#refund-confirm")) throw Error("Old confirmation survived selection change")',
+  );
+  await click("Preview refund");
+  await wait("Total including tax: $10.00");
+  await browser(
+    "eval",
+    'if (document.querySelector("#refund-confirm").checked) throw Error("Confirmation was reused")',
+  );
+  await browser("screenshot", "/tmp/admin-refund-preview-mobile.png", "--full");
+  await browser("set", "viewport", "1280", "900");
+  await browser("screenshot", "/tmp/admin-refund-preview.png", "--full");
+  const beforeRelease = (await stock()).reduce(
+    (sum, row) => sum + row.on_hand,
+    0,
+  );
+  await browser("check", "#refund-confirm");
+  await click("Record manual refund");
+  await browser("dialog", "accept");
+  await wait("Manual refund bookkeeping confirmed");
+  await ready();
+  assert.equal(
+    (await stock()).reduce((sum, row) => sum + row.on_hand, 0),
+    beforeRelease + 1,
+  );
+  await browser("set", "viewport", "390", "844");
   await wait(fixture.sku);
   await wait("Allocated total: $10.00");
   await wait("manual · refund · succeeded · $10.00");
@@ -255,6 +317,67 @@ try {
     "/tmp/admin-refund-detail-mismatch.png",
     "--full",
   );
+  shippingMethod = (
+    await checked<{ id: string }[]>(
+      api("/rest/v1/shipping_methods", {
+        service: true,
+        method: "POST",
+        body: { name: "Preview shipping", price: 4, countries: ["AQ"] },
+      }),
+    )
+  )[0].id;
+  taxRate = (
+    await checked<{ id: string }[]>(
+      api("/rest/v1/tax_rates", {
+        service: true,
+        method: "POST",
+        body: {
+          name: "Preview tax",
+          country: "AQ",
+          rate: 0.13,
+          include_shipping: true,
+        },
+      }),
+    )
+  )[0].id;
+  const taxed = await fixtureOrder(fixture, actor, 1, true, {
+    shipping_method_id: shippingMethod,
+    address: { ...TEST_ADDRESS, country: "AQ" },
+  });
+  await checked(
+    rpc(
+      "mark_order_paid",
+      { order_id: taxed.id, idempotency_key: crypto.randomUUID() },
+      actor.token,
+    ),
+  );
+  await browser("open", `${origin.origin}/orders/${taxed.id}/refunds`);
+  await ready();
+  await browser("select", "#refund-mode", "items");
+  await browser("fill", "[data-refund-item]", "1");
+  await browser("fill", "#refund-shipping", "4");
+  await browser("fill", "#refund-reason", "Offline taxed refund");
+  await click("Preview refund");
+  await wait("Total including tax: $15.82");
+  await wait("Shipping tax · Preview tax");
+  await browser("screenshot", "/tmp/admin-refund-preview-tax.png", "--full");
+  await click("Change selection");
+  await browser("fill", "[data-refund-item]", "");
+  await browser("fill", "#refund-shipping", "1.25");
+  await click("Preview refund");
+  await wait("Total including tax: $1.41");
+  await browser("check", "#refund-confirm");
+  await click("Record manual refund");
+  await browser("dialog", "accept");
+  await wait("Manual refund bookkeeping confirmed");
+  const shippingRefund = (
+    await checked<any>(
+      rpc("get_order_ledger", { order_id: taxed.id }, actor.token),
+    )
+  ).refunds[0];
+  assert.equal(shippingRefund.source, "shipping");
+  assert.equal(shippingRefund.amount, 1.41);
+  assert.equal(shippingRefund.lines.length, 0);
   // A real local PayPal-settlement fixture is read-only in this UI; no provider network call.
   const online = await fixtureOrder(fixture, actor, 1);
   const intent = await fixtureIntent(online, actor);
@@ -275,6 +398,18 @@ try {
   );
 } finally {
   await browser("close").catch(() => {});
+  for (const [table, id] of [
+    ["shipping_methods", shippingMethod],
+    ["tax_rates", taxRate],
+  ])
+    if (id)
+      await checked(
+        api(`/rest/v1/${table}?id=eq.${id}`, {
+          service: true,
+          method: "PATCH",
+          body: { is_active: false },
+        }),
+      );
   if (product)
     await checked(
       api(`/rest/v1/products?id=eq.${product}`, {
