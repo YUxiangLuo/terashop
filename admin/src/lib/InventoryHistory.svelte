@@ -15,9 +15,10 @@
   let rows = $state<Movement[]>([]);
   let cursor = $state<string | null>(null);
   let reason = $state("");
-  let applied = "";
+  let applied = $state("");
   let busy = $state(false);
   let error = $state("");
+  let stale = $state(false);
   let alive = true;
   onMount(() => {
     void load(false);
@@ -27,20 +28,17 @@
   });
   async function load(more: boolean) {
     if (busy) return;
+    const requestedReason = more ? applied : reason;
+    const requestedCursor = more ? cursor : null;
     busy = true;
     error = "";
-    if (!more) {
-      rows = [];
-      cursor = null;
-      applied = reason;
-    }
     try {
       const result = await supabase.rpc("list_admin_inventory_movements", {
         page_size: 20,
         variant_id: variant,
         location_id: location,
-        ...(applied ? { reason_filter: applied } : {}),
-        ...(more && cursor ? { after_id: cursor } : {}),
+        ...(requestedReason ? { reason_filter: requestedReason } : {}),
+        ...(requestedCursor ? { after_id: requestedCursor } : {}),
       });
       if (result.error) throw result.error;
       if (!alive) return;
@@ -57,8 +55,13 @@
           ]
         : page.items;
       cursor = page.next_cursor;
+      if (!more) applied = requestedReason;
+      stale = false;
     } catch (cause) {
-      if (alive) error = message(cause);
+      if (alive) {
+        error = message(cause);
+        stale = true;
+      }
     } finally {
       if (alive) busy = false;
     }
@@ -94,6 +97,10 @@
     ><button disabled={busy}>Filter history</button>
   </form>
   {#if error}<p class="notice error" role="alert">{error}</p>{/if}
+  {#if stale}<p class="notice" role="status">
+      Showing the previous movement history. Refresh or retry to check current
+      results.
+    </p>{/if}
   <div class="table-wrap">
     <table>
       <thead

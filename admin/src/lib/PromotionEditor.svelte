@@ -11,6 +11,7 @@
     type Promotion,
   } from "./promotions";
   import PromotionRecords from "./PromotionRecords.svelte";
+  import { promotionReceipt } from "./write-receipts";
   let { id, creating }: { id: string; creating: boolean } = $props();
   let rule = $state.raw<Promotion | null>(null);
   let fields = $state(promotionFields(null));
@@ -61,7 +62,10 @@
       });
       if (result.error) throw result.error;
       if (!alive) return;
-      const value = result.data as unknown as Promotion | null;
+      const value =
+        result.data === null
+          ? null
+          : (promotionReceipt(result.data, id, null) as unknown as Promotion);
       if (!value && !creating) throw Error("Promotion not found.");
       install(value);
     } catch (cause) {
@@ -103,7 +107,13 @@
         : await supabase.rpc("create_promotion", { promotion_id: id, changes });
       if (result.error) throw result.error;
       if (!alive) return;
-      install(result.data as unknown as Promotion);
+      install(
+        promotionReceipt(
+          result.data,
+          id,
+          rule?.revision ?? null,
+        ) as unknown as Promotion,
+      );
       notice = "Promotion saved. Existing order snapshots are unchanged.";
     } catch (cause) {
       if (alive) {

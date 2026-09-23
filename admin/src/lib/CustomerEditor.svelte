@@ -64,16 +64,15 @@
     loading = true;
     error = "";
     notice = "";
-    customer = null;
-    orders = [];
-    orderCursor = null;
-    ordersError = "";
     try {
       const value = await getCustomer(id);
       if (!alive || current !== request) return;
       if (!value)
         throw new Error("Customer not found. Return to the customer list.");
       install(value);
+      orders = [];
+      orderCursor = null;
+      ordersError = "";
       await loadOrders(false, current);
     } catch (cause) {
       if (alive && current === request) error = message(cause);

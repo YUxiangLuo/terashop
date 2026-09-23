@@ -23,10 +23,12 @@
     product,
     disabled = false,
     preferredSku = "",
+    unsettled = $bindable(false),
   }: {
     product: ProductDetail;
     disabled?: boolean;
     preferredSku?: string;
+    unsettled?: boolean;
   } = $props();
   let locations = $state<Location[]>([]);
   let location = $state("");
@@ -43,6 +45,10 @@
   let live = $state(false);
   let changes = $state(0),
     checked = $state(0);
+  let dirty = $derived(!pending && (delta !== undefined || note.length > 0));
+  $effect(() => {
+    unsettled = busy || dirty;
+  });
   let key = "";
   let alive = true;
   let generation = 0;
@@ -62,8 +68,31 @@
     };
   });
   beforeNavigate(({ cancel }) => {
-    if (busy) cancel();
+    if (
+      busy ||
+      (dirty &&
+        !window.confirm(
+          "Discard unsaved stock quantity and note? Dispatched operations remain saved in this tab.",
+        ))
+    )
+      cancel();
   });
+  function selectTarget(kind: "variant" | "location", next: string) {
+    const current = kind === "variant" ? variant : location;
+    if (next === current) return;
+    if (
+      dirty &&
+      !window.confirm(
+        "Discard unsaved stock quantity and note before changing the inventory target?",
+      )
+    )
+      return;
+    delta = undefined;
+    note = "";
+    if (kind === "variant") variant = next;
+    else location = next;
+    void refresh();
+  }
   async function init() {
     busy = true;
     try {
@@ -214,7 +243,7 @@
 
 <svelte:window
   onbeforeunload={(event) => {
-    if (busy) event.preventDefault();
+    if (busy || dirty) event.preventDefault();
   }}
 />
 <section class="card" aria-label="Inventory">
@@ -270,10 +299,10 @@
     <div class="fields two">
       <label
         >Variant<select
-          bind:value={variant}
+          value={variant}
           onchange={(event) => {
-            variant = event.currentTarget.value;
-            void refresh();
+            selectTarget("variant", event.currentTarget.value);
+            event.currentTarget.value = variant;
           }}
           >{#each product.variants.filter((item) => item.track_inventory) as item}<option
               value={item.id}
@@ -286,10 +315,10 @@
       >
       <label
         >Location<select
-          bind:value={location}
+          value={location}
           onchange={(event) => {
-            location = event.currentTarget.value;
-            void refresh();
+            selectTarget("location", event.currentTarget.value);
+            event.currentTarget.value = location;
           }}
           >{#each locations as item}<option value={item.id}
               >{item.name}{item.is_default ? " · Default" : ""}</option

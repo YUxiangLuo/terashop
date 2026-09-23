@@ -301,6 +301,11 @@ try {
   console.log(
     "Category browser smoke passed: live expanded tree, multi-page atomic refresh/retry, live move/removal, filter draft retention, create, parent/status/position, stale-write lock, explicit reload, root move, product picker selection retention.",
   );
+} catch (cause) {
+  try {
+    await browser("screenshot", "/tmp/admin-category-failure.png", "--full");
+  } catch {}
+  throw cause;
 } finally {
   const failures: unknown[] = [];
   for (const cleanup of [

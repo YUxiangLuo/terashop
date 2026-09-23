@@ -8,6 +8,7 @@
     shippingCountries,
     type ShippingMethod,
   } from "./shipping";
+  import { shippingReceipt } from "./write-receipts";
   let { id, creating }: { id: string; creating: boolean } = $props();
   let method = $state.raw<ShippingMethod | null>(null);
   let fields = $state({
@@ -72,7 +73,14 @@
       });
       if (result.error) throw result.error;
       if (!alive) return;
-      const value = result.data as unknown as ShippingMethod | null;
+      const value =
+        result.data === null
+          ? null
+          : (shippingReceipt(
+              result.data,
+              id,
+              null,
+            ) as unknown as ShippingMethod);
       if (!value && !creating) throw Error("Shipping method not found.");
       install(value);
     } catch (cause) {
@@ -125,7 +133,13 @@
           });
       if (result.error) throw result.error;
       if (!alive) return;
-      install(result.data as unknown as ShippingMethod);
+      install(
+        shippingReceipt(
+          result.data,
+          id,
+          method?.revision ?? null,
+        ) as unknown as ShippingMethod,
+      );
       notice =
         "Shipping method saved. Existing order charges are unchanged; changed checkout pricing may require a new quote.";
     } catch (cause) {

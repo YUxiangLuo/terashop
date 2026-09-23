@@ -5,6 +5,7 @@
   import { supabase, message, imageUrl } from "./api";
   import { watchAdminChanges } from "./realtime";
   import type { Category, CategoryPage } from "./categories";
+  import { categoryReceipt } from "./write-receipts";
   let { id, creating }: { id: string; creating: boolean } = $props();
   let category = $state.raw<Category | null>(null);
   let fields = $state({
@@ -58,13 +59,7 @@
     };
   });
   $effect(() => {
-    if (
-      changes > attempted &&
-      !busy &&
-      !dirty &&
-      !uncertain &&
-      !creating
-    )
+    if (changes > attempted && !busy && !dirty && !uncertain && !creating)
       void load(true);
   });
   beforeNavigate(({ cancel }) => {
@@ -100,7 +95,10 @@
       });
       if (result.error) throw result.error;
       if (!alive) return;
-      const value = result.data as unknown as Category | null;
+      const value =
+        result.data === null
+          ? null
+          : (categoryReceipt(result.data, id, null) as unknown as Category);
       if (!value && !creating) throw new Error("Category not found.");
       install(value);
       checked = version;
@@ -143,7 +141,13 @@
       if (result.error) throw result.error;
       if (!alive) return;
       const name = parentName;
-      install(result.data as unknown as Category);
+      install(
+        categoryReceipt(
+          result.data,
+          id,
+          category?.updated_at ?? null,
+        ) as unknown as Category,
+      );
       parentName = name;
       notice =
         "Category saved. Product assignments are unchanged. Rebuild the static storefront to update its pages.";

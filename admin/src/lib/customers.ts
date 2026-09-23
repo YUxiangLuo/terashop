@@ -1,5 +1,6 @@
 import { supabase } from "./api";
 import type { Json } from "../../../types/database";
+import { customerReceipt } from "./write-receipts";
 
 export interface CustomerSummary {
   id: string;
@@ -39,7 +40,9 @@ export interface CustomerPage {
 export async function getCustomer(id: string): Promise<CustomerDetail | null> {
   const result = await supabase.rpc("get_admin_customer", { customer_id: id });
   if (result.error) throw result.error;
-  return result.data as unknown as CustomerDetail | null;
+  return result.data === null
+    ? null
+    : (customerReceipt(result.data, id, null) as unknown as CustomerDetail);
 }
 
 export async function updateCustomer(
@@ -52,7 +55,11 @@ export async function updateCustomer(
     changes,
   });
   if (result.error) throw result.error;
-  return result.data as unknown as CustomerDetail;
+  return customerReceipt(
+    result.data,
+    customer.id,
+    customer.updated_at,
+  ) as unknown as CustomerDetail;
 }
 
 export async function listCustomers(args: {

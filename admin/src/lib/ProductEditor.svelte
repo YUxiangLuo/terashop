@@ -38,6 +38,7 @@
   let loaded = $state(false);
   let busy = $state(false);
   let mediaBusy = $state(false);
+  let inventoryUnsettled = $state(false);
   let error = $state("");
   let notice = $state("");
   let uncertain = $state(false);
@@ -113,6 +114,7 @@
     }
   }
   function reload() {
+    if (inventoryUnsettled) return;
     if (
       !dirty ||
       window.confirm(
@@ -123,7 +125,8 @@
   }
   async function save(event: SubmitEvent) {
     event.preventDefault();
-    if (!editable || busy || mediaBusy || uncertain) return;
+    if (!editable || busy || mediaBusy || inventoryUnsettled || uncertain)
+      return;
     try {
       validateVariants(options, variants, status === "active");
     } catch (cause) {
@@ -216,24 +219,37 @@
     </p>
   </div>
   <div class="actions">
-    <button onclick={reload} disabled={busy || mediaBusy}
+    <button onclick={reload} disabled={busy || mediaBusy || inventoryUnsettled}
       >Reload saved version</button
     >{#if editable}<button
         class="primary"
         type="submit"
         form="product-form"
-        disabled={busy || mediaBusy || uncertain || !dirty}
-        >{busy ? "Working…" : "Save product"}</button
+        disabled={busy ||
+          mediaBusy ||
+          inventoryUnsettled ||
+          uncertain ||
+          !dirty}>{busy ? "Working…" : "Save product"}</button
       >{/if}
   </div>
 </div>
 {#if error}<p class="notice error" role="alert">{error}</p>{/if}
 {#if notice}<p class="notice" role="status">{notice}</p>{/if}
+{#if inventoryUnsettled}<p class="notice" role="status">
+    Finish or clear the stock adjustment below before editing or reloading
+    product details.
+  </p>{/if}
 {#if !loaded}<p role="status">
     {busy ? "Loading product…" : "Unable to open product."}
   </p>{:else}
   <form id="product-form" onsubmit={save}>
-    <fieldset disabled={busy || mediaBusy || !editable || uncertain}>
+    <fieldset
+      disabled={busy ||
+        mediaBusy ||
+        inventoryUnsettled ||
+        !editable ||
+        uncertain}
+    >
       <div class="editor-grid">
         <div class="editor-main">
           <section class="card">
@@ -414,6 +430,7 @@
     <div class="inventory-section" id="inventory">
       {#key product.revision}<InventoryEditor
           {product}
+          bind:unsettled={inventoryUnsettled}
           disabled={busy || mediaBusy || dirty || uncertain}
         />{/key}
     </div>

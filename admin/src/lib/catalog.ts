@@ -49,6 +49,15 @@ function validateOptions(options: ProductOption[]) {
     throw new Error("Option names and values within an option must be unique.");
 }
 
+function validMoney(value: number) {
+  return (
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= 9999999999.99 &&
+    Number(value.toFixed(2)) === value
+  );
+}
+
 export function validateVariants(
   options: ProductOption[],
   variants: ProductVariant[],
@@ -59,6 +68,8 @@ export function validateVariants(
   if (active && !variants.length)
     throw new Error("Add a variant before publishing.");
   for (const variant of variants) {
+    if (!validMoney(variant.price))
+      throw new Error("Enter a valid price for every variant.");
     if (active && variant.is_active) {
       if (
         options.some(
@@ -88,7 +99,7 @@ export function missingVariants(
   price: number,
 ): ProductVariant[] {
   validateOptions(options);
-  if (!Number.isFinite(price) || price < 0 || price > 9999999999.99)
+  if (!validMoney(price))
     throw new Error("Enter a valid price for new variants.");
   let count = 1;
   for (const option of options) {

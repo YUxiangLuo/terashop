@@ -65,6 +65,14 @@ Realtime 前置迁移为 `20260923000005_admin_realtime.sql`。`bun run test:cur
 
 这些验收不等于全部 113 个工具的端到端覆盖，也不替代真实域名、SMTP、生产 Edge CORS、目标 Agent 产品客户端、WebSocket 代理、生产负载与上线运维验收。未设置 `MCP_ADMIN_URL` 时保持原有浏览器只读验收。
 
+## 编辑回执与金额精度回归
+
+本地应用 `20260923000011_catalog_money_precision.sql` 后，`bun run test:current tests/catalog-money-precision.test.ts` 验证创建／更新中的价格、原价及成本拒绝 `1.005`，且整笔编辑与 revision 回滚；覆盖边界金额、可空金额、无效金额拒绝及既有精确数字字符串兼容性。`tests/unit/catalog-money-precision.test.ts` 对齐 Admin、MCP 的输入精度；`tests/unit/admin-write-receipts.test.ts` 覆盖异常身份、版本、嵌套字段、nullable 字段和微秒比较。
+
+运行本地 Admin 后，`bun scripts/admin-write-receipts-smoke.ts` 在真实写入已提交后篡改响应，验证创建／更新的草稿保留、再次派发阻止和显式重读恢复。`bun scripts/admin-inventory-review-smoke.ts` 验证库存草稿离开确认、未知操作刷新恢复和历史刷新／分页失败保留旧数据。脚本仅操作本轮本地夹具；库存历史保持不可变，结束归档商品、停用仓库并撤销测试账号管理员角色。
+
+全量高写入回归可能触发本地 Realtime 的消息速率限制。若订阅成功但通知等待超时，应检查 Realtime 服务日志中的 `MessagePerSecondRateLimitReached`／`UnableToBroadcastChanges: too_many_requests`，并独立复跑对应 WebSocket 用例以区分限流与权限／触发器缺陷。单独通过不能把失败的全量结果记作通过；不要跳过断言或提高配额来掩盖丢失通知。Broadcast 不是可靠事件流，Admin 显式刷新仍必须从 RPC 读取事实。
+
 ## Storefront 验证与演示数据
 
 `bun run storefront:build` 需要可访问的 Supabase，只读取公开目录；构建和 `storefront:check` 不等于浏览器验收。页面改动应在 `storefront:preview` 中检查桌面与手机布局、图片加载、排序、售罄禁用、购物袋数量和报价金额／到期恢复。当前没有自动化浏览器测试套件，注册回调与支付 UI 尚未实现；真实 PayPal 验收见 [接入合同](storefront-paypal.md#sandbox--上线验收仍待完成)。

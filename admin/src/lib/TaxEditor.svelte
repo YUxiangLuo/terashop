@@ -4,6 +4,7 @@
   import { page } from "$app/state";
   import { supabase, message } from "./api";
   import { taxRatio, taxPercent, taxCountry, type TaxRate } from "./taxes";
+  import { taxReceipt } from "./write-receipts";
   let { id, creating }: { id: string; creating: boolean } = $props();
   let rule = $state.raw<TaxRate | null>(null);
   let fields = $state({
@@ -62,7 +63,10 @@
       });
       if (result.error) throw result.error;
       if (!alive) return;
-      const value = result.data as unknown as TaxRate | null;
+      const value =
+        result.data === null
+          ? null
+          : (taxReceipt(result.data, id, null) as unknown as TaxRate);
       if (!value && !creating) throw Error("Tax rate not found.");
       install(value);
     } catch (cause) {
@@ -111,7 +115,13 @@
         : await supabase.rpc("create_tax_rate", { tax_rate_id: id, changes });
       if (result.error) throw result.error;
       if (!alive) return;
-      install(result.data as unknown as TaxRate);
+      install(
+        taxReceipt(
+          result.data,
+          id,
+          rule?.revision ?? null,
+        ) as unknown as TaxRate,
+      );
       notice =
         "Tax rate saved. Existing order taxes are unchanged; new checkout pricing may require a new quote.";
     } catch (cause) {

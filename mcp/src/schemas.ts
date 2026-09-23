@@ -114,6 +114,7 @@ const money = z
   .number()
   .nonnegative()
   .max(Number.MAX_SAFE_INTEGER / 100);
+const inputMoney = z.number().nonnegative().max(9999999999.99).multipleOf(0.01);
 const totals = {
   subtotal: money,
   discount_total: money,
@@ -1144,7 +1145,7 @@ export const metaobjectPage = z.strictObject({
   next_cursor: id.nullable(),
 });
 export const metadataDeletion = z.strictObject({ id, deleted: z.literal(true) });
-export const taxFraction = z.number().min(0).max(1);
+export const taxFraction = z.number().min(0).max(1).multipleOf(0.0001);
 export const taxRateChanges = z.strictObject({
   name: z.string().optional(),
   country: z.string().optional(),
@@ -1152,7 +1153,7 @@ export const taxRateChanges = z.strictObject({
   include_shipping: z.boolean().optional(),
   is_active: z.boolean().optional(),
 });
-export const shippingMoney = z.number().nonnegative().max(9999999999.99);
+export const shippingMoney = inputMoney;
 export const shippingMethodChanges = z.strictObject({
   name: z.string().optional(),
   description: z.string().optional(),
@@ -1258,9 +1259,9 @@ export const productChanges = z.strictObject({
       id,
       sku: z.string().nullable().optional(),
       barcode: z.string().nullable().optional(),
-      price: money.optional(),
-      compare_at_price: money.nullable().optional(),
-      cost: money.nullable().optional(),
+      price: inputMoney.optional(),
+      compare_at_price: inputMoney.nullable().optional(),
+      cost: inputMoney.nullable().optional(),
       track_inventory: z.boolean().optional(),
       position: position.optional(),
       is_active: z.boolean().optional(),
