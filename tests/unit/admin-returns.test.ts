@@ -9,12 +9,80 @@ import {
   acknowledgesReceipt,
   type ReturnAuthorization,
   type ReceiveCommand,
+  isDisposeCommand,
+  dispositionQuantity,
+  acknowledgesDisposition,
+  type DisposeCommand,
 } from "../../admin/src/lib/returns";
 import { dispatchCommand } from "../../admin/src/lib/commands";
 const a = "aaaaaaaa-1111-4111-8111-111111111111",
   b = "bbbbbbbb-2222-4222-8222-222222222222";
 const shipment = crypto.randomUUID(),
   order = crypto.randomUUID();
+test("disposition quantities and commands reject over-disposal and invalid outcomes", () => {
+  expect(dispositionQuantity(2, 2)).toBe(2);
+  for (const quantity of [undefined, 0, -1, 1.5, 3])
+    expect(() => dispositionQuantity(quantity, 2)).toThrow();
+  expect(() => dispositionQuantity(1, 0)).toThrow();
+  const command: DisposeCommand = {
+    receipt_line_id: a,
+    quantity: 2,
+    disposition: "restock",
+    note: "Inspected",
+    idempotency_key: b,
+  };
+  expect(isDisposeCommand(command)).toBe(true);
+  for (const change of [
+    { quantity: 0 },
+    { quantity: 2147483648 },
+    { quantity: "2" },
+    { disposition: "refund" },
+    { note: "a".repeat(2001) },
+    { location_id: b },
+  ])
+    expect(isDisposeCommand({ ...command, ...change })).toBe(false);
+});
+test("disposition acknowledgment matches exact facts and preserves bigint movement IDs", () => {
+  const command: DisposeCommand = {
+    receipt_line_id: a,
+    quantity: 2,
+    disposition: "restock",
+    note: "Inspected",
+    idempotency_key: b,
+  };
+  const result = {
+    id: crypto.randomUUID(),
+    receipt_line_id: a,
+    quantity: 2,
+    disposition: "restock",
+    note: "Inspected",
+    inventory_movement_id: "9223372036854775807",
+  };
+  expect(acknowledgesDisposition(result, command)).toBe(true);
+  for (const change of [
+    { receipt_line_id: b },
+    { quantity: 1 },
+    { disposition: "discard" },
+    { note: "Other" },
+    { inventory_movement_id: null },
+    { inventory_movement_id: 9007199254740993 },
+    { inventory_movement_id: "9223372036854775808" },
+    { inventory_movement_id: "0" },
+  ])
+    expect(acknowledgesDisposition({ ...result, ...change }, command)).toBe(
+      false,
+    );
+  const discard = { ...command, disposition: "discard" as const };
+  expect(
+    acknowledgesDisposition(
+      { ...result, disposition: "discard", inventory_movement_id: null },
+      discard,
+    ),
+  ).toBe(true);
+  expect(
+    acknowledgesDisposition({ ...result, disposition: "discard" }, discard),
+  ).toBe(false);
+});
 const command: ReturnCommand = {
   fulfillment_id: shipment,
   reason: "Wrong size",

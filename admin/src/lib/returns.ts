@@ -2,6 +2,72 @@ import type { orderReturns } from "../../../mcp/src/schemas";
 
 export type OrderReturns = typeof orderReturns._output;
 export type ReturnAuthorization = OrderReturns["returns"][number];
+export type ReturnReceipt = ReturnAuthorization["receipts"][number];
+export type ReceiptLine = ReturnReceipt["lines"][number];
+export interface DisposeCommand {
+  receipt_line_id: string;
+  quantity: number;
+  disposition: "restock" | "discard";
+  note: string;
+  idempotency_key: string;
+}
+export function isDisposeCommand(v: unknown): v is DisposeCommand {
+  return (
+    object(v) &&
+    Object.keys(v).every((k) =>
+      [
+        "receipt_line_id",
+        "quantity",
+        "disposition",
+        "note",
+        "idempotency_key",
+      ].includes(k),
+    ) &&
+    uuid(v.receipt_line_id) &&
+    uuid(v.idempotency_key) &&
+    Number.isInteger(v.quantity) &&
+    Number(v.quantity) > 0 &&
+    Number(v.quantity) <= 2147483647 &&
+    (v.disposition === "restock" || v.disposition === "discard") &&
+    typeof v.note === "string" &&
+    [...v.note].length <= 2000
+  );
+}
+export function dispositionQuantity(
+  quantity: number | undefined,
+  undisposed: number,
+): number {
+  if (
+    quantity === undefined ||
+    !Number.isInteger(quantity) ||
+    quantity < 1 ||
+    quantity > undisposed
+  )
+    throw Error(
+      "Choose a whole quantity within the undisposed receipt quantity.",
+    );
+  return quantity;
+}
+export function acknowledgesDisposition(
+  v: unknown,
+  command: DisposeCommand,
+): boolean {
+  if (
+    !object(v) ||
+    !uuid(v.id) ||
+    v.receipt_line_id !== command.receipt_line_id ||
+    v.quantity !== command.quantity ||
+    v.disposition !== command.disposition ||
+    v.note !== command.note
+  )
+    return false;
+  // Never coerce bigint IDs through Number; discard must not claim a stock movement.
+  return command.disposition === "discard"
+    ? v.inventory_movement_id === null
+    : typeof v.inventory_movement_id === "string" &&
+        /^[1-9][0-9]{0,18}$/.test(v.inventory_movement_id) &&
+        BigInt(v.inventory_movement_id) <= 9223372036854775807n;
+}
 export interface ReceiveCommand {
   return_id: string;
   location_id: string;

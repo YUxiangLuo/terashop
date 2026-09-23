@@ -323,6 +323,9 @@
                   ?.order_item_id ?? line.return_line_id,
               )} — Received {line.quantity} · Undisposed {line.undisposed_quantity}
             </p>
+            <a href={`/orders/${id}/returns/dispose/${line.id}`}
+              >Inspect items / recover request</a
+            >
             <ul>
               {#each line.dispositions as disposition}<li>
                   {disposition.disposition} × {disposition.quantity} · {dateTime(

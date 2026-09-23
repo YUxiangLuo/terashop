@@ -258,24 +258,129 @@ try {
   await browser("screenshot", "/tmp/admin-receipt-complete.png", "--full");
   await browser("click", `a[href="/orders/${order.id}/returns"]`);
   await ready();
+  await browser("click", "details:first-of-type > summary");
+  await browser(
+    "click",
+    `a[href="/orders/${order.id}/returns/dispose/${receipt.lines[0].id}"]`,
+  );
+  await ready();
+  await browser(
+    "eval",
+    'if (document.querySelector("#disposition-kind").value !== "") throw Error("Outcome preselected")',
+  );
+  await browser("select", "#disposition-kind", "restock");
+  await browser("fill", "#disposition-quantity", "3");
+  await browser(
+    "eval",
+    'if (document.querySelector("#disposition-quantity").checkValidity()) throw Error("Over-disposal allowed")',
+  );
+  await browser("fill", "#disposition-quantity", "1");
+  await browser("fill", "#disposition-note", "Passed inspection");
+  await browser(
+    "eval",
+    `(() => { const original = window.fetch; window.fetch = async (...args) => {
+    if (String(args[0]).includes('/rpc/dispose_return_receipt')) { window.fetch = original; const response = await original(...args); if (!response.ok) return response; return new Response(JSON.stringify({message:'Simulated lost disposition'}), {status:503,headers:{'Content-Type':'application/json'}}); } return original(...args);
+  }; })()`,
+  );
+  await click("Record disposition");
+  await browser("dialog", "accept");
+  await wait("Unconfirmed disposition request");
+  await browser("eval", 'if (!document.querySelector("#disposition-kind").matches(":disabled")) throw Error("Pending form enabled")');
+  await browser("screenshot", "/tmp/admin-disposition-uncertain.png", "--full");
   await checked(
-    rpc(
-      "dispose_return_receipt",
-      {
-        receipt_line_id: receipt.lines[0].id,
-        quantity: 1,
-        disposition: "discard",
-        note: "Damaged item",
-        idempotency_key: crypto.randomUUID(),
-      },
-      actor.token,
+    api(`/rest/v1/locations?id=eq.${receiptLocation}`, {
+      service: true,
+      method: "PATCH",
+      body: { is_active: false },
+    }),
+  );
+  await checked(
+    rpc("close_return", { return_id: authorization.id }, actor.token),
+  );
+  await browser("reload");
+  await wait("Unconfirmed disposition request");
+  await browser(
+    "wait",
+    "--fn",
+    '!Array.from(document.querySelectorAll("button")).find(b => b.textContent.includes("Replay saved disposition")).disabled',
+  );
+  await click("Replay saved disposition");
+  await browser("dialog", "accept");
+  await wait("Restock recorded");
+  await ready();
+  const disposed = () =>
+    facts().then(
+      (f) =>
+        f.returns[0].receipts.find((r: any) => r.id === receipt.id).lines[0],
+    );
+  assert.equal((await disposed()).dispositions.length, 1);
+  assert.equal((await disposed()).undisposed_quantity, 1);
+  const [receivedStock] = await checked<any[]>(
+    api(
+      `/rest/v1/inventory_levels?variant_id=eq.${fixture.variantId}&location_id=eq.${receiptLocation}&select=on_hand`,
+      { service: true },
     ),
   );
+  assert.equal(receivedStock.on_hand, 1);
+  const movements = await checked<any[]>(
+    api(
+      `/rest/v1/inventory_movements?order_id=eq.${order.id}&reason=eq.return&select=id,delta,location_id`,
+      { service: true },
+    ),
+  );
+  assert.equal(movements.length, 1);
+  assert.equal(movements[0].delta, 1);
+  assert.equal(movements[0].location_id, receiptLocation);
+  // A new restock at the disabled location must be rejected, not treated as replay.
+  await browser("select", "#disposition-kind", "restock");
+  await browser("fill", "#disposition-quantity", "1");
+  await click("Record disposition");
+  await browser("dialog", "accept");
+  await wait("receipt location is not active");
+  await browser(
+    "eval",
+    'if (!document.querySelector("fieldset").disabled) throw Error("Rejected operation not locked"); if (Object.keys(sessionStorage).some(k => k.includes(":return-disposition:"))) throw Error("Rejected first request retained")',
+  );
+  await click("Reload inspection facts");
+  await browser("dialog", "accept");
+  await ready();
+  await browser("select", "#disposition-kind", "discard");
+  await browser("fill", "#disposition-quantity", "1");
+  await browser("fill", "#disposition-note", "Damaged item");
+  await click("Record disposition");
+  await browser("dialog", "accept");
+  await wait("Discard recorded");
+  await wait("This receipt line is fully disposed.");
+  await browser("eval", 'for (const control of document.querySelectorAll("fieldset input, fieldset select, fieldset textarea, fieldset button")) if (!control.matches(":disabled")) throw Error("Fully disposed form enabled")');
+  assert.equal((await disposed()).dispositions.length, 2);
+  assert.equal((await disposed()).undisposed_quantity, 0);
+  assert.equal(
+    (
+      await checked<any>(
+        rpc("get_order_ledger", { order_id: order.id }, actor.token),
+      )
+    ).balances.refunded,
+    0,
+  );
+  assert.equal(
+    (await stock()).reduce((total, row) => total + row.on_hand, 0),
+    before.reduce((total, row) => total + row.on_hand, 0) + 1,
+  );
+  await browser("screenshot", "/tmp/admin-disposition.png", "--full");
+  await browser("set", "viewport", "390", "844");
+  await browser(
+    "eval",
+    'if (document.documentElement.scrollWidth > innerWidth) throw Error("Disposition mobile overflow")',
+  );
+  await browser("screenshot", "/tmp/admin-disposition-mobile.png", "--full");
+  await browser("set", "viewport", "1280", "900");
+  await browser("click", `a[href="/orders/${order.id}/returns"]`);
+  await ready();
   await click("Reload returns");
   await ready();
   await browser("select", "#return-shipment", second.id);
   await browser("click", "details:first-of-type > summary");
-  await wait("Undisposed 1");
+  await wait("Undisposed 0");
   await wait("discard × 1");
   await browser("screenshot", "/tmp/admin-returns.png", "--full");
   await browser("set", "viewport", "390", "844");
@@ -309,7 +414,7 @@ try {
     'if (!document.querySelector("fieldset").disabled) throw Error("Stale form editable")',
   );
   console.log(
-    "Return smoke passed: shipment bounds, lost-response replay after reload, no duplicate/stock/refund, receipt/disposition history, mobile, read-failure lock.",
+    "Return smoke passed: authorization and partial receipt recovery; restock replay after location disabled and return closed; rejected new restock; discard without stock; exact movement and no refund; mobile and read-failure lock.",
   );
 } finally {
   await browser("close").catch(() => {});
