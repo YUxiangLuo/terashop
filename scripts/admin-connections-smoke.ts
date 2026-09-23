@@ -104,6 +104,9 @@ try {
   await browser('screenshot', '/tmp/admin-call-records.png');
   await click('Older call records');
   await wait('get_admin_customer');
+  await db`update private.mcp_tool_audit set outcome='returned',finished_at=now()
+    where project=${session} and user_id=${owner} and outcome='pending'`;
+  await wait('Call records may have changed.');
   await browser(
     'eval',
     `if(document.querySelector('${auditSection}').querySelectorAll('tbody tr').length!==1)throw Error('Wrong older page');

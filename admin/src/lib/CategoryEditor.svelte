@@ -3,6 +3,7 @@
   import { beforeNavigate } from "$app/navigation";
   import { page } from "$app/state";
   import { supabase, message, imageUrl } from "./api";
+  import { watchAdminChanges } from "./realtime";
   import type { Category, CategoryPage } from "./categories";
   let { id, creating }: { id: string; creating: boolean } = $props();
   let category = $state.raw<Category | null>(null);
@@ -22,6 +23,10 @@
   let uncertain = $state(false);
   let error = $state("");
   let notice = $state("");
+  let live = $state(false);
+  let changes = $state(0),
+    checked = $state(0),
+    attempted = $state(0);
   let parents = $state<Category[]>([]);
   let parentSearch = $state("");
   let parentCursor = $state<string | null>(null);
@@ -41,9 +46,26 @@
   onMount(() => {
     void load();
     void searchParents(false);
+    const stop = watchAdminChanges(
+      supabase,
+      "categories",
+      () => changes++,
+      (value) => (live = value),
+    );
     return () => {
       alive = false;
+      stop();
     };
+  });
+  $effect(() => {
+    if (
+      changes > attempted &&
+      !busy &&
+      !dirty &&
+      !uncertain &&
+      !creating
+    )
+      void load(true);
   });
   beforeNavigate(({ cancel }) => {
     if (busy || (dirty && !window.confirm("Discard unsaved category edits?")))
@@ -65,10 +87,13 @@
     loaded = true;
     uncertain = false;
   }
-  async function load() {
+  async function load(automatic = false) {
+    if (busy) return;
+    const version = changes;
+    attempted = version;
     busy = true;
     error = "";
-    notice = "";
+    if (!automatic) notice = "";
     try {
       const result = await supabase.rpc("get_admin_category", {
         category_id: id,
@@ -78,6 +103,7 @@
       const value = result.data as unknown as Category | null;
       if (!value && !creating) throw new Error("Category not found.");
       install(value);
+      checked = version;
       if (value?.parent_id) {
         const parent = await supabase.rpc("get_admin_category", {
           category_id: value.parent_id,
@@ -197,6 +223,15 @@
 </div>
 {#if error}<p class="notice error" role="alert">{error}</p>{/if}
 {#if notice}<p class="notice" role="status">{notice}</p>{/if}
+<p class="small muted">
+  {live
+    ? "Live category updates connected."
+    : "Live category updates unavailable; focus or reload to check current facts."}
+</p>
+{#if changes > checked}<p class="notice" role="status">
+    Category data may have changed. Local edits and unconfirmed operations are
+    preserved. Reload the category to check current facts.
+  </p>{/if}
 {#if !loaded}<p role="status">
     {busy ? "Loading category…" : "Unable to open category."}
   </p>{:else}

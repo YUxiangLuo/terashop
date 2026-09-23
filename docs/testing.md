@@ -47,6 +47,10 @@ MCP_BROWSER=1 MCP_ADMIN_URL=http://127.0.0.1:5174 \
 
 在原 OAuth 故障回归之后，同一真实授权继续创建停用分类，再独立登录 Admin 核对名称、负排序值与停用状态。Admin 修改后，MCP 能读取新事实，携带原始 `updated_at` 的旧请求被拒绝。连接页必须显示真正由 MCP 产生的成功／拒绝审计，不包含参数；页面明确撤销后，用同一 bearer 直接发送读写均须返回 401，商品目录事实不被修改。没有注入 Admin session、手工造授权／审计或自动换 token。夹具结束清理本轮分类、账户、审计、授权、临时数据库和进程；失败仍会尝试清理。
 
+该验收还覆盖 Realtime：MCP 修改后干净分类编辑页自动重读；本地草稿与冲突锁定不被后续通知覆盖；离线期间修改在恢复后核对；本人的新调用自动出现在最新记录页。截图写入 `/tmp/admin-realtime-*.png`，检查移动端草稿提示、恢复后的分类事实和调用记录。
+
+Realtime 前置迁移为 `20260923000005_admin_realtime.sql`。`bun run test:current tests/admin-realtime.test.ts` 使用真实本地 WebSocket 验证私有频道、事务回滚无通知、公开频道隔离、普通用户/匿名拒绝、浏览器发布拒绝、跨用户隔离及降级后 RPC 门禁；`bun test tests/unit/admin-realtime.test.ts` 验证通知合并、前台恢复与卸载清理。`bun scripts/admin-connections-smoke.ts` 另验证旧记录页收到通知后不跳页；`bun scripts/admin-categories-smoke.ts` 保留本地草稿并验证并发冲突。以上脚本清理本轮临时数据，不对共享环境执行迁移。
+
 该验收覆盖一条代表性跨客户端业务链路，不等于全部 113 个工具的端到端覆盖，也不替代真实域名、SMTP、生产 Edge CORS、目标 Agent 产品客户端与上线运维验收。未设置 `MCP_ADMIN_URL` 时保持原有浏览器只读验收。
 
 ## Storefront 验证与演示数据

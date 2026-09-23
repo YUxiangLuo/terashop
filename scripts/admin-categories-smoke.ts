@@ -139,12 +139,12 @@ try {
   await browser("click", `a[href^="/categories/${child}"]`);
   await browser("wait", "#category-form");
   // Concurrent writer must not be overwritten by the stale form.
+  await browser("fill", "textarea", "Stale edit");
   await api("/rest/v1/rpc/update_category", "POST", {
     category_id: child,
     expected_updated_at: created.updated_at,
     changes: { description: "Concurrent edit" },
   });
-  await browser("fill", "textarea", "Stale edit");
   await click("Save category");
   await browser("wait", "[role=alert]");
   await browser(

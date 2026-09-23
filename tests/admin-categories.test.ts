@@ -43,7 +43,7 @@ async function create(changes: Record<string, unknown> = {}): Promise<Category> 
   const id = crypto.randomUUID();
   const category = await toolData<Category>(session.client, 'create_category', {
     category_id: id,
-    changes: { slug: `category-${id}`, name: 'Test category', ...changes },
+    changes: { slug: `category-${id}`, name: 'Test category', is_active: true, ...changes },
   });
   cleanup.defer(() => checked(api(`/rest/v1/categories?id=eq.${id}`, { method: 'DELETE', service: true })));
   return category;

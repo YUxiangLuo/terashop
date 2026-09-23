@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { supabase, dateTime } from "$lib/api";
+  import { watchAdminChanges } from "$lib/realtime";
   import {
     toolCallPage,
     type McpToolCall,
@@ -12,15 +13,33 @@
   let busy = $state(false);
   let loaded = $state(false);
   let error = $state("");
+  let live = $state(false);
+  let changes = $state(0),
+    checked = $state(0),
+    attempted = $state(0);
+  let older = $state(false);
   let alive = true;
   onMount(() => {
     void load();
+    const stop = watchAdminChanges(
+      supabase,
+      "calls",
+      () => changes++,
+      (value) => (live = value),
+    );
     return () => {
       alive = false;
+      stop();
     };
+  });
+  $effect(() => {
+    if (changes > attempted && !busy && !older) void load();
   });
   async function load(before?: ToolCallCursor) {
     if (busy) return;
+    const version = changes;
+    attempted = version;
+    older = !!before;
     busy = true;
     error = "";
     try {
@@ -36,6 +55,7 @@
       items = page.items;
       cursor = page.next_cursor;
       loaded = true;
+      if (!before) checked = version;
     } catch {
       if (alive)
         error =
@@ -63,6 +83,15 @@
     merely because its record is pending or unknown.
   </p>
   {#if error}<p class="notice error" role="alert">{error}</p>{/if}
+  <p class="small muted">
+    {live
+      ? "Live call updates connected."
+      : "Live call updates unavailable; focus or refresh to check current facts."}
+  </p>
+  {#if older && changes > checked}<p class="notice" role="status">
+      Call records may have changed. Refresh call records to return to the
+      newest page; the current page is preserved.
+    </p>{/if}
   <p class="small muted">
     On narrow screens, scroll the table horizontally to review all columns.
   </p>

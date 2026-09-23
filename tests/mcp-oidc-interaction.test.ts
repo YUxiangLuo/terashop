@@ -1169,8 +1169,12 @@ for (const runtime of ['bun', 'node'] as const)
             // the OAuth user/client/resource, not a browser-supplied source label.
             expect(calls.map((call: { tool_name: string; outcome: string }) => [call.tool_name,call.outcome])).toEqual([
               ['get_admin_shop_settings','returned'], ['create_category','returned'],
-              ['get_admin_category','returned'], ['get_admin_category','returned'],
+              ['get_admin_category','returned'], ['update_category','returned'],
+              ['update_category','returned'], ['update_category','returned'],
+              ['get_admin_category','returned'], ['update_category','returned'],
+              ['get_admin_category','returned'],
               ['update_category','rejected'], ['get_admin_category','returned'],
+              ['get_admin_category','returned'],
             ]);
             for (const call of calls) {
               expect(call.user_id).toBe(user.userId);
