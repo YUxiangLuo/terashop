@@ -174,6 +174,13 @@
           href="/quotes">▤ <span>Checkout quotes</span></a
         >
         <a
+          class:nav-active={page.url.pathname.startsWith("/reconciliation")}
+          aria-current={page.url.pathname.startsWith("/reconciliation")
+            ? "page"
+            : undefined}
+          href="/reconciliation">≍ <span>Reconciliation</span></a
+        >
+        <a
           class:nav-active={page.url.pathname.startsWith("/customers")}
           aria-current={page.url.pathname.startsWith("/customers")
             ? "page"

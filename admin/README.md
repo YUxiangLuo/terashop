@@ -32,6 +32,8 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 ## MVP 范围
 
+- `/reconciliation` 查询全店未解决的渠道资金变动，包括没有关联订单的记录。分别查询 unmatched / action_required，URL 保留筛选，按创建时间及 UUID 最早优先分页，微秒游标原样传递；下一页失败保留已加载记录。金额按原币种及原始十进制字符串显示，不换算、舍入或跨币种合计。
+- 对账页仅展示安全引用 ID、错误标记和关联订单入口，不显示渠道引用、原始错误或载荷。记录不等于已结算账本资金，空页不证明系统健康，错误标记不是重试许可，无跨页快照。不提供自动匹配、资金重放或退款；action_required 交由受信运维核查。
 - `/quotes` 提供只读 Checkout 报价查询，支持客户 UUID、有效状态、是否关联订单组合筛选，URL 保留筛选条件，按 UUID 游标分页；下一页失败保留已有记录并可重试。详情显示历史价格、地址、备注及客户/订单链接，支持直接打开和刷新。
 - 报价有效状态与存储状态分别显示；预留标记不是库存数量或付款证明，显示过期不证明后台已完成释放，须重新读取获取当前事实。不提供延期或独立释放库存操作，无跨页快照，不添加兼容接口或数据转换。
 - 从报价详情进入独立取消页，填写客户可见原因（界面限制 1–500 字符）并确认。取消 converted 报价同时取消关联未付款订单，释放预占和优惠用量，不退款、不恢复已发货库存；付款或履约状态及捕获中保护由后端检查。按管理员/报价在当前标签页保存原请求，结果未知时仅重试原原因；重读存储终态确认取消或提示已过期/已完成，不把有效过期当作取消成功，不推断操作者，保留后端实际原因。读取失败锁定操作，关闭标签页不保留恢复记录。
@@ -144,5 +146,7 @@ location / {
 报价回归：`bun test tests/unit/admin-quotes.test.ts`、`bun run test:current tests/admin-checkout-quotes.test.ts`；本地 Admin 运行后执行 `bun scripts/admin-quotes-smoke.ts`（支持 `ADMIN_URL`）。验证真实分页、下一页失败保留记录及重试、组合筛选、订单链接、深链接刷新、空结果和非法筛选；模拟有效过期与不可信备注响应，验证状态区别和文本转义，不改写报价事实。仅创建本次临时账号、商品和订单，结束取消自建未付款订单、归档商品并撤销管理员角色，保留审计记录；桌面及移动截图写入 `/tmp/admin-quote*.png`。
 
 同一报价脚本还通过取消页验证原因必填、未发送请求的原参数恢复、重试成功但响应与后续读取丢失后的刷新核对、终态按钮禁用，以及关联未付款订单确实取消。取消截图保存于 `/tmp/admin-quote-cancel*.png`；并发 Capture 阻止取消和重复调用保留原原因由上述后端回归覆盖。
+
+对账异常回归：`bun run test:current tests/admin-reconciliation.test.ts` 验证真实权限、无订单记录、微秒游标、原始金额与安全字段；本地 Admin 运行后执行 `bun scripts/admin-reconciliation-smoke.ts`（支持 `ADMIN_URL`）。真实登录与读取后，用浏览器模拟响应验证八位 EUR 金额、精确游标、分页失败重试、状态切换清空游标、安全字段、空结果/错误/非法状态、深链接刷新和移动端内部滚动。仅创建并删除临时账号，不写资金记录；模拟记录截图保存于 `/tmp/admin-reconciliation*.png`。
 
 自动检查：`admin:check`、`admin:build`、`bun test tests/unit/admin-commands.test.ts tests/unit/admin-catalog.test.ts`；数据库回归可运行 `bun run test:current tests/product-edit.test.ts tests/admin-order-operations.test.ts tests/admin-retry.test.ts tests/storage-admin.test.ts`。浏览器验收应包含登录失败、普通客户拒绝、管理员恢复会话、创建/发布/归档、规格组合增删及原 ID 保留、图片上传和变体归属、分类跨搜索保留、库存搜索/流水分页、仓库/变体切换、备注冲突、部分发货、未知写结果刷新后原键重试，以及桌面/移动端与深链接刷新。整个回归套件会写入额外目录数据；恢复演示环境需重新 setup（会清空账号）并构建 Storefront。
