@@ -34,6 +34,21 @@ bun run test:current tests/admin.test.ts --rerun-each=2 --randomize --seed=6149
 
 `tests/admin-operations.test.ts` 覆盖运维摘要分页、同时间戳游标、敏感字段排除、Inbox 自动重试次数边界，以及 Outbox 管理员身份绑定、并发重投审计和 Worker 状态保护；同时验证 Worker 命令不对管理员开放。
 
+## Admin / MCP 本地融合验收
+
+先运行本地 Supabase 和 `bun run admin:dev`，确认 Admin 的实际端口；另一个终端运行：
+
+```bash
+MCP_BROWSER=1 MCP_ADMIN_URL=http://127.0.0.1:5174 \
+  bun run test:current tests/mcp-oidc-interaction.test.ts -t 'node: durable'
+```
+
+需要 Docker、OpenSSL 和 `agent-browser`。沿用已有 Node LTS OAuth 宿主、Bun HTTPS MCP、真实本地 Auth/SMTP 和独立临时 issuer 数据库；临时证书由浏览器信任，不关闭 TLS 校验，无需公网域名。`MCP_ADMIN_URL` 只接受精确回环 origin，并要求 `MCP_BROWSER=1`；仅此模式开启测试 MCP 的调用审计和浏览器授权的 `store:write`，不更改部署默认值。
+
+在原 OAuth 故障回归之后，同一真实授权继续创建停用分类，再独立登录 Admin 核对名称、负排序值与停用状态。Admin 修改后，MCP 能读取新事实，携带原始 `updated_at` 的旧请求被拒绝。连接页必须显示真正由 MCP 产生的成功／拒绝审计，不包含参数；页面明确撤销后，用同一 bearer 直接发送读写均须返回 401，商品目录事实不被修改。没有注入 Admin session、手工造授权／审计或自动换 token。夹具结束清理本轮分类、账户、审计、授权、临时数据库和进程；失败仍会尝试清理。
+
+该验收覆盖一条代表性跨客户端业务链路，不等于全部 113 个工具的端到端覆盖，也不替代真实域名、SMTP、生产 Edge CORS、目标 Agent 产品客户端与上线运维验收。未设置 `MCP_ADMIN_URL` 时保持原有浏览器只读验收。
+
 ## Storefront 验证与演示数据
 
 `bun run storefront:build` 需要可访问的 Supabase，只读取公开目录；构建和 `storefront:check` 不等于浏览器验收。页面改动应在 `storefront:preview` 中检查桌面与手机布局、图片加载、排序、售罄禁用、购物袋数量和报价金额／到期恢复。当前没有自动化浏览器测试套件，注册回调与支付 UI 尚未实现；真实 PayPal 验收见 [接入合同](storefront-paypal.md#sandbox--上线验收仍待完成)。

@@ -18,6 +18,8 @@
 
 已对齐安全输入合同（客户端须刷新工具 schema）：MCP `create_category`／`create_location` 必须显式提供 `changes.is_active`，不再因省略字段而默认启用；建议先停用创建，启用须明确确认。Admin 保留默认停用并显式提交该字段。更新接口的字段仍可省略，省略不改变原启用状态。`cancel_checkout_quote` 必须提供非空白、最多 500 个 Unicode 码点的客户可见原因；MCP 不修剪原始文本，重试保留原请求。Admin 同样按码点校验，HTML 输入容纳最多 1000 个 UTF-16 单元以免截断 500 个非 BMP 字符。数据库默认值与 Storefront 兼容接口未改，不新增逐笔批准凭据。输入不合法时在派发前拒绝，未知结果仍须核对原记录，不能为适配新 schema 自动补值并重放旧请求。验证见 `tests/mcp-alignment.test.ts`、MCP/报价单测及 `scripts/admin-quotes-smoke.ts`。
 
+Admin 新图片上传已复用 managed-media 的私有暂存、明确永久公开、独立保存关联流程，统一 1 MiB 上限；旧公开文件保持兼容。浏览器来源需单独配置 `MEDIA_ALLOWED_ORIGINS`，不向浏览器分发 service key。原请求 ID 与摘要在当前标签页保留到商品关联确认，失败不自动重传。详见 [图片权限与失败处理](../admin/README.md#图片权限与失败处理)。
+
 已提供可选的 Admin 公开构建配置 `PUBLIC_MCP_CONNECTION`，展示受信运维提供的 resource、issuer 和业务 scopes，按允许范围显示只读／日常操作建议。没有配置则不推断地址；非法配置阻止构建。不读取远程元数据、不启动 OAuth、不分发 token，预设不是实际授权，部署配置可能过时且不证明服务健康。配置格式和验证入口见 [Admin 说明](../admin/README.md#本人的-mcp-连接)。
 
 已提供跨页授权撤销预览：单次数据库快照读取本人最多 100 条尚无清理请求的记录，确认与重试复用明确 ID 集合，不扩大到新连接。超过 100 条整体拒绝，不截断；原分页撤销入口保留。预览不是持久任务或批准凭据，无新增 MCP 工具，仍使用原子个人撤销接口。
@@ -33,6 +35,8 @@
 后续按融合计划推进：其他关键业务契约对照、更多资源互通与可信来源审计；现有事件 `actor_id` 只能证明数据库识别的用户，不能区分 Admin 与 MCP。不得用 tool 参数、浏览器 header 或备注中的自报来源冒充可信审计。角色降级是否永久撤销、SSO/PAT、跨用户管理及逐笔审批分别定义，不能混入本批默认行为。公网与目标客户端验收仍需域名／证书和部署批准。
 
 验证入口：`bun run test:current tests/mcp-connections.test.ts` 覆盖本人权限、脱敏分页、原子撤销、快照重试与凭据写入竞争；`tests/mcp-oidc-interaction.test.ts` 的 Node 场景验证真实授权后的个人撤销、轮询清理及其他用户隔离；`bun scripts/admin-connections-smoke.ts` 验证真实 Admin 登录、丢失回执、原 ID 重试及降级后的安全页。单测另验证清理失败不确认、回执丢失重放和退出停止后续清理。
+
+融合整体验收通过同一真实浏览器授权继续执行 MCP 分类创建 → Admin 独立登录与编辑 → MCP 读取及旧版本冲突 → Admin 核对真实调用审计 → 页面撤销 → 原 bearer 的读写均返回 401，最后确认分类未被撤销后的请求修改。运行方式见 [本地融合验收](../docs/testing.md#admin--mcp-本地融合验收)。只使用临时分类与测试账户；不手工插入授权或审计记录，不共享 Admin session，不声称覆盖公网部署或所有业务工具。
 
 ## 当前状态与首版交付清单
 

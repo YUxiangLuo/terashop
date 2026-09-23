@@ -22,6 +22,13 @@ import { nodeOidcService } from './support/oidc-node-service';
 import { verifyOidcBrowser } from './support/oidc-browser';
 
 const browserEnabled = process.env.MCP_BROWSER === '1';
+const adminOrigin = process.env.MCP_ADMIN_URL;
+if (adminOrigin) {
+  const url = new URL(adminOrigin);
+  if (!browserEnabled || !['http:', 'https:'].includes(url.protocol) ||
+      !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.origin !== adminOrigin)
+    throw new Error('MCP_ADMIN_URL requires MCP_BROWSER=1 and an exact loopback Admin origin');
+}
 const timeout = browserEnabled ? (process.env.MCP_BROWSER_EXPIRY === '1' ? 540_000 : 180_000) : 45_000;
 
 // Real local Auth/SMTP/shop database plus a separate issuer DB. Bun mode injects
@@ -150,6 +157,7 @@ for (const runtime of ['bun', 'node'] as const)
               anonKey: ANON_KEY,
               scopes: ['store:read', 'store:write'],
               allowWrites: true,
+              auditTools: !!adminOrigin,
             },
             credentialKeys: { test: encryptionKey.toString('base64url') },
             activeCredentialKey: 'test',
@@ -1081,6 +1089,7 @@ for (const runtime of ['bun', 'node'] as const)
           await makeAdmin(discardedReceipt.userId);
           await verifyOidcBrowser({
             node, origin, resource, redirect: browserRedirect,
+            adminOrigin,
             email: user.email, interruptedEmail: interrupted.email, offlineEmail: offline.email,
             lostResponseEmail: lostResponse.email,
             discardedReceiptEmail: discardedReceipt.email,
@@ -1147,10 +1156,28 @@ for (const runtime of ['bun', 'node'] as const)
           expect(await store!`select 1 from oidc.artifacts
             where grant_id=${completed.binding.session_id} and not destroyed
             and model in ('AuthorizationCode','AccessToken','RefreshToken')`).toHaveLength(0);
-          const approvedGrants = await db`select state from private.mcp_grants
+          const approvedGrants = await db`select id,state from private.mcp_grants
             where binding->>'project'=${project} and user_id=${user.userId}::uuid`;
           expect(approvedGrants).toHaveLength(1);
-          expect(approvedGrants[0].state).toBe('active');
+          expect(approvedGrants[0].state).toBe(adminOrigin ? 'revoked' : 'active');
+          if (adminOrigin) {
+            const grantId = approvedGrants[0].id;
+            expect(await db`select revision from private.mcp_credentials where grant_id=${grantId}`).toHaveLength(0);
+            const calls = await db`select user_id,client_id,resource,tool_name,outcome
+              from private.mcp_tool_audit where grant_id=${grantId} order by admitted_at,id`;
+            // Revoked attempts never reach admission. Bind every actual call to
+            // the OAuth user/client/resource, not a browser-supplied source label.
+            expect(calls.map((call: { tool_name: string; outcome: string }) => [call.tool_name,call.outcome])).toEqual([
+              ['get_admin_shop_settings','returned'], ['create_category','returned'],
+              ['get_admin_category','returned'], ['get_admin_category','returned'],
+              ['update_category','rejected'], ['get_admin_category','returned'],
+            ]);
+            for (const call of calls) {
+              expect(call.user_id).toBe(user.userId);
+              expect(call.client_id).toBe('agent');
+              expect(call.resource).toBe(resource);
+            }
+          }
         }
         mcpProcess!.kill('SIGTERM');
         expect(await mcpProcess!.exited).toBe(0);
@@ -1173,6 +1200,7 @@ for (const runtime of ['bun', 'node'] as const)
         }
       } finally {
         try {
+          await db`delete from private.mcp_tool_audit where project=${project}`;
           await db`delete from private.mcp_grants where binding->>'project'=${project}`;
           await db`delete from private.mcp_grant_fences where binding->>'project'=${project}`;
           for (const user of users)

@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { authMail, authMessages } from './mail';
 import type { nodeOidcService } from './oidc-node-service';
+import { verifyAdminFusion } from './admin-fusion';
 
 // Opt-in local browser acceptance. No mocked HTTP, injected cookies, TLS bypass,
 // generated Auth links or automatic approval. Browser output may contain codes;
@@ -17,6 +18,7 @@ export async function verifyOidcBrowser(input: {
   offlineEmail: string;
   lostResponseEmail: string;
   discardedReceiptEmail: string;
+  adminOrigin?: string;
   interruptApproval: (submit: () => Promise<void>, disconnect: () => Promise<void>) => Promise<void>;
 }) {
   const { node, origin, resource, redirect, email } = input;
@@ -68,7 +70,9 @@ export async function verifyOidcBrowser(input: {
       client_id: 'agent',
       redirect_uri: redirect,
       response_type: 'code',
-      scope: 'openid offline_access store:read',
+      scope: input.adminOrigin
+        ? 'openid offline_access store:read store:write'
+        : 'openid offline_access store:read',
       resource,
       prompt: 'consent',
       state,
@@ -276,6 +280,16 @@ export async function verifyOidcBrowser(input: {
     assert.notEqual(result.isError, true);
     const settings = result.structuredContent as { data?: { currency?: string } } | undefined;
     assert.equal(settings?.data?.currency, 'USD');
+    if (input.adminOrigin)
+      await verifyAdminFusion({
+        client,
+        browser,
+        adminOrigin: input.adminOrigin,
+        email,
+        resource,
+        accessToken: token.access_token,
+        ca: node.tls.cert,
+      });
     await client.close();
     client = undefined;
     callback = undefined;
