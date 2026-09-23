@@ -38,7 +38,7 @@ test('客户列表保留同邮箱独立客户，按微秒时间/UUID 分页并�
     let cursor: Page['next_cursor'] = null, found = false;
     do {
       const anonymous = (await sql.unsafe(
-        'select public.list_admin_customers(anonymized=>true,page_size=>100,after_cursor=>$1::jsonb) dto',
+        'select public.list_admin_customers(anonymized=>true,page_size=>100,after_cursor=>$1::text::jsonb) dto',
         [cursor === null ? null : JSON.stringify(cursor)],
       ))[0].dto as Page;
       found = anonymous.items.some(c => c.id === ids[1]);

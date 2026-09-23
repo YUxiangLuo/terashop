@@ -10,6 +10,7 @@ import { createOidcTlsHandler, readOidcProviderConfiguration } from './oidc-host
 import { createCredentialCipher } from './credentials';
 import { createOidcApprovalJournal } from './oidc-journal';
 import { recoverOidcApprovals } from './oidc-recovery';
+import { cleanupOidcConnections } from './oidc-connection-cleanup';
 import { createRateLimit } from './rate-limit';
 
 const secret = z
@@ -61,9 +62,11 @@ export async function startOidcService(path: string) {
   const ownershipLost = Promise.withResolvers<void>();
   let server: ReturnType<typeof createServer> | undefined;
   const pending = new Set<Promise<void>>();
+  let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
   let closing: Promise<void> | undefined;
   const close = () =>
     (closing ??= (async () => {
+      clearTimeout(cleanupTimer);
       if (server?.listening) await new Promise<void>((resolve) => server!.close(() => resolve()));
       await Promise.allSettled([...pending]);
       try {
@@ -129,7 +132,10 @@ export async function startOidcService(path: string) {
       },
       (req, res) => {
         if (closing || ownerClosed) {
-          res.writeHead(503, { 'Cache-Control': 'no-store', Connection: 'close' });
+          res.writeHead(503, {
+            'Cache-Control': 'no-store',
+            Connection: 'close',
+          });
           res.end();
           return;
         }
@@ -272,7 +278,38 @@ export async function startOidcService(path: string) {
       await new Promise<void>((resolve) => server!.close(() => resolve()));
       throw new Error('Issuer ownership lost during startup');
     }
-    return { address: server.address(), close, ownershipLost: ownershipLost.promise };
+    // Local revocation already blocks MCP admission. Upstream cleanup is durable
+    // but asynchronous, and its outage must not undo that local safety decision.
+    const grants = new (createOidcAdapter(database))('Grant');
+    const cleanup = () => {
+      if (closing || ownerClosed) return;
+      const operation = cleanupOidcConnections(
+        {
+          ...c.downstream,
+          issuer: provider.issuer,
+          resource: c.provider.resource,
+        },
+        (id) => grants.destroy(id),
+        fetch,
+        () => !closing && !ownerClosed,
+      ).then(
+        () => {},
+        () => {
+          if (!closing && !ownerClosed) console.error('OIDC_CONNECTION_CLEANUP_UNCONFIRMED');
+        },
+      );
+      pending.add(operation);
+      void operation.then(() => {
+        pending.delete(operation);
+        if (!closing && !ownerClosed) cleanupTimer = setTimeout(cleanup, 5000);
+      });
+    };
+    cleanupTimer = setTimeout(cleanup, 0);
+    return {
+      address: server.address(),
+      close,
+      ownershipLost: ownershipLost.promise,
+    };
   } catch {
     try {
       await close();

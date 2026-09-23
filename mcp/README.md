@@ -8,6 +8,16 @@
 
 远程授权方案已实现：独立 Node 22 LTS 运行 `oidc-provider 9.12.2`，MCP 与安装、构建、测试工具使用 Bun。Supabase 保持唯一用户目录；授权服务从真实 Supabase 登录取得 UUID，不建立第二套账号或按邮箱推断身份。采用 opaque access token、在线 introspection 和 PostgreSQL provider adapter；已提供两个服务入口，但尚未完成生产部署验收。
 
+## Admin 融合进度
+
+已落地第一批本人连接管理：Admin `/connections` 展示脱敏授权，支持单个和当前页明确 ID 集合的确认撤销；降级用户仍可进入个人安全页，但不进入业务页面。店铺库原子撤销本地授权、删除密文并登记清理任务，授权宿主按部署边界轮询任务，持久撤销上游 grant/token 家族后确认；回执丢失保留任务并安全重试。详见 [Admin 说明](../admin/README.md#本人的-mcp-连接)、[RPC 合同](../docs/api.md#本人-mcp-授权管理) 和 [运维顺序](OPERATIONS.md)。没有增加 MCP 工具或把管理 RPC 开放为任意工具调用。
+
+本批不签发 PAT、不共享 Admin session、不动态注册客户端；`active` 不作为健康证明，撤销不回滚已派发业务。页面只管理已存在的本人授权，接入地址仍由运维提供。清理仅覆盖本人入口发起的任务，不自动同步全部 OAuth 失效状态，不删除 Supabase Auth session。
+
+后续按融合计划推进：受信接入配置与权限预设、跨页授权快照撤销、关键业务契约对照（首先将新手工退款试算／确认接入 MCP）、业务记录互通与可信来源审计；角色降级是否永久撤销、SSO/PAT、跨用户管理及逐笔审批分别定义，不能混入本批默认行为。公网与目标客户端验收仍需域名／证书和部署批准。
+
+验证入口：`bun run test:current tests/mcp-connections.test.ts` 覆盖本人权限、脱敏分页、原子撤销、快照重试与凭据写入竞争；`tests/mcp-oidc-interaction.test.ts` 的 Node 场景验证真实授权后的个人撤销、轮询清理及其他用户隔离；`bun scripts/admin-connections-smoke.ts` 验证真实 Admin 登录、丢失回执、原 ID 重试及降级后的安全页。单测另验证清理失败不确认、回执丢失重放和退出停止后续清理。
+
 ## 当前状态与首版交付清单
 
 首版范围为**单店、单实例、预注册客户端的远程 Admin MCP**。仅直接 TLS，不支持反向代理、动态客户端注册或多节点无缝接管；授权实例接管前须确认旧进程停止。浏览器用于用户登录／同意，不用于 Agent 操作 Admin SPA。

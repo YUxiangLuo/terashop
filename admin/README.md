@@ -30,6 +30,16 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 生产账号必须由受信任运维按身份验证流程创建并授权，不照搬本地人工确认步骤。上线前需要补齐管理员 MFA、密码恢复和相应 Auth 配置。reset 后账号也会消失，需要重新初始化。
 
+## 本人的 MCP 连接
+
+`/connections` 使用本人的 Supabase 会话查询脱敏授权记录，并确认撤销单个或当前页的明确 ID 集合。这是个人安全页面：非匿名用户即使被降级，也可以访问并撤销自己的连接；其他业务页面仍要求管理员身份。没有管理其他人的授权、创建 token、复制刷新凭据或在线注册 OAuth 客户端的能力。
+
+列表按 UUID 每页 20 条，不是跨页快照。`active` 显示为“Not revoked locally”，不声称连接健康；`cleanup` 分别表示未在此申请清理、待清理、上游清理已确认。撤销成功先停止该授权的新 MCP 准入并删除密文，上游清理由 OAuth 服务异步完成；不能取消已经派发的业务请求。超时保留原 ID 集合，只能重试同一集合；新建的连接不会被旧请求覆盖。页面重载后重新读取事实，不跨标签页持久保存待决操作。Admin 退出不等于撤销 MCP。
+
+接入继续由客户端发起 OAuth/PKCE，服务器地址由运维提供，客户端及回调地址需预注册。页面只提供接入说明，不验证公网可用性，不推测授权期限，不实现 SSO、PAT 或健康监控。先应用 `20260923000001_mcp_connection_management.sql`，再更新 OAuth 服务，最后发布 Admin；共享/生产迁移须另行批准。
+
+运行 `bun scripts/admin-connections-smoke.ts`（需本地 Supabase 和运行中的 `bun run admin:dev`）可验证真实登录、本人隔离、已提交回执丢失后的原 ID 重试、新连接不受重试影响、降级后自助撤销及业务门禁。截图保存到 `/tmp/admin-connections*.png`；测试使用并清理合成账号与授权，不执行店铺业务写入。真实上游 token 家族清理另由 `tests/mcp-oidc-interaction.test.ts` 的 Node 场景验证。
+
 ## MVP 范围
 
 - `/outbox` 提供投递记录只读查询：状态和归属资源 UUID 组合筛选、URL 保留、bigint 字符串游标倒序分页；失败保留已有记录。展开查看可用/租约/发布时间和最近重投审计，累计次数与 retry_start 分别展示，不自行推断耗尽。审计 actor 不是当前租约持有者，published 不证明客户已接收；不展示载荷、原始错误或租约凭据，不提供领取、确认或重投操作。

@@ -724,13 +724,22 @@ for (const runtime of ['bun', 'node'] as const)
       // Revoking A cannot break B or let the old A context keep using its token.
       const [first] =
         await db`select id,binding from private.mcp_grants where binding->>'project'=${project} and user_id=${users[0].userId}::uuid`;
-      await checked(
-        api('/rest/v1/rpc/mcp_grant_command', {
+      const revokeFirst = () => checked(
+        api('/rest/v1/rpc/revoke_my_mcp_connections', {
           method: 'POST',
-          service: true,
-          body: { p_action: 'revoke', p_binding: first.binding, p_grant_id: first.id },
+          token: users[0].token,
+          body: { grant_ids: [first.id] },
         }),
       );
+      if (node) {
+        // Register the intent while the issuer is actually dead. Restart must
+        // discover it without the browser repeating or completing the request.
+        await node.crashRestart(async () => {
+          await revokeFirst();
+          expect((await db`select completed_at from private.mcp_connection_revocations where grant_id=${first.id}::uuid`)[0].completed_at).toBeNull();
+          expect(await new (createOidcAdapter(store!))('Grant').find(first.binding.session_id)).toBeDefined();
+        });
+      } else await revokeFirst();
       await expect(authorizer.authorize(tokens[0])).rejects.toThrow('AUTHORIZATION_DENIED');
       expect(
         (await sessions[0].client.callTool({ name: 'get_admin_shop_settings', arguments: {} })).isError,
@@ -739,6 +748,16 @@ for (const runtime of ['bun', 'node'] as const)
         (await toolData<{ currency: string }>(sessions[1].client, 'get_admin_shop_settings')).currency,
       ).toBe('USD');
       if (node) {
+        const deadline = Date.now() + 12_000;
+        for (;;) {
+          const [task] = await db`select completed_at from private.mcp_connection_revocations where grant_id=${first.id}::uuid`;
+          if (task.completed_at) break;
+          if (Date.now() >= deadline) throw Error('Personal revocation was not drained by the issuer');
+          await Bun.sleep(50);
+        }
+        expect(await new (createOidcAdapter(store!))('Grant').find(first.binding.session_id)).toBeUndefined();
+        expect(await store!`select 1 from oidc.artifacts where grant_id=${first.binding.session_id} and not destroyed`).toHaveLength(0);
+        expect(await db`select 1 from private.mcp_credentials where grant_id=${first.id}::uuid`).toHaveLength(0);
         const networkCall = async (token: string, signal?: AbortSignal) => {
           const response = await fetch(resource, {
             method: 'POST',

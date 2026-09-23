@@ -2213,6 +2213,10 @@ export type Database = {
         }
         Returns: Json
       }
+      list_my_mcp_connections: {
+        Args: { after_id?: string; page_size?: number }
+        Returns: Json
+      }
       list_pending_paypal_captures: {
         Args: { max_requests?: number }
         Returns: Json
@@ -2252,6 +2256,16 @@ export type Database = {
           p_grant_id: string
           p_session_id: string
           p_user_id: string
+        }
+        Returns: Json
+      }
+      mcp_connection_cleanup_command: {
+        Args: {
+          p_action: string
+          p_grant_id?: string
+          p_issuer: string
+          p_project: string
+          p_resource: string
         }
         Returns: Json
       }
@@ -2367,6 +2381,10 @@ export type Database = {
       }
       retry_payment_provider_events: {
         Args: { max_events?: number }
+        Returns: Json
+      }
+      revoke_my_mcp_connections: {
+        Args: { grant_ids: string[] }
         Returns: Json
       }
       set_default_address: {

@@ -19,6 +19,15 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
   const { privateKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const originalCookieKey = randomBytes(32).toString('base64url');
   const originalIntrospectionSecret = randomBytes(32).toString('base64url');
+  const emptyBackend = createHttpServer((req, res) => {
+    req.resume();
+    res.writeHead(req.url === '/rest/v1/rpc/mcp_connection_cleanup_command' ? 200 : 503,
+      { 'Content-Type': 'application/json' });
+    res.end('[]');
+  });
+  await new Promise<void>(resolve => emptyBackend.listen(0, '127.0.0.1', resolve));
+  const backendAddress = emptyBackend.address();
+  assert(backendAddress && typeof backendAddress !== 'string');
   const config = {
     provider: {
       issuer: 'https://auth.example',
@@ -32,7 +41,7 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     databaseUrl,
     downstream: {
       project: 'service-fixture',
-      supabaseUrl: 'https://db.example',
+      supabaseUrl: `http://127.0.0.1:${backendAddress.port}`,
       anonKey: 'fixture',
       serviceRoleKey: 'fixture-secret',
       callbackUrl: 'https://auth.example/callback',
@@ -395,6 +404,9 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     const received = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const backend = createHttpServer(async (_req, res) => {
+      if (_req.url === '/rest/v1/rpc/mcp_connection_cleanup_command') {
+        _req.resume(); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('[]'); return;
+      }
       if (recover) {
         received.resolve();
         await release.promise;
@@ -451,6 +463,9 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     let calls = 0;
     const recoveryBackend = createHttpServer(async (req, res) => {
       try {
+        if (req.url === '/rest/v1/rpc/mcp_connection_cleanup_command') {
+          req.resume(); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('[]'); return;
+        }
         let body = '';
         for await (const chunk of req) body += chunk;
         assert.deepEqual(JSON.parse(body), { p_action: 'revoke_binding', p_binding: interrupted.binding });
@@ -620,6 +635,7 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     assert(limited, 'TLS peer budget was never enforced');
   } finally {
     await service?.close();
+    await new Promise<void>(resolve => emptyBackend.close(() => resolve()));
     await observer.end({ timeout: 5 });
     await rm(directory, { recursive: true, force: true });
   }

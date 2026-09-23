@@ -102,104 +102,113 @@
 <svelte:window onfocus={refresh} />
 <svelte:head><title>Tera Admin</title></svelte:head>
 
-{#if phase === "admin"}
+{#if phase === "admin" || (phase === "denied" && page.url.pathname === "/connections")}
   <div class="workspace">
     <aside class="sidebar" aria-label="Store navigation">
       <a class="brand" href="/">tera<span>ADMIN</span></a>
       <p class="eyebrow">Store management</p>
       <nav aria-label="Main navigation">
+        {#if phase === "admin"}
+          <a
+            class:nav-active={page.url.pathname === "/" ||
+              page.url.pathname.startsWith("/products/")}
+            aria-current={page.url.pathname === "/" ||
+            page.url.pathname.startsWith("/products/")
+              ? "page"
+              : undefined}
+            href="/">▦ <span>Products</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/categories")}
+            aria-current={page.url.pathname.startsWith("/categories")
+              ? "page"
+              : undefined}
+            href="/categories">◇ <span>Categories</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/inventory")}
+            aria-current={page.url.pathname.startsWith("/inventory")
+              ? "page"
+              : undefined}
+            href="/inventory">▧ <span>Inventory</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/locations")}
+            aria-current={page.url.pathname.startsWith("/locations")
+              ? "page"
+              : undefined}
+            href="/locations">⌂ <span>Warehouses</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/shipping")}
+            aria-current={page.url.pathname.startsWith("/shipping")
+              ? "page"
+              : undefined}
+            href="/shipping">↗ <span>Shipping</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/taxes")}
+            aria-current={page.url.pathname.startsWith("/taxes")
+              ? "page"
+              : undefined}
+            href="/taxes">% <span>Taxes</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/promotions")}
+            aria-current={page.url.pathname.startsWith("/promotions")
+              ? "page"
+              : undefined}
+            href="/promotions">◇ <span>Promotions</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/orders")}
+            aria-current={page.url.pathname.startsWith("/orders")
+              ? "page"
+              : undefined}
+            href="/orders">▤ <span>Orders</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/quotes")}
+            aria-current={page.url.pathname.startsWith("/quotes")
+              ? "page"
+              : undefined}
+            href="/quotes">▤ <span>Checkout quotes</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/reconciliation")}
+            aria-current={page.url.pathname.startsWith("/reconciliation")
+              ? "page"
+              : undefined}
+            href="/reconciliation">≍ <span>Reconciliation</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/payment-events")}
+            aria-current={page.url.pathname.startsWith("/payment-events")
+              ? "page"
+              : undefined}
+            href="/payment-events">▤ <span>Payment events</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/outbox")}
+            aria-current={page.url.pathname.startsWith("/outbox")
+              ? "page"
+              : undefined}
+            href="/outbox">▤ <span>Outbox</span></a
+          >
+          <a
+            class:nav-active={page.url.pathname.startsWith("/customers")}
+            aria-current={page.url.pathname.startsWith("/customers")
+              ? "page"
+              : undefined}
+            href="/customers">♧ <span>Customers</span></a
+          >
+        {/if}
         <a
-          class:nav-active={page.url.pathname === "/" ||
-            page.url.pathname.startsWith("/products/")}
-          aria-current={page.url.pathname === "/" ||
-          page.url.pathname.startsWith("/products/")
+          class:nav-active={page.url.pathname === "/connections"}
+          aria-current={page.url.pathname === "/connections"
             ? "page"
             : undefined}
-          href="/">▦ <span>Products</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/categories")}
-          aria-current={page.url.pathname.startsWith("/categories")
-            ? "page"
-            : undefined}
-          href="/categories">◇ <span>Categories</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/inventory")}
-          aria-current={page.url.pathname.startsWith("/inventory")
-            ? "page"
-            : undefined}
-          href="/inventory">▧ <span>Inventory</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/locations")}
-          aria-current={page.url.pathname.startsWith("/locations")
-            ? "page"
-            : undefined}
-          href="/locations">⌂ <span>Warehouses</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/shipping")}
-          aria-current={page.url.pathname.startsWith("/shipping")
-            ? "page"
-            : undefined}
-          href="/shipping">↗ <span>Shipping</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/taxes")}
-          aria-current={page.url.pathname.startsWith("/taxes")
-            ? "page"
-            : undefined}
-          href="/taxes">% <span>Taxes</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/promotions")}
-          aria-current={page.url.pathname.startsWith("/promotions")
-            ? "page"
-            : undefined}
-          href="/promotions">◇ <span>Promotions</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/orders")}
-          aria-current={page.url.pathname.startsWith("/orders")
-            ? "page"
-            : undefined}
-          href="/orders">▤ <span>Orders</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/quotes")}
-          aria-current={page.url.pathname.startsWith("/quotes")
-            ? "page"
-            : undefined}
-          href="/quotes">▤ <span>Checkout quotes</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/reconciliation")}
-          aria-current={page.url.pathname.startsWith("/reconciliation")
-            ? "page"
-            : undefined}
-          href="/reconciliation">≍ <span>Reconciliation</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/payment-events")}
-          aria-current={page.url.pathname.startsWith("/payment-events")
-            ? "page"
-            : undefined}
-          href="/payment-events">▤ <span>Payment events</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/outbox")}
-          aria-current={page.url.pathname.startsWith("/outbox")
-            ? "page"
-            : undefined}
-          href="/outbox">▤ <span>Outbox</span></a
-        >
-        <a
-          class:nav-active={page.url.pathname.startsWith("/customers")}
-          aria-current={page.url.pathname.startsWith("/customers")
-            ? "page"
-            : undefined}
-          href="/customers">♧ <span>Customers</span></a
+          href="/connections">◇ <span>My Agent connections</span></a
         >
       </nav>
       <div class="sidebar-note">
@@ -278,6 +287,9 @@
             : error}
         </p>
         <div class="actions">
+          {#if phase === "denied"}<a href="/connections"
+              >Manage my Agent connections</a
+            >{/if}
           <button onclick={refresh}>Check again</button><button
             onclick={logout}
             disabled={busy}>Sign out</button
