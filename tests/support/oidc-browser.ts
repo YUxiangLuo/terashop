@@ -93,10 +93,7 @@ export async function verifyOidcBrowser(input: {
     assert.equal(await browser('is', 'visible', '#approve'), 'true');
     assert.equal(callback, undefined, 'Reload must not approve');
   }
-  let client: Client | undefined;
-  try {
-    await login(input.interruptedEmail);
-    await node.restart();
+  async function assertStopped() {
     await browser('wait', '--text', '此授权已失效或结果无法确认');
     assert.equal(await browser('is', 'enabled', '#approve'), 'false');
     assert.equal(await browser('is', 'enabled', '#deny'), 'false');
@@ -104,7 +101,32 @@ export async function verifyOidcBrowser(input: {
       await browser('eval', "sessionStorage.getItem('tera-consent:' + location.pathname) === null"),
       'true',
     );
-    assert.equal(callback, undefined, 'Restart must not issue a code');
+    assert.equal(callback, undefined, 'Invalidated login must not issue a code');
+  }
+  let client: Client | undefined;
+  try {
+    await login(input.interruptedEmail);
+    if (process.env.MCP_BROWSER_EXPIRY === '1') {
+      // Exercise the real five-minute session/cookie deadline. Do not change
+      // clocks, inject cookies, shorten configuration or fabricate HTTP failures.
+      for (let minute = 1; minute <= 4; minute++) {
+        await Bun.sleep(60_000);
+        console.log(`Browser natural-expiry check: ${minute} minute(s) elapsed`);
+      }
+      assert.equal(await browser('is', 'enabled', '#approve'), 'true');
+      assert.equal(await browser('eval', "fetch('/login/status').then(response => response.status)"), '200');
+      assert.equal(callback, undefined);
+      await Bun.sleep(65_000);
+      await assertStopped();
+      assert.equal(await browser('eval', "fetch('/login/status').then(response => response.status)"), '403');
+      if (process.env.MCP_BROWSER_EXPIRY_SCREENSHOT)
+        await browser('screenshot', '--full', process.env.MCP_BROWSER_EXPIRY_SCREENSHOT);
+      // More than five minutes have elapsed, so the email OTP send cooldown
+      // has also elapsed. A new real login must recover, without reusing proof.
+      await login(input.interruptedEmail);
+    }
+    await node.restart();
+    await assertStopped();
     // Wait through another polling interval: failure must remain terminal.
     await browser('wait', '2200');
     assert.equal(await browser('is', 'enabled', '#approve'), 'false');

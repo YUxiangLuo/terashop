@@ -22,7 +22,7 @@ import { nodeOidcService } from './support/oidc-node-service';
 import { verifyOidcBrowser } from './support/oidc-browser';
 
 const browserEnabled = process.env.MCP_BROWSER === '1';
-const timeout = browserEnabled ? 180_000 : 45_000;
+const timeout = browserEnabled ? (process.env.MCP_BROWSER_EXPIRY === '1' ? 540_000 : 180_000) : 45_000;
 
 // Real local Auth/SMTP/shop database plus a separate issuer DB. Bun mode injects
 // completion failure through a fixture proxy; Node mode uses the real TLS entry.
