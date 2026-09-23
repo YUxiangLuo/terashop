@@ -244,6 +244,7 @@
         {dateTime(order.created_at)} · USD
       </p>{/if}
   </div>
+  <a class="button" href={`/orders/${id}/returns`}>Manage returns</a>
   <button onclick={reload} disabled={busy || fulfillmentBusy}
     >Reload order</button
   >
