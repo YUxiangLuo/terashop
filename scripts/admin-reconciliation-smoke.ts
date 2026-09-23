@@ -24,8 +24,11 @@ async function browser(...args: string[]) {
 const click = (name: string) =>
   browser("find", "role", "button", "click", "--name", name, "--exact");
 const wait = async (text: string) => {
-  try { await browser("wait", "--text", text); }
-  catch (cause) { throw Error(`Waiting for ${text} failed`, { cause }); }
+  try {
+    await browser("wait", "--text", text);
+  } catch (cause) {
+    throw Error(`Waiting for ${text} failed`, { cause });
+  }
 };
 try {
   user = (
@@ -194,8 +197,77 @@ try {
   await wait("Enter a valid resource UUID");
   await browser("open", `${origin.origin}/payment-events?status=unknown`);
   await wait("Invalid payment event status");
+  await browser("open", `${origin.origin}/outbox?status=exhausted`);
+  await wait("loaded · Record ID descending");
+  await browser(
+    "eval",
+    `if(document.querySelector('main [role=alert]')||document.querySelector('#outbox-status').value!=='exhausted')throw Error('Real Outbox read or URL restoration failed')`,
+  );
+  await browser("reload");
+  await wait("loaded · Record ID descending");
+  await browser("select", "#outbox-status", "");
+  await click("Apply filters");
+  await wait("loaded · Record ID descending");
+  await browser(
+    "eval",
+    `(() => {
+    const original=window.fetch;window.outboxRequests=[];window.failOutbox=false;
+    window.fetch=async(input,init)=>{
+      if(!String(input).endsWith('/rpc/list_admin_outbox_events'))return original(input,init);
+      const args=JSON.parse(init.body);window.outboxRequests.push(args);const headers={'Content-Type':'application/json'};
+      if(window.failOutbox)return new Response(JSON.stringify({message:'Outbox fixture failure'}),{status:400,headers});
+      const row={id:'9007199254740995',event_id:'00000000-0000-4000-8000-000000000011',aggregate_type:'order',aggregate_id:'00000000-0000-4000-8000-000000000021',event_type:'order.<b>literal</b>',status:'pending',attempts:26,retry_start:25,available_at:'infinity',lease_expires_at:null,published_at:null,created_at:'2026-09-20T12:34:56.123456Z',has_error:true,last_redrive:{attempts:25,worker_id:'admin:fixture',reason:'<img src=x onerror="window.outboxXss=true">',created_at:'2026-09-20T12:34:56.123456Z'},payload:{secret:'DO-NOT-EXPOSE'},last_error:'DO-NOT-EXPOSE',lease_token:'DO-NOT-EXPOSE',worker_id:'DO-NOT-EXPOSE'};
+      const items=args.aggregate_id?[]:args.after_id?[{...row,id:'9007199254740993',status:'exhausted',attempts:50,last_redrive:null}]:[row];
+      return new Response(JSON.stringify({items,next_after_id:!args.aggregate_id&&!args.after_id?row.id:null}),{headers});
+    };
+  })()`,
+  );
+  await click("Refresh Outbox");
+  await wait("Record 9007199254740995");
+  await browser("eval", "window.failOutbox=true");
+  await click("More Outbox events");
+  await wait("Outbox fixture failure");
+  await browser(
+    "eval",
+    `if(document.querySelectorAll('tbody tr').length!==1)throw Error('Lost Outbox rows');window.failOutbox=false`,
+  );
+  await click("Retry Outbox read");
+  await wait("Record 9007199254740993");
+  await browser("click", "tbody tr:first-child summary");
+  await wait("Available at: infinity");
+  await browser(
+    "eval",
+    `if(window.outboxRequests.at(-1).after_id!=='9007199254740995')throw Error('Bigint cursor rounded');if(document.querySelectorAll('tbody tr').length!==2)throw Error('Wrong Outbox row count');if(document.querySelector('main b')||document.querySelector('main img')||window.outboxXss||document.querySelector('main').textContent.includes('DO-NOT-EXPOSE'))throw Error('Unsafe Outbox data');if(document.querySelector('tbody tr .badge').textContent!=='pending')throw Error('Status inferred from attempts')`,
+  );
+  await browser("screenshot", "/tmp/admin-outbox.png", "--full");
+  await browser("set", "viewport", "390", "844");
+  await browser(
+    "eval",
+    `const wrap=document.querySelector('.table-wrap');wrap.scrollLeft=200;if(!wrap.scrollLeft||document.documentElement.scrollWidth>innerWidth)throw Error('Outbox mobile overflow')`,
+  );
+  await browser("screenshot", "/tmp/admin-outbox-mobile.png", "--full");
+  await browser("set", "viewport", "1440", "1000");
+  await browser("eval", `document.querySelector('.table-wrap').scrollLeft=0`);
+  await browser("click", 'tbody tr:first-child a[href^="/outbox?aggregate="]');
+  await wait("No Outbox events found");
+  await browser(
+    "eval",
+    `(() => {const args=window.outboxRequests.at(-1);if(args.aggregate_id!=='00000000-0000-4000-8000-000000000021'||args.after_id||args.status_filter)throw Error('Aggregate link did not reset filters');})()`,
+  );
+  await browser("fill", "#outbox-aggregate", "");
+  await browser("select", "#outbox-status", "published");
+  await click("Apply filters");
+  await wait("1 loaded");
+  await browser(
+    "eval",
+    `(() => {const args=window.outboxRequests.at(-1);if(args.aggregate_id||args.after_id||args.status_filter!=='published')throw Error('Outbox filters not applied');})()`,
+  );
+  await browser("open", `${origin.origin}/outbox?aggregate=invalid`);
+  await wait("Enter a valid aggregate UUID");
+  await browser("open", `${origin.origin}/outbox?status=unknown`);
+  await wait("Invalid Outbox status");
   console.log(
-    "Reconciliation and Inbox smoke passed: real reads/deep refresh; fixture exact amounts/cursors, retry preserving rows, safe fields, resource links, filter reset, diagnostic flags, infinity, empty/error/invalid states, mobile scroll.",
+    "Reconciliation, Inbox and Outbox smoke passed: real reads/deep refresh; fixture exact amounts/cursors/bigint IDs, retry preserving rows, safe fields, resource links, filter reset, diagnostic flags/audit, infinity, empty/error/invalid states, mobile scroll.",
   );
 } finally {
   await browser("close").catch(() => {});

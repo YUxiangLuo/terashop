@@ -188,6 +188,13 @@
           href="/payment-events">▤ <span>Payment events</span></a
         >
         <a
+          class:nav-active={page.url.pathname.startsWith("/outbox")}
+          aria-current={page.url.pathname.startsWith("/outbox")
+            ? "page"
+            : undefined}
+          href="/outbox">▤ <span>Outbox</span></a
+        >
+        <a
           class:nav-active={page.url.pathname.startsWith("/customers")}
           aria-current={page.url.pathname.startsWith("/customers")
             ? "page"
