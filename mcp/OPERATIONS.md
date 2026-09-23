@@ -1,0 +1,132 @@
+# Remote MCP single-instance operations
+
+This runbook covers one directly TLS-terminating authorization process and one directly TLS-terminating MCP process for one fixed issuer/resource pair. It does **not** make this deployment production-ready by itself. Dynamic client registration, reverse proxies, load balancing, multiple active instances, and online key migration are out of scope.
+
+## Release and trust boundary
+
+- Pin the repository revision, Bun `1.4.2`, Node 22 LTS, dependencies from `bun.lock`, and deployment image digests. Install/build in CI with `bun install --frozen-lockfile`; do not build on the production host.
+- Build the authorization entry point as the existing compatibility harness does:
+
+  ```sh
+  bun build mcp/src/auth.ts --target=node --outfile=dist/auth.mjs --external=oidc-provider --external=postgres
+  bun build mcp/src/maintenance.ts --target=node --outfile=dist/maintenance.mjs --external=postgres
+  ```
+
+  Run `dist/auth.mjs` and `dist/maintenance.mjs` only with Node 22 LTS, with their pinned external dependencies alongside the build. Both entry points reject Bun. Maintenance uses one implicit PostgreSQL transaction in a simple-query batch: fault injection found that the pinned driver's callback transaction wrapper can attempt rollback on a dead socket in both runtimes. The maintenance command avoids that wrapper and its connection-loss behavior is tested in the issuer's supported Node runtime. The MCP entry point is run by Bun 1.4.2 from the pinned checkout (or an equivalently reviewed Bun-target bundle).
+- Before release, run the checks that exist in this repository:
+
+  ```sh
+  bun run typecheck
+  bun run test:unit
+  bun run docs:check
+  bun scripts/mcp-oidc-compat.ts
+  bun scripts/mcp-oidc-compat.ts --with-storage
+  ```
+
+  The two compatibility commands use disposable Docker fixtures; they do not prove production Supabase, DNS, certificates, firewalling, backups, or a real browser flow. Use `bun run test:current --integration` against the CLI-selected disposable **local** Supabase; `bun run test` additionally resets local data. Browser acceptance is automated and opt-in (`MCP_BROWSER=1 bun run test:current tests/mcp-oidc-interaction.test.ts -t 'node:'`), requiring agent-browser, Chromium and certutil. Never point these fixtures at production.
+
+## Provisioning
+
+### Authorization database
+
+Use a dedicated PostgreSQL database, not the shop database. During a reviewed maintenance window, its non-superuser schema owner applies `mcp/auth/storage.sql` with `psql -v ON_ERROR_STOP=1 -f mcp/auth/storage.sql`. This is the only initial schema supplied here; there is no application auto-migration.
+
+Create a distinct runtime login. Grant it only `USAGE` on schema `oidc` and `SELECT, INSERT, UPDATE, DELETE` on `oidc.artifacts`, `oidc.revoked_grants`, and `oidc.approval_attempts`. It must not be superuser, own/create databases or roles, bypass RLS, or have schema `CREATE`; startup enforces these properties. Require encrypted PostgreSQL transport with hostname validation (the service uses `verify-full` except for loopback), restrict network access to the authorization host, and keep owner/backup credentials unavailable to the processes.
+
+### Host configuration and TLS
+
+Supply each process one absolute path to a regular, non-symlink JSON file, at most 64 KiB and mode `0600`, owned/readable only by its unprivileged service account. Pass no secret in environment variables, argv, unit names, or working-directory files. The schemas are defined in `oidc-service.ts` and `http-service.ts`; validate changes in staging rather than adding undocumented fields.
+
+The authorization configuration contains `provider`, dedicated `databaseUrl`, `downstream`, `credentialKeys`, `activeCredentialKey`, `tls`, and `listen`. The MCP configuration contains `authorization`, the same credential key ring, `activeCredentialKey`, `tls`, and `listen`. Important invariants:
+
+- `provider.issuer` and `authorization.issuer` are the same fixed HTTPS origin; `provider.resource` and `authorization.resource` are the same fixed HTTPS MCP URL (with a non-root path). The introspection endpoint is the issuer's fixed metadata value and its origin must equal the issuer.
+- `provider.clients` is a reviewed static allow-list. There is no dynamic registration.
+- The OIDC `signingKey` is one private P-256/ES256 JWK with a unique stable `kid`; its public half is served by the provider. Cookie keys are 32-byte base64url strings, newest first, maximum three. Credential keys are 32-byte base64url strings keyed by safe IDs, maximum eight; both processes need the same complete ring and active ID.
+- The introspection client ID/secret exactly match between `provider.introspectionClient` and MCP `authorization.introspectionClientId`/`introspectionClientSecret`.
+- Supabase anon and service-role keys are host configuration only. The service-role key is used only for the MCP grant/credential RPCs, but it remains powerful: isolate the host, configuration, and egress. Do not expose either configuration file to the browser or MCP client.
+- Certificates must be currently valid and cover the configured issuer/resource host; private keys must match. Bind directly to the advertised host/port. Forwarded headers are rejected and proxy TLS termination is unsupported. Use an unprivileged port or a narrowly scoped socket/capability arrangement rather than root.
+
+Human approval is required to create DB roles, apply schema, change public DNS/firewalls/TLS, install or activate secrets, enable writes (`allowWrites`), modify static clients/scopes/redirects, restore data, or promote/rollback a release. Use two-person review for secrets and restore decisions.
+
+## Start, probe, and stop
+
+Start authorization first; only one process may own an issuer database (an advisory lock enforces this). A service manager should use an absolute config path, capture only stdout/stderr, set restart-on-failure with backoff, and allow SIGTERM to drain. Forty seconds is a minimum initial grace budget, not proof that all recovery/cleanup operations finish within it; investigate a drain overrun before forced termination.
+
+```sh
+node /opt/tera/dist/auth.mjs /run/tera/oidc.json
+bun /opt/tera/mcp/src/remote.ts /run/tera/mcp.json
+```
+
+Readiness log lines are exactly `OIDC_SERVICE_READY` and `MCP_HTTP_READY`. They are startup signals, not sufficient health checks. `OIDC_SERVICE_OWNERSHIP_LOST` is fatal; stop/restart under operator control and investigate DB connectivity or a competing instance. Generic `*_START_FAILED`/`*_STOP_FAILED` intentionally omit details.
+
+There is no health endpoint. Probe the existing public, fixed endpoints with the deployed CA trust (never `-k`):
+
+```sh
+curl --fail --silent --show-error --cacert /etc/ssl/certs/ca-certificates.crt \
+  https://auth.example/.well-known/openid-configuration > /dev/null
+curl --fail --silent --show-error --cacert /etc/ssl/certs/ca-certificates.crt \
+  https://auth.example/jwks > /dev/null
+curl --fail --silent --show-error --cacert /etc/ssl/certs/ca-certificates.crt \
+  https://shop.example/.well-known/oauth-protected-resource/mcp > /dev/null
+test "$(curl --silent --output /dev/null --write-out '%{http_code}' \
+  --cacert /etc/ssl/certs/ca-certificates.crt https://shop.example/mcp)" = 401
+```
+
+First inspect discovery and use its exact `jwks_uri`; `/jwks` above is the current provider metadata value, not a new endpoint. Assert discovery `issuer`, authorization/token/introspection endpoints, JWKS `kid`/ES256 public fields, and protected-resource `resource`, authorization server, and scopes against the approved manifest. Never send bearer tokens in routine probes. Also monitor certificate expiry, process liveness/restarts, probe latency/status, DB reachability, and Supabase/introspection dependency failures.
+
+Stop MCP first, then authorization, using the service manager's SIGTERM operation. Do not use SIGKILL except incident containment; wait for exit before maintenance. Authorization stops accepting before draining pending work; MCP drains dispatched operations, which may still commit after the client disconnects. Never infer rollback from a timeout or stopped process—reconcile by the operation's idempotency key/state.
+
+## Coordinated secret rotation (offline)
+
+All rotations are maintenance changes: block new traffic, stop MCP, stop authorization, verify both exited, back up as below, replace private config atomically with mode `0600`, then start authorization, probe it, start MCP, and probe it. Never run mixed configurations.
+
+- **Signing key:** only one current key/JWKS entry is supported, so replacement is intentionally disruptive. Replace the JWK and `kid` offline. Existing signed artifacts may no longer verify; invalidate old MCP grants and require fresh authorization. Do not attempt an undocumented two-signing-key overlap.
+- **Cookie ring:** prepend one new 32-byte key, retain prior keys only for the bounded cookie lifetime, restart, then in a second approved offline change remove retired keys. Maximum three; never duplicate keys. Emergency compromise rotation removes old keys immediately and forces browser reauthentication.
+- **Credential ring:** add a new key ID/material to **both** configurations and make it active in both before restart. Old envelopes remain decryptable only while their referenced key remains. There is no bulk re-encryption maintenance command: do not retire an old key until inventory proves no live credential envelope references it, or invalidate the corresponding MCP grants and require fresh authorization. Never edit envelopes or revisions manually.
+- **Introspection secret:** generate one new 32-byte base64url secret and replace it simultaneously in OIDC `provider.introspectionClient.secret` and MCP `authorization.introspectionClientSecret`. Start/probe OIDC before MCP. A one-sided change fails closed but causes outage.
+
+Rotate TLS and Supabase keys with the same stop/atomic-config/start procedure. Supabase key rotation requires coordinated platform action and explicit human approval because rollback may be impossible after revocation.
+
+## Backup and recovery
+
+Back up a coherent set under one change record: (1) a consistent physical/logical backup of the dedicated issuer DB, (2) the corresponding Supabase database backup, and (3) encrypted external material—both private configurations, signing private JWK, full cookie and credential rings, TLS key/cert chain, and secret version metadata. Store DB dumps and keys separately where possible, encrypt at rest, restrict restore access, test integrity, record issuer/resource/project and timestamps, and enforce retention/destruction policy. Never place secrets in repository artifacts or tickets.
+
+Recovery is conservative because the issuer DB contains token/session state while Supabase contains grants, permanent fences/tombstones, and encrypted credentials. Restore only offline to isolated hosts. Verify backup provenance, schema version, issuer/resource/project, external key versions, database timelines, and that no post-backup revocation/role change/credential refresh would be lost. Bring up neither public listener while checking coherence.
+
+If a provably coherent point-in-time restore across issuer DB, Supabase, and required keys cannot be established—including any stale backup—**do not revive authorization state**. With both services offline, run the explicit issuer invalidation command below and require every client to authorize again. It invalidates upstream MCP access/refresh tokens and sessions, not downstream Supabase Auth sessions or shop data. Independently reconcile current administrator roles, compromised credentials, Supabase grants and business data before fresh authorization. Never delete or rewrite grant/fence tables, `oidc.revoked_grants`, credential rows, or approval journal rows with ad hoc SQL. Pending `oidc.approval_attempts` are retained: startup recovers/revokes them before listening and fails closed if cleanup cannot be confirmed.
+
+```sh
+# Approved maintenance window only. Same private absolute issuer config as auth.ts.
+node /opt/tera/dist/maintenance.mjs invalidate-restored-authorization /run/tera/oidc.json
+```
+
+This command takes the exclusive issuer lock and the adapter write lock in the same transaction as invalidation. A live issuer causes refusal; losing the connection rolls back the transaction. It preserves artifact identity/ownership/consumption tombstones, inserts revocation markers for known grant IDs, clears sensitive payload/UID/user-code fields, and preserves every approval journal entry. Success prints only counts; any failure prints `OIDC_MAINTENANCE_FAILED`. Confirm success before startup. It is deliberately disruptive and requires production approval, even if repeat execution is idempotent.
+
+The local rehearsal `bun scripts/mcp-recovery-drill.ts` uses real custom-format `pg_dump` and `pg_restore` in isolated disposable PostgreSQL containers. It demonstrates that a pre-revocation backup restores visible stale artifacts, executes the real maintenance CLI, verifies old access/refresh artifacts and stale writes are rejected, retains pending recovery records, and permits newly created authorization artifacts. This is an **issuer artifact-level drill**, not a coherent full Supabase restore or public token exchange test.
+
+## Sensitive payload maintenance
+
+During an approved offline maintenance window, invoke:
+
+```sh
+node /opt/tera/dist/maintenance.mjs cleanup /run/tera/oidc.json 100
+```
+
+Each invocation clears at most 100 expired payloads (optional limit 1–1000), retaining permanent tombstones. Repeat bounded invocations while offline until `artifactsCleaned` is zero; each invocation independently requires exclusive issuer ownership. No automatic scheduler or public maintenance endpoint is installed. Records without expiry, live records, grant revocations and approval journals are not purged. Logical scrubbing does not erase historical WAL/backups or reclaim disk immediately: use reviewed PostgreSQL vacuum, encrypted backup retention and storage controls, without deleting safety tombstones. Track artifact/tombstone counts and storage growth; this is not unbounded disk retention solved by TTL.
+
+After an approved restore, run startup recovery privately, require clean readiness, verify metadata/JWKS, test unauthorized rejection, then perform a fresh low-privilege authorization and read-only MCP call with a dedicated acceptance identity. Revoke that grant through a supported path and confirm reuse fails before opening traffic.
+
+## Upgrade and rollback
+
+1. Record current revision/artifacts/config hashes (not contents), schemas, secret IDs, and backup coordinates. Review source/config/schema diffs. Ensure the candidate reads all current OIDC artifacts, pending approvals, grant/tombstone versions, credential envelope versions/key IDs, and Supabase RPC contracts.
+2. Rehearse on restored, isolated copies. Run the repository checks above plus pending-approval crash/restart and revocation scenarios. Schema changes need explicit forward and rollback plans; never assume code rollback can read a migrated schema.
+3. Obtain human approval, drain/stop MCP then OIDC, apply reviewed schema changes as the schema owner, deploy atomically, start/probe OIDC then MCP, and perform read-only acceptance. Keep writes disabled unless separately approved.
+4. Roll back only when the old binary/config is compatible with the current schema, artifacts, pending approvals, and key rings. Stop both services first. Never restore a stale DB merely to match old code. If compatibility is uncertain, remain offline and use the conservative recovery policy above.
+
+## Logs, incidents, and public acceptance
+
+Collect service-manager timestamps, process exits and readiness/failure tokens. External probes can record status classes and latency without request bodies. The services do not supply a request audit log, metric export or correlation-ID platform; do not assume these exist. Restrict and expire logs. Never log config bodies/paths if revealing, DB URLs, JWK `d`, TLS keys, cookie/credential/introspection keys, Supabase keys, Authorization/cookie headers, tokens, authorization codes, redirect query strings, credential envelopes, provider/database payloads, or full user/grant/binding identifiers. Redact before tickets and incident chat. Debugging must not enable raw provider/SQL/HTTP-body logging in production.
+
+Both listeners enforce 32 pending operations plus process-local rate budgets: global burst 120/refill 60 per second, direct-peer burst 60/refill 10 per second; MCP additionally uses verified-user burst 30/refill 5 per second before body/credential/business processing. Peer/user maps hold at most 1024 keys; active entries are not evicted to admit new keys. HTTP 429 carries no-store and Retry-After, while concurrency exhaustion returns 503. Identity limiting still needs introspection/grant validation; peer limiting never trusts forwarding headers. Restarts reset budgets; NAT users share peer limits. Metadata/probes also consume transport budgets. These are single-instance bounds, not distributed fairness, connection-count limits or DDoS protection. A client must not automatically replay writes because Retry-After is present.
+
+Before any public exposure, humans must approve evidence for: pinned build/check results; dedicated least-privilege DB; coherent backup and restore drill; offline rotation drills for every key class; upgrade/rollback and interrupted-approval drills; valid public DNS and trusted TLS; direct network path with no proxy/forwarded headers; firewall and egress allow-list; static clients/redirect URIs/scopes; `allowWrites` policy; monitoring/alerts/runbook ownership; log redaction/retention; Supabase production migrations/RPC privileges; and a real-browser PKCE, explicit-consent, read-only MCP, revocation, and role-removal acceptance. Record these as **proposed drills/procedures until actually executed in the target environment**—repository tests alone are not production acceptance.

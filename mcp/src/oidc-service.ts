@@ -10,6 +10,7 @@ import { createOidcTlsHandler, readOidcProviderConfiguration } from './oidc-host
 import { createCredentialCipher } from './credentials';
 import { createOidcApprovalJournal } from './oidc-journal';
 import { recoverOidcApprovals } from './oidc-recovery';
+import { createRateLimit } from './rate-limit';
 
 const secret = z
   .string()
@@ -128,6 +129,8 @@ export async function startOidcService(path: string) {
       createOidcApprovalJournal(database),
     );
     const handler = createOidcTlsHandler(provider, interaction);
+    const globalRate = createRateLimit(120, 60, 1);
+    const peerRate = createRateLimit(60, 10);
     // Constructing HTTPS validates the certificate/private-key pair before any DB IO.
     server = createServer(
       {
@@ -153,6 +156,17 @@ export async function startOidcService(path: string) {
             'Content-Type': 'application/json',
           });
           res.end(JSON.stringify({ error: 'service_busy' }));
+          return;
+        }
+        const retry = globalRate('all') || peerRate(req.socket.remoteAddress ?? 'unknown');
+        if (retry) {
+          res.writeHead(429, {
+            'Cache-Control': 'no-store',
+            'Retry-After': String(retry),
+            Connection: 'close',
+            'Content-Type': 'application/json',
+          });
+          res.end(JSON.stringify({ error: 'rate_limited' }));
           return;
         }
         const operation = handler(req, res).catch(() => {
@@ -204,7 +218,8 @@ export async function startOidcService(path: string) {
       },
     });
     owner = await ownerDatabase.reserve();
-    const [lease] = await owner`select pg_try_advisory_lock(1952805473,1869177956) as acquired`;
+    const [lease] = await owner`select pg_try_advisory_lock(1952805473,1869177956) as acquired,
+      pg_backend_pid() as pid`;
     if (!lease.acquired || ownerClosed || closing) throw new Error('Issuer ownership unavailable');
     // No listener until persisted pending approvals are revoked. Track recovery
     // as in-flight work so ownership loss cannot close its pool underneath it.
@@ -227,6 +242,14 @@ export async function startOidcService(path: string) {
       pending.delete(recovery);
     }
     if (ownerClosed || closing) throw new Error('Issuer ownership lost during recovery');
+    // A terminated ownership backend can precede its socket's onclose event.
+    // Recheck the actual lock after recovery, before opening the listener; do
+    // not send another query through the potentially dead reserved connection.
+    const [ownership] = await database`select exists(select 1 from pg_locks
+      where pid=${lease.pid} and locktype='advisory' and granted
+        and classid=1952805473 and objid=1869177956 and objsubid=2
+        and database=(select oid from pg_database where datname=current_database())) as held`;
+    if (!ownership.held || ownerClosed || closing) throw new Error('Issuer ownership lost during recovery');
     await new Promise<void>((resolve, reject) => {
       server!.once('error', reject);
       server!.listen(c.listen.port, c.listen.host, () => {

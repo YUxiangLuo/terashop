@@ -34,8 +34,17 @@ test('客户列表保留同邮箱独立客户，按微秒时间/UUID 分页并�
     await sql`select public.anonymize_customer(${ids[1]}::uuid)`;
     expect((await sql`select public.get_admin_customer(${ids[1]}::uuid) dto`)[0].dto).toMatchObject({ email: null, full_name: '', addresses: [], metafields: [] });
     expect((await sql`select public.list_admin_customers(anonymized=>false,search=>${marker}) dto`)[0].dto.items).toHaveLength(2);
-    const anonymous = (await sql`select public.list_admin_customers(anonymized=>true) dto`)[0].dto as Page;
-    expect(anonymous.items.some(c => c.id === ids[1])).toBe(true);
+    // A reused local database can contain more than one page of anonymized users.
+    let cursor: Page['next_cursor'] = null, found = false;
+    do {
+      const anonymous = (await sql.unsafe(
+        'select public.list_admin_customers(anonymized=>true,page_size=>100,after_cursor=>$1::jsonb) dto',
+        [cursor === null ? null : JSON.stringify(cursor)],
+      ))[0].dto as Page;
+      found = anonymous.items.some(c => c.id === ids[1]);
+      cursor = anonymous.next_cursor;
+    } while (!found && cursor !== null);
+    expect(found).toBe(true);
   });
 });
 

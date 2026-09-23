@@ -4,7 +4,7 @@
 
 **已实现 stdio 和直接 HTTPS 的无状态 Streamable HTTP MCP，112 个显式工具（53 个只读、59 个写入）；远程交付验收尚未完成。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限，也不将工具数量视为完整 Admin 覆盖证明。
 
-最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。当前优先串联登录授权、逐用户凭据刷新、Streamable HTTP 和真实客户端验收；大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器只用于登录和授权，不依赖 Admin SPA 执行业务。
+最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。登录授权、逐用户凭据刷新、Streamable HTTP 与本地代表性验收已串联；生产环境及目标产品客户端仍须单独验收。大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器只用于登录和授权，不依赖 Admin SPA 执行业务。
 
 远程授权方案已实现：独立 Node 22 LTS 运行 `oidc-provider 9.12.2`，MCP 与安装、构建、测试工具使用 Bun。Supabase 保持唯一用户目录；授权服务从真实 Supabase 登录取得 UUID，不建立第二套账号或按邮箱推断身份。采用 opaque access token、在线 introspection 和 PostgreSQL provider adapter；已提供两个服务入口，但尚未完成生产部署验收。
 
@@ -16,9 +16,9 @@
 | --- | --- | --- |
 | 业务工具 | [工具测试](../tests/unit/mcp.test.ts) 断言 112 个工具及只读 53 个；业务合同见下表 | 工具数不代表全部新业务；真实 PayPal Sandbox 另需外部配置 |
 | 授权与用户隔离 | [授权入口](src/auth.ts)、[宿主](src/oidc-service.ts)、逐用户加密凭据、在线撤销／scope 检查、刷新准入；[登录／同意页](src/consent-page.ts)；[联合测试](../tests/mcp-oidc-interaction.test.ts) 使用真实本地 Auth／SMTP／数据库，已加入真实浏览器跨标签页登录、批准／拒绝、授权服务重启失效、五分钟自然过期、待批准时断网恢复、批准处理中原生取消、完成后应用层回执丢失及 SDK 读取 | 目标客户端兼容性与公网验收；不承诺覆盖任意物理网络故障 |
-| 持久化与恢复 | [批准日志](src/oidc-journal.ts)、[启动恢复](src/oidc-recovery.ts)、单实例锁；已有正常退出、强杀和迟到凭据写入回归 | 其他批准阶段故障、密钥轮换与备份恢复演练；不承诺网络分区接管 |
+| 持久化与恢复 | [批准日志](src/oidc-journal.ts)、[启动恢复](src/oidc-recovery.ts)、单实例锁；正常退出、强杀和迟到凭据写入回归；[离线维护](src/maintenance.ts) 和 [真实备份恢复演练](../scripts/mcp-recovery-drill.ts) | 目标环境全栈备份恢复、密钥托管和升级回退验收；不承诺网络分区接管 |
 | MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新；真实 HTTPS 店铺读写、版本冲突、降权／撤销、刷新 pending 竞争及刷新断连后重启拒绝已验证；另以测试转发器验证双请求领取和完成回执丢失；店铺设置断连后迟到提交与重读已验证 | 其他写入类型的未知结果须按各自幂等／版本合同验收；尚非公网或全部工具端到端验收 |
-| 网络故障边界 | [TLS 测试](../tests/unit/mcp-http-service.test.ts) 覆盖慢请求体、introspection 超时／断连、排空及 CLI SIGTERM | 凭据／刷新／业务调用阶段阻塞与断连、握手和请求头慢连接防护、并发与资源预算 |
+| 网络故障边界 | [TLS 测试](../tests/unit/mcp-http-service.test.ts) 与 [Node 运行时测试](../tests/support/oauth-service-runtime.ts) 覆盖慢握手／请求头／请求体、并发预算、限流、下游等待取消和排空 | 公网连接耗尽防护、目标容量压测、真实客户端错误恢复策略 |
 
 真实 Supabase 联合测试的 Bun 场景仍直接转发到 handler；Node 场景已通过独立 Bun MCP CLI 的真实 HTTPS 入口连接真实 Node 授权服务和本地 Supabase，验证店铺读写、只读令牌越权拒绝、版本冲突、管理员降权、撤销隔离及授权服务重启后的有效／失效令牌。独立 TCP／TLS 单测仍用本地授权后端夹具验证故障边界。**上述联合场景通过不等于整批端到端或公网验收完成。** 下方记录保留各场景范围，不作为生产就绪证明。
 
@@ -31,10 +31,20 @@
 - [x] 本地用户授权体验：展示真实 client/resource/scopes 与离线刷新，覆盖登录、批准、拒绝、取消、到期及代表性失败，使用真实浏览器验收 Cookie／CSRF 与页面。
   - 已实现服务端 HTML 同意页、邮件验证结果页和失败页；以 agent-browser 检查桌面／移动端渲染，并使用受控 HTTP 响应夹具验证邮件等待、刷新恢复、显式批准、未登录拒绝与失败禁用。此检查不是实际邮件、TLS Cookie 或真实客户端的浏览器端到端验收。
   - 后续已加入下述真实浏览器联合场景，覆盖邮件跨标签页、原页刷新、HttpOnly 不可读、错误 CSRF 拒绝、显式批准和拒绝。真实授权服务重启、五分钟自然过期和待批准时状态轮询断网后的页面停止、CSRF 清除与重新连接已验证；批准请求到达真实数据库后原生取消、停止重试及服务端撤销也已验证。服务端已完成发送后的回执丢失不保证撤销，不能扩大为任意网络故障验收。
-- [ ] 运行防护与运维：限流和并发预算、慢连接防护、日志脱敏核对、健康／退出、密钥轮换、敏感 payload 保留、备份恢复、部署与升级手册。已有永久撤销标记不可随意清理。
+- [x] 本地运行防护与运维收尾：限流和并发预算、慢连接／下游阻塞验收、固定错误输出核对、现有端点探测／退出、停机密钥轮换、敏感 payload 维护、issuer 备份恢复演练及部署升级手册。保留永久撤销标记；目标环境全栈恢复、秘密托管和上线演练归入下一批，不宣称生产就绪。
 - [ ] 公网与目标客户端：域名及可信证书就绪后，验证预注册客户端的完整授权、调用、刷新、重连和撤销；部署／共享数据库升级须另行授权。生产启用支付能力前完成对应 Sandbox 与渠道验收。
 
-前四批可使用回环服务和客户端显式信任的临时证书推进，不关闭证书验证，不要求现在提供公网域名。公网验收未完成前，不宣称已可供远程用户使用。
+前四批使用回环服务和客户端显式信任的临时证书，不关闭证书验证，不要求现在提供公网域名。[运维手册](OPERATIONS.md) 明确部署、探测、停机轮换、敏感 payload 维护、旧备份失效处理及升级回退流程。公网验收未完成前，不宣称已可供远程用户使用。
+
+本地收尾证据：
+
+- `bun run test:unit`：包括 Bun 1.4.2 的 TLS 握手／请求头持续滴流关闭（不依赖 35 秒空闲超时）、并发预算、HTTP 429、逐用户限流准入、introspection／凭据／业务请求阻塞及取消。Bun 关闭未完成头部时不保证 HTTP 错误正文；运行时升级须重跑这些行为测试。
+- `bun scripts/mcp-oidc-compat.ts --with-storage`：Node 22 真实 TLS／PostgreSQL；覆盖新签名 key/kid 的 JWKS、旧 Cookie 在重叠密钥环中可读而移除旧 key 后拒绝、旧 introspection secret 拒绝而新 secret 接受、CLI 失败只输出固定错误。凭据加密旧 key 读取／新 key 写入／移除旧 key 拒绝另由单测覆盖。
+- `bun run test:current tests/mcp-oidc-maintenance.test.ts`：清理过期敏感 payload，保留身份／归属／消费 tombstone、永久撤销及 pending 日志；独占 issuer 的维护事务与 adapter 共用写锁，活实例占锁时拒绝，SQL 失败全部回滚，角色默认 RR 时仍显式采用 RC。连接丢失回滚另由 Node 运行时测试验证。
+- `bun scripts/mcp-recovery-drill.ts`：真实 `pg_dump`／`pg_restore` 后先证明旧授权数据重新可见，再执行维护 CLI，使全部旧 issuer 会话／访问与刷新令牌数据失效，保留日志及撤销标记，拒绝迟到旧写入并允许新授权数据。仅为 issuer 数据恢复演练，不声称恢复完整 Supabase、恢复业务数据一致性或撤销下游 Auth session。
+- 存活／就绪使用已有 discovery／JWKS／protected-resource 与无身份拒绝探针，结合 READY、进程退出及依赖监控；没有另增开放的管理端点或日志平台。metadata 成功不证明下游账号／数据库可用，生产仍需专用低权限身份验收。
+
+固定进程内预算：两个监听器各自全局 burst=120、每秒补充 60；直接连接来源 burst=60、每秒补充 10；MCP 另在身份验证后按用户 burst=30、每秒补充 5。来源与用户各最多 1024 个 bucket，不驱逐尚未恢复的活跃身份来接纳新 key。返回 429/no-store/Retry-After，不自动重放写入；重启重置预算，同 NAT 用户共享来源预算，不能代替公网连接数限制和 DDoS 防护。
 
 浏览器导航请求 `text/html` 时，`GET /interaction/:uid` 在原有 provider Cookie／interaction 校验后渲染真实 client ID、resource、redirect URI、请求 scopes 及离线刷新说明；JSON 消费者保持原协议。页面只有在用户发送邮件或拒绝时创建登录事务，不因 GET 自动启动。CSRF 仅保存在原标签页的 `sessionStorage`，不保存访问令牌、刷新令牌或登录 Cookie；刷新页面只查询状态，不重复 bootstrap。邮件回调结果页提示回原标签页，登录成功不自动批准；新标签页缺少批准凭证、事务过期、服务重启或结果不明时需由客户端重新连接，不自动重试写入。页面使用静态脚本／样式 CSP 哈希、转义的 provider 文本、no-store 和 no-referrer；不加载第三方资源。脚本决策单测及 Node／Bun 原生交互测试分别验证显式单次提交、元数据转义、HTML 内容协商和原授权校验；生产仍需下面的整体验收。
 
@@ -342,9 +352,9 @@ SDK StreamableHTTPClientTransport 测试覆盖初始化、列表、双用户权�
 
 Bun 入口已提供：[remote.ts](src/remote.ts)／[startAdminHttpService](src/http-service.ts)。从仓库根目录执行 `bun mcp/src/remote.ts /absolute/path/to/mcp.json`；只接受配置文件绝对路径，文件须为私有普通文件（如 0600），禁止符号链接，上限 64 KiB。JSON 顶层为 `authorization`、`credentialKeys`、`activeCredentialKey`、`tls`、`listen`，拒绝未知字段。authorization 必填 issuer、resource、introspectionEndpoint、introspectionClientId、introspectionClientSecret、project、supabaseUrl、serviceRoleKey、anonKey、scopes、allowWrites；固定使用 oidc-provider profile。resource 必须是带非根路径的 HTTPS URL；credentialKeys 为 key ID→32 字节规范 base64url 密钥，须能解密授权服务存储的凭据；tls 为 PEM key/cert，启动检查有效期、resource 主机名及密钥配对；listen 为 host（127.0.0.1／::1／0.0.0.0）和 port。生产配置不得提交仓库。
 
-仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。请求体上限 1 MiB，连接空闲超时 35 秒，处理截止时间 30 秒；传输层为应用超时响应留出余量，避免两者同时截止导致连接先被关闭。截止时中止本地读取／下游等待并返回超时，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。真实 TCP／TLS 单测使用一次性证书验证 SDK 初始化／列表、Host/Origin/代理头拒绝、鉴权失效、配置权限、排空及 CLI SIGTERM，该单测的授权后端为本地夹具；真实后端联合读取另由 Node 场景验证。限流、凭据／业务调用阻塞、刷新并发及公网客户端验收仍待完成。启动成功仅表示配置与监听就绪，不证明后端凭据有效。
+仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。请求体上限 1 MiB，连接空闲超时 35 秒，处理截止时间 30 秒；传输层为应用超时响应留出余量。截止时中止本地读取／下游等待，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。TCP／TLS 单测使用一次性证书及本地后端夹具验证协议、鉴权、限流、阻塞取消、配置权限及排空；真实后端联合链路另由 Node 场景验证。启动成功仅表示配置与监听就绪，不证明后端凭据有效；公网客户端验收仍待完成。
 
-Bun MCP 服务现限制单实例最多 32 个在途处理，无等待队列。名额用已有 pending 操作集合核算，在进入 introspection 和下游请求前检查；满额立即返回 503 `service_busy`、no-store、Retry-After: 1。处理真正结束才释放名额，而不是在客户端断开或超时响应发出时提前释放；这只限制本进程工作，不代表远端已提交的数据库操作被取消。真实 TLS 测试阻塞 32 个认证请求，断言第 33 个不进入认证；释放一个后新请求能够进入，且认证拒绝未访问 grant／凭据。此上限包括该监听器上的元数据请求，不是按 IP／用户限流或连接数上限，不保证公平性；慢握手／请求头验收和每用户速率限制仍另行推进。Retry-After 是容量恢复提示，不是自动重放写操作的授权。
+Bun MCP 服务限制单实例最多 32 个在途处理，无等待队列。名额用 pending 操作集合核算，在进入 introspection 和下游请求前检查；满额返回 503 `service_busy`、no-store、Retry-After: 1。处理真正结束才释放名额，而不是在客户端断开或超时响应发出时提前释放；这不代表远端数据库操作被取消。真实 TLS 测试阻塞 32 个认证请求，断言第 33 个不进入认证；释放一个后新请求能够进入，且认证拒绝未访问 grant／凭据。此上限包括元数据，不限制连接总数；额外的来源／用户速率预算见顶部当前状态。Retry-After 不是自动重放写操作的授权。
 
 Node 授权服务同样限制单实例最多 32 个在途处理，在进入 provider／登录同意处理器前检查；满额返回相同的 503 `service_busy`、no-store、Retry-After: 1，并关闭连接，不读取超额请求体。名额直到处理器及失败清理真正结束才释放，保留原有退出排空语义。`bun scripts/mcp-oidc-compat.ts --with-storage` 在受支持的 Node 22、真实 TLS／PostgreSQL 下，以 32 个未完成的 token 请求体占用名额；收到全部 100 Continue 后验证元数据请求被拒绝，完成一个请求后验证元数据恢复。此预算覆盖该监听器所有路由，但不限制尚未完成握手／请求头的连接，也不能代替按身份限流或公网防护。
 
@@ -352,7 +362,7 @@ Node 慢连接验收使用未完成的 TLS record 和已完成 TLS 的未完成 
 
 慢请求与退出组合回归使用真实 TLS 分块请求，每 500 毫秒发送少量字节但不结束请求体，以排除连接空闲超时的作用。观察授权后端收到请求后开始关闭服务，验证拒绝新连接、等待在途请求、约 30 秒返回 504 request_timeout、没有读取下游凭据，随后关闭完成。此验证覆盖已进入处理器的慢请求体，不覆盖 TLS 握手／请求头慢速发送或业务写入取消；临时证书由客户端显式信任，不关闭证书验证，无需公网域名或生产证书。
 
-授权检查阻塞回归在本地 introspection 后端收到请求后保持响应未完成。保持客户端连接时，约 10 秒触发授权请求自身的截止时间，MCP 返回 no-store 的 401 unauthorized（未验证身份，不进入后续操作），后端观察到连接取消；客户端主动断连时，取消传递到后端并在 3 秒测试上限内完成服务关闭，不等待 10 秒截止时间。两种分支均只发起一次 introspection，不读取 grant／凭据，未释放后端响应屏障也能完成关闭。此处只证明授权检查阶段的连接取消，不证明数据库写入回滚；凭据刷新和业务调用阶段的阻塞仍需分别验收。
+下游阻塞回归分别在 introspection、凭据读取和店铺设置业务读取收到请求后保持响应未完成。保持客户端连接时，授权检查约 10 秒返回 no-store 的 401 unauthorized，凭据读取约 10 秒返回 503 authorization_unavailable，业务读取约 15 秒返回 MCP 工具错误 BACKEND_UNAVAILABLE。主动断连则将取消传递到后端，并在 3 秒测试上限内排空服务。每个被阻塞阶段均只发起一次请求，未释放后端响应屏障也能完成关闭；不以取消作为数据库写入回滚的证据。真实刷新竞争与断连后结果未知的处理另见上方 Node 联合场景。
 
 后续任务统一维护在上方首版交付清单，不把已完成的服务入口、批准日志／启动恢复和 HTTP transport 重列为未实现功能。
 

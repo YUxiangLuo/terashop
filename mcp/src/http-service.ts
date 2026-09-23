@@ -4,6 +4,7 @@ import * as z from 'zod/v4';
 import { readOidcProviderConfiguration } from './oidc-host';
 import { createCredentialCipher } from './credentials';
 import { createAdminHttpHandler } from './http';
+import { createRateLimit } from './rate-limit';
 
 const secret = z
   .string()
@@ -67,6 +68,9 @@ export async function startAdminHttpService(path: string) {
     let closing = false;
     let stopped: Promise<void> | undefined;
     const pending = new Set<Promise<Response>>();
+    const globalRate = createRateLimit(120, 60, 1);
+    const peerRate = createRateLimit(60, 10);
+    const userRate = createRateLimit(30, 5);
     const failure = (status: number, error: string) =>
       Response.json(
         { error },
@@ -84,7 +88,7 @@ export async function startAdminHttpService(path: string) {
       // Leave room for the 30s application deadline to send its 504 before
       // the transport closes a socket with a partially received request body.
       idleTimeout: 35,
-      async fetch(req) {
+      async fetch(req, listener) {
         if (closing) return failure(503, 'service_unavailable');
         if ([...req.headers.keys()].some((name) => name === 'forwarded' || name.startsWith('x-forwarded-')))
           return failure(403, 'forbidden');
@@ -95,13 +99,23 @@ export async function startAdminHttpService(path: string) {
           response.headers.set('Retry-After', '1');
           return response;
         }
+        const retry = globalRate('all') || peerRate(listener.requestIP(req)?.address ?? 'unknown');
+        if (retry) {
+          const response = failure(429, 'rate_limited');
+          response.headers.set('Retry-After', String(retry));
+          return response;
+        }
         const controller = new AbortController();
         const signal = AbortSignal.any([req.signal, controller.signal]);
-        const handler = createAdminHttpHandler(c.authorization, cipher, (url, init) =>
-          fetch(url, {
-            ...init,
-            signal: AbortSignal.any([signal, ...(init.signal ? [init.signal] : [])]),
-          }),
+        const handler = createAdminHttpHandler(
+          c.authorization,
+          cipher,
+          (url, init) =>
+            fetch(url, {
+              ...init,
+              signal: AbortSignal.any([signal, ...(init.signal ? [init.signal] : [])]),
+            }),
+          userRate,
         );
         let timer: ReturnType<typeof setTimeout> | undefined;
         const deadline = new Promise<Response>((resolve) => {

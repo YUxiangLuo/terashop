@@ -9,6 +9,7 @@ import { createOidcAdapter } from '../../mcp/src/oidc-adapter';
 import { verifyOAuthProvider } from './oauth-provider-compat';
 import { verifyOAuthInteraction } from './oauth-interaction';
 import { verifyOidcService } from './oauth-service-runtime';
+import { verifyOidcMaintenance } from './oauth-maintenance-runtime';
 import { createOidcApprovalJournal } from '../../mcp/src/oidc-journal';
 import { journalFixture, verifyApprovalJournal } from './oauth-journal';
 
@@ -85,6 +86,8 @@ try {
     console.log(
       'PASS: direct TLS service startup, private configuration, failure cleanup, CLI restart and SIGTERM',
     );
+    await verifyOidcMaintenance(local.href);
+    console.log('PASS: maintenance ownership loss rolls back on the lock-owning connection');
   }
 } finally {
   await db.end({ timeout: 5 });
