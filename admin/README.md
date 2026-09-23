@@ -41,7 +41,9 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 - 分类保存保留原始 `updated_at` 微秒令牌；循环、冲突或未知结果必须显式重读，不能换令牌覆盖。新建 UUID 保留在 URL，未知创建结果按同一 UUID 核对。父分类搜索/分页不会丢失当前选择。
 - 使用 `create_product` / `update_product` 原子保存商品、规格、变体、图片和分类，保留成本、条码及扩展等未编辑字段。更新携带读取时的 revision；冲突或失败不会自动换版本重试。先重新读取并核对保存结果，再编辑。创建 UUID 保留在 URL，刷新仍读取同一商品，不盲目生成新 UUID 重试。
 - `/inventory` 提供跨商品名称/SKU 子串搜索、商品分页和选中商品的库存操作，不一次加载全店变体或库存。商品详情下也提供同一库存区：按已保存的 tracked variant 和活跃仓库查询 on_hand / reserved / available，支持正负整数调整及备注，独立于商品保存。先保存或放弃商品编辑，再调整库存。
-- 库存流水按当前变体、仓库及原因查询，按原始字符串 ID 分页，支持刷新和订单跳转；调整成功后刷新库存及流水。历史 `on_hand_after` 不是当前可用量，预占/释放未必产生流水。库存页面与商品页面共用同一待决调整记录。不提供调拨或停用仓库流水查询 UI。
+- 库存流水按当前变体、仓库及原因查询，按原始字符串 ID 分页，支持刷新和订单跳转；调整成功后刷新库存及流水。历史 `on_hand_after` 不是当前可用量，预占/释放未必产生流水。库存页面与商品页面共用同一待决调整记录。不提供停用仓库流水查询 UI。
+- 库存页选中商品后可进入 `/inventory/transfer/<product UUID>` 即时调拨：选择跟踪库存的变体、两个不同的启用仓库、正整数数量及备注，显示两端库存，后端重新检查来源可用量并原子移动库存，不挪用预留。结果展示调拨 ID、两端历史余额和精确字符串流水 ID；没有在途、收货、撤销或删除，反向调拨是新操作。
+- 调拨先按管理员/商品保存原参数和幂等键至 `sessionStorage`。结果未知锁定新操作，刷新后只重试原请求，即使仓库随后停用，也允许查询式重放已提交的原调拨。仅收到归属、数量和流水字段匹配的回执才解除待决状态；余额不作为成功证明。库存刷新失败不会否定已确认的调拨。已确认回执是当前页面展示，历史记录从库存流水查看。
 - `/locations` 支持仓库名称/编码搜索、启停筛选、分页和 URL 筛选保留；可创建（默认停用）、编辑编码/名称/JSON 地址、启停和切换默认仓库。地址支持保留自定义字段及以 `null` 清空。库存页面重新进入时加载活跃仓库；仓库配置不搬移库存或清除预占，不提供删除。
 - 仓库更新携带读取时的 `revision`，切换默认还携带读取时的默认仓库 ID；冲突或未知结果锁定命令，要求显式重读，不自动换版本重试。默认仓库必须先切换才能停用，未保存或停用仓库不能设为默认。新建 UUID 留在 URL，刷新按同一 ID 核对创建结果。
 - `/shipping` 支持配送方式名称/状态/目的地国家筛选、UUID 游标分页及 URL 筛选保留。可创建（默认停用）、编辑名称/描述/预计时效、适用国家、USD 运费/免邮门槛、展示排序及启停。列表按 ID 分页，不冒充 position 排序或结账报价。国家留空表示全球适用；代码格式校验不代表承运商覆盖。
@@ -97,5 +99,7 @@ location / {
 配送浏览器回归：相同环境运行 `bun scripts/admin-shipping-smoke.ts`，验证金额拒绝、创建后原 URL 恢复、0/空免邮门槛、国家筛选及全球范围、启停、冲突锁定与重读；只写入并清理临时账号和配送方式。截图写入 `/tmp/admin-shipping-*.png`。解析单元测试：`bun test tests/unit/admin-shipping.test.ts`；数据库及报价/历史订单合同回归：`bun run test:current tests/admin-shipping-methods.test.ts`。
 
 订单活动回归：`bun run test:current tests/admin-order-operations.test.ts tests/admin-payment-operations.test.ts` 验证真实 RPC 权限、脱敏、金额和分页；随后在本地 Admin 运行时执行 `bun scripts/admin-order-activity-smoke.ts`（同样支持 `ADMIN_URL`）。浏览器使用临时管理员读取已有本地测试订单，再用浏览器内模拟响应验证超安全整数游标、精确类型筛选、类型切换、八位非 USD 金额、脱敏及失败重试；不写订单或支付数据，最后删除临时账号。截图为模拟活动记录，保存于 `/tmp/admin-order-*.png`。
+
+调拨回归：`bun test tests/unit/admin-transfers.test.ts tests/unit/admin-commands.test.ts` 与 `bun run test:current tests/inventory-transfer.test.ts`；本地 Admin 运行后执行 `bun scripts/admin-transfer-smoke.ts`（支持 `ADMIN_URL`）。浏览器只操作自建商品与仓库，真实调拨后故意丢失成功响应，刷新并在目标仓停用后重试，验证库存只移动一次且恰好一对守恒流水。结束归档商品、停用临时仓库并删除临时账号，保留不可变库存审计；截图写入 `/tmp/admin-transfer-*.png`。
 
 自动检查：`admin:check`、`admin:build`、`bun test tests/unit/admin-commands.test.ts tests/unit/admin-catalog.test.ts`；数据库回归可运行 `bun run test:current tests/product-edit.test.ts tests/admin-order-operations.test.ts tests/admin-retry.test.ts tests/storage-admin.test.ts`。浏览器验收应包含登录失败、普通客户拒绝、管理员恢复会话、创建/发布/归档、规格组合增删及原 ID 保留、图片上传和变体归属、分类跨搜索保留、库存搜索/流水分页、仓库/变体切换、备注冲突、部分发货、未知写结果刷新后原键重试，以及桌面/移动端与深链接刷新。整个回归套件会写入额外目录数据；恢复演示环境需重新 setup（会清空账号）并构建 Storefront。

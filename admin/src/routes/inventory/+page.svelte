@@ -178,7 +178,11 @@
       >{:else if selected}
       <div class="section-heading">
         <h2>{selected.name}</h2>
-        <a class="small" href={`/products/${selected.id}`}>Edit product →</a>
+        <div class="actions">
+          <a class="small" href={`/inventory/transfer/${selected.id}`}
+            >Transfer stock →</a
+          ><a class="small" href={`/products/${selected.id}`}>Edit product →</a>
+        </div>
       </div>
       <div class="inventory-section">
         {#key selected}<InventoryEditor
