@@ -2,7 +2,7 @@
 
 独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
 
-**已实现 stdio 和直接 HTTPS 的无状态 Streamable HTTP MCP，112 个显式工具（53 个只读、59 个写入）；远程交付验收尚未完成。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限，也不将工具数量视为完整 Admin 覆盖证明。
+**已实现 stdio 和直接 HTTPS 的无状态 Streamable HTTP MCP，113 个显式工具（54 个只读、59 个写入）；远程交付验收尚未完成。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限，也不将工具数量视为完整 Admin 覆盖证明。
 
 最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。登录授权、逐用户凭据刷新、Streamable HTTP 与本地代表性验收已串联；生产环境及目标产品客户端仍须单独验收。大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器只用于登录和授权，不依赖 Admin SPA 执行业务。
 
@@ -14,7 +14,9 @@
 
 本批不签发 PAT、不共享 Admin session、不动态注册客户端；`active` 不作为健康证明，撤销不回滚已派发业务。页面只管理已存在的本人授权，接入地址仍由运维提供。清理仅覆盖本人入口发起的任务，不自动同步全部 OAuth 失效状态，不删除 Supabase Auth session。
 
-后续按融合计划推进：受信接入配置与权限预设、跨页授权快照撤销、关键业务契约对照（首先将新手工退款试算／确认接入 MCP）、业务记录互通与可信来源审计；角色降级是否永久撤销、SSO/PAT、跨用户管理及逐笔审批分别定义，不能混入本批默认行为。公网与目标客户端验收仍需域名／证书和部署批准。
+已统一手工退款契约：MCP 与 Admin 使用同一 `preview_manual_refund`／`commit_manual_refund` 数据库接口，不各自计算金额或库存影响。**MCP 不再注册旧 `refund_order` 工具（数据库兼容接口仍保留）**；客户端须刷新工具列表，改为显式范围及 `restock` 预览，再携带原 `preview_token`、非空原因和幂等键提交。预览需要 `store:read`，提交需要 `store:write`＋`store:payments`。凭据仅证明状态一致，不证明用户批准；过期后重新预览并确认，不能自动替换。结果未知时保留完整原参数及幂等键，核对账本后才考虑同键重试。手工退款只记账，不调用支付渠道。
+
+后续按融合计划推进：受信接入配置与权限预设、跨页授权快照撤销、其他关键业务契约对照、业务记录互通与可信来源审计；角色降级是否永久撤销、SSO/PAT、跨用户管理及逐笔审批分别定义，不能混入本批默认行为。公网与目标客户端验收仍需域名／证书和部署批准。
 
 验证入口：`bun run test:current tests/mcp-connections.test.ts` 覆盖本人权限、脱敏分页、原子撤销、快照重试与凭据写入竞争；`tests/mcp-oidc-interaction.test.ts` 的 Node 场景验证真实授权后的个人撤销、轮询清理及其他用户隔离；`bun scripts/admin-connections-smoke.ts` 验证真实 Admin 登录、丢失回执、原 ID 重试及降级后的安全页。单测另验证清理失败不确认、回执丢失重放和退出停止后续清理。
 
@@ -24,7 +26,7 @@
 
 | 能力 | 已实现与证据 | 尚未完成的验收 |
 | --- | --- | --- |
-| 业务工具 | [工具测试](../tests/unit/mcp.test.ts) 断言 112 个工具及只读 53 个；业务合同见下表 | 工具数不代表全部新业务；真实 PayPal Sandbox 另需外部配置 |
+| 业务工具 | [工具测试](../tests/unit/mcp.test.ts) 断言 113 个工具及只读 54 个；业务合同见下表 | 工具数不代表全部新业务；真实 PayPal Sandbox 另需外部配置 |
 | 授权与用户隔离 | [授权入口](src/auth.ts)、[宿主](src/oidc-service.ts)、逐用户加密凭据、在线撤销／scope 检查、刷新准入；[登录／同意页](src/consent-page.ts)；[联合测试](../tests/mcp-oidc-interaction.test.ts) 使用真实本地 Auth／SMTP／数据库，已加入真实浏览器跨标签页登录、批准／拒绝、授权服务重启失效、五分钟自然过期、待批准时断网恢复、批准处理中原生取消、完成后应用层回执丢失及 SDK 读取 | 目标客户端兼容性与公网验收；不承诺覆盖任意物理网络故障 |
 | 持久化与恢复 | [批准日志](src/oidc-journal.ts)、[启动恢复](src/oidc-recovery.ts)、单实例锁；正常退出、强杀和迟到凭据写入回归；[离线维护](src/maintenance.ts) 和 [真实备份恢复演练](../scripts/mcp-recovery-drill.ts) | 目标环境全栈备份恢复、密钥托管和升级回退验收；不承诺网络分区接管 |
 | MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新；真实 HTTPS 店铺读写、版本冲突、降权／撤销、刷新 pending 竞争及刷新断连后重启拒绝已验证；另以测试转发器验证双请求领取和完成回执丢失；店铺设置断连后迟到提交与重读已验证 | 其他写入类型的未知结果须按各自幂等／版本合同验收；尚非公网或全部工具端到端验收 |
@@ -141,7 +143,7 @@ MCP_BROWSER=1 MCP_BROWSER_EXPIRY=1 bun run test:current tests/mcp-oidc-interacti
 | 扩展字段 | `list_admin_metafield_definitions`、`get_admin_metafield_definition`、`list_admin_metafields`、`create_metafield_definition`、`update_metafield_definition`、`create_metafield`、`update_metafield`、`delete_metafield`；定义版本化规则/可见性编辑，新定义默认私有；分类/客户/订单/shop 值版本化增删改，值可见性遵循当前定义；按资源读取含无定义值，不展开引用 |
 | 扩展对象 | `list_admin_metaobject_definitions`、`get_admin_metaobject_definition`、`list_admin_metaobjects`、`get_admin_metaobject`、`create_metaobject_definition`、`update_metaobject_definition`、`create_metaobject`、`update_metaobject`、`delete_metaobject`、`delete_metaobject_definition`；定义默认私有、条目命令默认草稿，版本化编辑/发布/撤回/删除；引用中条目和非空定义不可删，不自动解除引用或级联 |
 | 订单 | `list_admin_orders`、`get_admin_order`、`update_order_admin_note`、`list_admin_order_events`、`get_order_pricing`、`get_order_checkout_quote`、`get_order_ledger`、`get_order_fulfillment_balance`、`cancel_order`、`cancel_zero_value_order_item`；备注按旧值比较后替换，不追踪历史；事件仅安全元数据，不含任意载荷 |
-| 手工资金 | `mark_order_paid`、`refund_order`；仅记账，不调用真实支付渠道 |
+| 手工资金 | `mark_order_paid`、`preview_manual_refund`、`commit_manual_refund`；显式退款范围与预览凭据，仅记账，不调用真实支付渠道 |
 | 报价运营 | `list_admin_checkout_quotes`、`get_admin_checkout_quote`、`cancel_checkout_quote`；含未转单报价，客户/有效状态/是否关联订单筛选，UUID 分页；摘要不含地址/备注，详情含敏感历史快照。显式取消可连带取消符合条件的未付款订单，不续期、不退款 |
 | 渠道资金 | `list_admin_payment_operations` 查询脱敏渠道操作；`refund_paypal` 通过现有 Edge 发起真实退款，要求显式范围与批准、保留原幂等键、不自动重试；服务端决定 sandbox/live，不能用手工退款代替 |
 | 履约 | `create_fulfillment`、`update_fulfillment` |
@@ -153,7 +155,7 @@ MCP_BROWSER=1 MCP_BROWSER_EXPIRY=1 bun run test:current tests/mcp-oidc-interacti
 | 运维 | `list_admin_outbox_events`、`list_admin_payment_provider_events`、`list_admin_reconciliation_issues`、`get_admin_operations_summary`、`redrive_outbox_event`；全店未对账资金及分组件区间积压概览，仅安全诊断，不开放资金重放或宣称整体健康 |
 | 导出 | `export_admin_orders`；固定字段 JSON 分页，不含客户联系方式，订单号/金额为字符串；不写文件或外发，不保证跨页冻结快照 |
 
-- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 112 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
+- 成功时同时返回文本 JSON 和 `structuredContent: {data: <后端结果>}`。全部 113 个工具均显式声明领域输出 schema，注册函数不再提供通用 JSON 默认值。固定结构和嵌套关系行拒绝未知字段；订单地址、选项、政策与促销等存储 JSON 快照仍按既有动态内容合同保留。schema 不重算金额或替代数据库业务校验，也不代表已覆盖全部 Admin 功能。
 - 管理员报价详情额外返回 customer_id、stored_status，缺失返回 null；列表/详情的 status 是有效状态（open/converted 到期即 expired），筛选同样按有效状态。is_reserved 不是库存数量或支付成功证明。读取不触发 Worker、取消或续期，客户 UUID 不等于 Auth UUID；完整合同见 [管理员报价查询](../docs/api.md#管理员报价查询)。
 - 订单备注回执保留 null 与空字符串的区别；事件列表只含安全元数据，ID/游标保留精确 bigint 字符串，不含原始 data。结账报价保留后端计算的过期/预留状态与存储快照，不把它当作当前重新报价；缺失报价仍报错。零对价取消返回独立数量及回库事实，不是退款。PayPal 输出声明复用后端白名单合同，仍先剔除 Edge 额外字段并验证订单关联，pending_reconciliation 不被改写为资金已结算。
 - 全部 Metafield／Metaobject 工具使用逐字段输出 schema，包含定义、值、分页及删除回执。定义字段声明和验证规则拒绝未知字段；value 与 values 内部保留原始动态 JSON，不展开引用。无定义字段保留 definition_id:null；definition_access 是配置，Metaobject 的 is_public 是后端当前可见性计算，均不代表披露批准或前台展示保证。缺失详情返回 null；删除成功只接受 `{id,deleted:true}`，异常写响应标记结果未知，不自动重试。

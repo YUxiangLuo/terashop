@@ -1302,17 +1302,18 @@ export const productChanges = z.strictObject({
     .optional(),
 });
 
-export const refund = z
+export const manualRefund = z
   .strictObject({
     order_id: id,
-    idempotency_key: key,
     items: itemQuantities.optional(),
-    amount: money.positive().optional(),
-    shipping_amount: money.positive().optional(),
-    reason,
-    restock: z.boolean().optional(),
-    provider: z.string().optional(),
+    amount: money.positive().multipleOf(0.01).optional(),
+    shipping_amount: money.positive().multipleOf(0.01).optional(),
+    restock: z.boolean(),
   })
+  .refine(
+    (value) => value.amount !== undefined || value.items !== undefined || value.shipping_amount !== undefined,
+    'Explicit amount, items or shipping_amount required',
+  )
   .refine(
     (value) =>
       value.amount === undefined || (value.items === undefined && value.shipping_amount === undefined),
@@ -1321,6 +1322,32 @@ export const refund = z
     },
   )
   .refine((value) => !value.restock || value.items !== undefined, { message: 'restock requires items' });
+
+const refundPreviewToken = z.string().regex(/^[a-f0-9]{64}$/);
+export const commitManualRefund = manualRefund.safeExtend({
+  preview_token: refundPreviewToken,
+  idempotency_key: key,
+  reason: z
+    .string()
+    .max(2000)
+    .refine((value) => value.trim().length > 0, 'Refund reason required'),
+});
+export const manualRefundPreview = z.strictObject({
+  order_id: id,
+  currency: z.literal('USD'),
+  available_amount: money,
+  source: z.enum(['items', 'shipping', 'custom_amount']),
+  amount: money,
+  restock: z.boolean(),
+  lines: orderLedger.shape.refunds.element.shape.lines,
+  components: orderLedger.shape.refunds.element.shape.components,
+  preview_token: refundPreviewToken,
+});
+export const manualRefundReceipt = z.strictObject({
+  order_id: id,
+  preview_token: refundPreviewToken,
+  refund: orderLedger.shape.refunds.element,
+});
 
 const paypalMoney = z
   .string()

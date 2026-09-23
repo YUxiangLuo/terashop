@@ -102,7 +102,10 @@ import {
   metaobjectFields,
   metaobjectDefinitionChanges,
   uploadProductMedia,
-  refund,
+  manualRefund,
+  commitManualRefund,
+  manualRefundPreview,
+  manualRefundReceipt,
   paypalRefund,
 } from './schemas';
 
@@ -1140,12 +1143,20 @@ export function createAdminServer(
     adminOrderResult,
   );
   rpc(
-    'refund_order',
-    'MANUAL BOOKKEEPING ONLY: does not issue a real provider refund. Omit amount/items/shipping_amount to refund the remaining balance. restock only releases cancelled unshipped units, never received returns.',
-    refund,
+    'preview_manual_refund',
+    'Preview manual-only USD refund bookkeeping without changing business data. Require explicit amount OR items/shipping_amount and explicit restock; never default to remaining balance. Returns exact tax, cancellation and inventory effects. preview_token proves state consistency, NOT human approval. Obtain explicit approval for these effects before commit_manual_refund.',
+    manualRefund,
+    false,
+    true,
+    manualRefundPreview,
+  );
+  rpc(
+    'commit_manual_refund',
+    'MANUAL BOOKKEEPING ONLY: does not move provider money. After explicit approval, submit the exact preview scope/restock and preview_token with a nonblank reason and idempotency_key. Stale preview requires a new preview and renewed confirmation, never automatic replacement. restock only releases cancelled unshipped units, not received returns. After an unknown outcome retain identical arguments and key; inspect the ledger before an approved identical retry. A preview token is not human authorization.',
+    commitManualRefund,
     true,
     true,
-    orderResult,
+    manualRefundReceipt,
   );
   tool(
     'refund_paypal',

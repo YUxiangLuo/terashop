@@ -291,6 +291,83 @@ test('MCP 订单手工记账→履约→版本化物流→账本读取', async (
   ]);
 });
 
+test('MCP rejects stale refund stock effects and replays a confirmed refund only once', async () => {
+  const product = await stockedProduct(admin, { onHand: 8, price: 12.5, cleanup });
+  const order = await fixtureOrder(product, buyer, 3);
+  await toolData(session.client, 'mark_order_paid', {
+    order_id: order.id,
+    idempotency_key: crypto.randomUUID(),
+  });
+  const scope = { order_id: order.id, items: [{ order_item_id: order.itemId, quantity: 2 }], restock: true };
+  type Preview = {
+    preview_token: string;
+    amount: number;
+    lines: Array<{ cancelled_quantity: number; restocked_quantity: number }>;
+  };
+  const old = await toolData<Preview>(session.client, 'preview_manual_refund', scope);
+  expect(old.amount).toBe(25);
+  expect(old.lines[0]).toMatchObject({ cancelled_quantity: 2, restocked_quantity: 2 });
+  expect(await stockOf(product.sku)).toBe(5);
+  await toolData(session.client, 'create_fulfillment', {
+    order_id: order.id,
+    items: [{ order_item_id: order.itemId, quantity: 2 }],
+    idempotency_key: crypto.randomUUID(),
+  });
+  const command = {
+    ...scope,
+    preview_token: old.preview_token,
+    idempotency_key: crypto.randomUUID(),
+    reason: 'Offline refund confirmed',
+  };
+  expect((await session.client.callTool({ name: 'commit_manual_refund', arguments: command })).isError).toBe(
+    true,
+  );
+  expect(await toolData(session.client, 'get_order_ledger', { order_id: order.id })).toMatchObject({
+    refunds: [],
+  });
+  expect(await stockOf(product.sku)).toBe(5);
+  const fresh = await toolData<Preview>(session.client, 'preview_manual_refund', scope);
+  expect(fresh.amount).toBe(25); // Unchanged money must not hide changed stock effects.
+  expect(fresh.preview_token).not.toBe(old.preview_token);
+  expect(fresh.lines[0]).toMatchObject({ cancelled_quantity: 1, restocked_quantity: 1 });
+  const confirmed = { ...command, preview_token: fresh.preview_token };
+  let dispatched = 0;
+  const disconnected = await mcpSession(
+    new AdminBackend({ url: API, anonKey: ANON_KEY, accessToken: admin.token }, async (url, init) => {
+      const response = await fetch(url, init);
+      if (url.endsWith('/commit_manual_refund')) {
+        dispatched++;
+        expect(response.ok).toBe(true);
+        await response.text(); // The database committed; only the receipt is lost.
+        throw new Error('simulated lost receipt');
+      }
+      return response;
+    }),
+    true,
+  );
+  try {
+    const lost = await disconnected.client.callTool({ name: 'commit_manual_refund', arguments: confirmed });
+    expect(lost.isError).toBe(true);
+    expect(JSON.parse((lost.content as { text: string }[])[0].text)).toMatchObject({ outcome_unknown: true });
+    expect(dispatched).toBe(1);
+    expect(await stockOf(product.sku)).toBe(6);
+  } finally {
+    await disconnected.close();
+  }
+  const receipt = await toolData<{ refund: { lines: Preview['lines'] } }>(
+    session.client,
+    'commit_manual_refund',
+    confirmed,
+  );
+  expect(receipt.refund.lines).toEqual(fresh.lines);
+  expect(await toolData<typeof receipt>(session.client, 'commit_manual_refund', confirmed)).toEqual(receipt);
+  expect(await stockOf(product.sku)).toBe(6);
+  const ledger = await toolData<{ refunds: unknown[] }>(session.client, 'get_order_ledger', {
+    order_id: order.id,
+  });
+  expect(ledger.refunds).toHaveLength(1);
+});
+
 test('MCP 收货不增加可售库存，处置重放只回库一次，纯金额退款不再次回库', async () => {
   const product = await stockedProduct(admin, { onHand: 8, price: 12.5, cleanup });
   const order = await fixtureOrder(product, buyer, 3);
@@ -348,12 +425,28 @@ test('MCP 收货不增加可售库存，处置重放只回库一次，纯金额�
     { order_id: order.id },
   );
   expect(summary.returns[0].status).toBe('closed');
-  await toolData(session.client, 'refund_order', {
-    order_id: order.id,
-    amount: 25,
+  const refundScope = { order_id: order.id, amount: 25, restock: false };
+  const preview = await toolData<{ preview_token: string; amount: number }>(
+    session.client,
+    'preview_manual_refund',
+    refundScope,
+  );
+  expect(preview.amount).toBe(25);
+  const refundCommand = {
+    ...refundScope,
+    preview_token: preview.preview_token,
     idempotency_key: crypto.randomUUID(),
     reason: 'Manual external refund confirmed',
-  });
+  };
+  const refund = await toolData<{ refund: { amount: number; restock_requested: boolean } }>(
+    session.client,
+    'commit_manual_refund',
+    refundCommand,
+  );
+  expect(await toolData<typeof refund>(session.client, 'commit_manual_refund', refundCommand)).toEqual(
+    refund,
+  );
+  expect(refund).toMatchObject({ refund: { amount: 25, restock_requested: false } });
   expect(await stockOf(product.sku)).toBe(6);
   expect(await toolData(session.client, 'get_order_ledger', { order_id: order.id })).toMatchObject({
     balances: { captured: 37.5, refunded: 25 },

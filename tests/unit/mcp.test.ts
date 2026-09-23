@@ -70,7 +70,7 @@ test('scope inventory exactly covers all tools and requires every sensitive perm
     }
     for (const [name, required] of [
       ['mark_order_paid', ['store:write', 'store:payments']],
-      ['refund_order', ['store:write', 'store:payments']],
+      ['commit_manual_refund', ['store:write', 'store:payments']],
       ['refund_paypal', ['store:write', 'store:payments']],
       ['set_user_role', ['store:write', 'store:access']],
       ['anonymize_customer', ['store:write', 'store:privacy']],
@@ -98,7 +98,7 @@ test('scope inventory exactly covers all tools and requires every sensitive perm
 test('scope discovery intersects the write switch; hidden tools cannot be called', async () => {
   const { backend, calls } = fakeBackend(() => Response.json(null));
   for (const [allowWrites, scopes, expectedCount] of [
-    [true, ['store:read'], 53],
+    [true, ['store:read'], 54],
     [true, ['store:write'], 53],
     [true, ['store:payments', 'store:access', 'store:privacy'], 0],
     [false, ['store:write', 'store:access'], 0],
@@ -312,6 +312,113 @@ function fakeBackend(response: (request: Request) => Response | Promise<Response
   });
   return { backend, calls };
 }
+
+test('manual refund tools require explicit scope and preserve preview/commit receipts without retries', async () => {
+  const id = crypto.randomUUID();
+  const scope = { order_id: id, amount: 7.25, restock: false };
+  const preview = {
+    ...scope,
+    currency: 'USD',
+    available_amount: 20,
+    source: 'custom_amount',
+    lines: [],
+    components: [{ kind: 'unallocated', tax_line_id: null, shipping_line_id: null, amount: 7.25 }],
+    preview_token: 'a'.repeat(64),
+  };
+  const command = {
+    ...scope,
+    preview_token: preview.preview_token,
+    idempotency_key: 'original-key',
+    reason: 'Externally confirmed',
+  };
+  const receipt = {
+    order_id: id,
+    preview_token: preview.preview_token,
+    refund: {
+      id,
+      payment_transaction_id: id,
+      status: 'succeeded',
+      source: 'custom_amount',
+      amount: 7.25,
+      currency: 'USD',
+      reason: command.reason,
+      restock_requested: false,
+      components: preview.components,
+      lines: [],
+      created_at: '2026-09-23T00:00:00Z',
+    },
+  };
+  let response: unknown = preview;
+  let stale = false;
+  const { backend, calls } = fakeBackend(() =>
+    stale
+      ? Response.json(
+          { code: 'P0001', message: 'refund preview changed; preview and confirm again' },
+          { status: 400 },
+        )
+      : Response.json(response),
+  );
+  const read = await mcpSession(backend);
+  const write = await mcpSession(backend, true);
+  try {
+    for (const args of [
+      { order_id: id, restock: false },
+      { order_id: id, amount: 1 },
+      { ...scope, amount: 1.001 },
+      { ...scope, amount: 0 },
+      { ...scope, restock: true },
+      { ...scope, items: [{ order_item_id: id, quantity: 1 }] },
+      { ...scope, provider: 'paypal' },
+    ])
+      expect((await read.client.callTool({ name: 'preview_manual_refund', arguments: args })).isError).toBe(
+        true,
+      );
+    for (const args of [
+      { ...command, preview_token: 'invalid' },
+      { ...command, reason: '  ' },
+      { ...command, reason: 'x'.repeat(2001) },
+      { ...command, shipping_amount: 1 },
+      { ...command, amount: 1.001 },
+    ])
+      expect((await write.client.callTool({ name: 'commit_manual_refund', arguments: args })).isError).toBe(
+        true,
+      );
+    expect(calls).toHaveLength(0);
+    expect(await toolData<typeof preview>(read.client, 'preview_manual_refund', scope)).toEqual(preview);
+    expect(await calls.at(-1)!.clone().json()).toEqual(scope);
+    response = receipt;
+    expect(await toolData<typeof receipt>(write.client, 'commit_manual_refund', command)).toEqual(receipt);
+    expect(await calls.at(-1)!.clone().json()).toEqual(command);
+    for (const [name, args, bad, unknown] of [
+      ['preview_manual_refund', scope, { ...preview, secret: 'PRIVATE' }, false],
+      [
+        'commit_manual_refund',
+        command,
+        { ...receipt, refund: { ...receipt.refund, secret: 'PRIVATE' } },
+        true,
+      ],
+    ] as const) {
+      response = bad;
+      const result = await write.client.callTool({ name, arguments: args });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).not.toContain('PRIVATE');
+      expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
+        code: 'INVALID_BACKEND_RESPONSE',
+        outcome_unknown: unknown,
+      });
+    }
+    stale = true;
+    const before = calls.filter((r) => r.url.includes('/rest/v1/rpc/')).length;
+    expect((await write.client.callTool({ name: 'commit_manual_refund', arguments: command })).isError).toBe(
+      true,
+    );
+    expect(calls.filter((r) => r.url.includes('/rest/v1/rpc/')).length - before).toBe(2); // admin check + single commit
+    expect(await calls.at(-1)!.clone().json()).toEqual(command);
+  } finally {
+    await read.close();
+    await write.close();
+  }
+});
 
 test('管理员报价列表拒绝私有字段泄漏和错误状态；非法输入不调用后端', async () => {
   const id = crypto.randomUUID(),
@@ -2089,8 +2196,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(53);
-    expect(writeTools.length).toBe(112);
+    expect(readTools.length).toBe(54);
+    expect(writeTools.length).toBe(113);
     expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,
@@ -2113,6 +2220,7 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
       false,
     );
     for (const name of [
+      'refund_order',
       'execute_sql',
       'claim_outbox_events',
       'ingest_payment_provider_event',
@@ -2313,7 +2421,7 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
         { product_id: id, expected_revision: 1, changes: { variants: [{ id, delete: true, price: 8 }] } },
       ],
       ['update_fulfillment', { fulfillment_id: id, expected_version: 1, idempotency_key: 'x', changes: {} }],
-      ['refund_order', { order_id: id, idempotency_key: 'x', amount: 10, shipping_amount: 1 }],
+      ['preview_manual_refund', { order_id: id, restock: false, amount: 10, shipping_amount: 1 }],
       ['adjust_inventory', { variant_id: id, delta: 3 }],
       ['list_admin_outbox_events', { after_id: 9007199254740992 }],
     ] as const) {
@@ -2550,7 +2658,6 @@ test('订单嵌套输出保留快照，拒绝字段漂移；写入畸形响应�
     );
     const writes = [
       ['mark_order_paid', { ...header, admin_note: 'retained' }],
-      ['refund_order', header],
       ['cancel_order', header],
     ] as const;
     for (const [name, expected] of writes) {
