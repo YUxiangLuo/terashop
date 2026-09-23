@@ -1041,12 +1041,17 @@ for (const runtime of ['bun', 'node'] as const)
           const interrupted = await signup();
           users.push(interrupted);
           await makeAdmin(interrupted.userId);
+          const offline = await signup();
+          users.push(offline);
+          await makeAdmin(offline.userId);
           await verifyOidcBrowser({
             node, origin, resource, redirect: browserRedirect,
-            email: user.email, interruptedEmail: interrupted.email,
+            email: user.email, interruptedEmail: interrupted.email, offlineEmail: offline.email,
           });
           expect(await db`select id from private.mcp_grants
             where binding->>'project'=${project} and user_id=${interrupted.userId}::uuid`).toHaveLength(0);
+          expect(await db`select id from private.mcp_grants
+            where binding->>'project'=${project} and user_id=${offline.userId}::uuid`).toHaveLength(0);
           const approvedGrants = await db`select state from private.mcp_grants
             where binding->>'project'=${project} and user_id=${user.userId}::uuid`;
           expect(approvedGrants).toHaveLength(1);

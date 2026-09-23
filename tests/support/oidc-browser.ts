@@ -14,6 +14,7 @@ export async function verifyOidcBrowser(input: {
   redirect: string;
   email: string;
   interruptedEmail: string;
+  offlineEmail: string;
 }) {
   const { node, origin, resource, redirect, email } = input;
   const session = `mcp-consent-${crypto.randomUUID()}`;
@@ -136,8 +137,31 @@ export async function verifyOidcBrowser(input: {
     await browser('open', `${origin}/login/status`);
     await browser('wait', '--text', '无法继续授权');
     assert.equal(await browser('get', 'count', 'button'), '0');
+    await login(input.offlineEmail);
+    await browser('set', 'offline', 'on');
+    try {
+      // Drop browser networking only; the actual issuer/DB stay available.
+      // A failed status request must end this page's ability to approve.
+      await assertStopped();
+    } finally {
+      await browser('set', 'offline', 'off');
+    }
+    assert.equal(
+      await browser(
+        'eval',
+        "fetch('/login/status').then(response => response.json()).then(body => body.status === 'authenticated')",
+      ),
+      'true',
+    );
+    await browser('wait', '2200');
+    await assertStopped();
+    // Native click on disabled controls is inert even with connectivity restored.
+    await browser('eval', "document.querySelector('#approve').click()");
+    assert.equal(callback, undefined, 'Restoring connectivity must not approve');
+    if (process.env.MCP_BROWSER_OFFLINE_SCREENSHOT)
+      await browser('screenshot', '--full', process.env.MCP_BROWSER_OFFLINE_SCREENSHOT);
     // A new authorization and a fresh real email login must still work after
-    // losing the in-memory transaction; do not reuse the old approval proof.
+    // losing the page's approval proof; do not reuse the old transaction.
     await login(email);
     assert.equal(await browser('eval', "document.cookie.includes('__Host-tera-mcp-login=')"), 'false');
     assert.equal(
