@@ -73,9 +73,12 @@
         >View linked order</a
       >{:else}<p>No linked order.</p>{/if}
     <p class="small muted">
-      Read-only. Viewing this quote does not cancel an order, extend expiry or
-      release inventory.
+      Viewing this quote does not cancel an order, extend expiry or release
+      inventory.
     </p>
+    <a href={`/quotes/${id}/cancel${query}`}
+      >Review cancellation / recover request</a
+    >
   </section>
   <section class="card">
     <h2>Historical price snapshot</h2>

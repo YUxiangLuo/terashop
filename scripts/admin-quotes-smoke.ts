@@ -164,8 +164,54 @@ try {
   await wait("Quote not found.");
   await browser("open", `${origin.origin}/quotes?customer=invalid`);
   await wait("Enter a valid customer UUID.");
+  await browser("open", `${origin.origin}/quotes/${openQuote}/cancel`);
+  await wait("Stored status: converted");
+  await click("Cancel quote");
+  await wait("Enter a cancellation reason");
+  await browser("fill", "#quote-cancel-reason", "Customer changed plans");
+  await browser("screenshot", "/tmp/admin-quote-cancel-mobile.png", "--full");
+  // Do not send the first attempt, but lose its response. Keep the exact reason on reload.
+  await browser(
+    "eval",
+    `(() => {const original=window.fetch;window.fetch=async (...args)=>{if(String(args[0]).includes('/rpc/cancel_checkout_quote')){window.fetch=original;throw Error('Simulated offline request');}return original(...args);};})()`,
+  );
+  await click("Cancel quote");
+  await browser("dialog", "accept");
+  await wait("Unconfirmed cancellation request");
+  await browser("reload");
+  await wait("Unconfirmed cancellation request");
+  await browser(
+    "eval",
+    `const reason=document.querySelector('#quote-cancel-reason');if(!reason.disabled || reason.value!=='Customer changed plans')throw Error('Saved reason not locked')`,
+  );
+  // Commit the retry, then lose both its response and the immediate reconciliation read.
+  await browser(
+    "eval",
+    `(() => {const original=window.fetch;let cancelled=false;window.fetch=async (...args)=>{const url=String(args[0]);if(url.includes('/rpc/cancel_checkout_quote')){const result=await original(...args);if(!result.ok) return result;cancelled=true;throw Error('Lost cancellation response');}if(cancelled && url.includes('/rpc/get_admin_checkout_quote')){window.fetch=original;throw Error('Lost reconciliation read');}return original(...args);};})()`,
+  );
+  await click("Retry saved cancellation");
+  await browser("dialog", "accept");
+  await wait("Actions are locked");
+  await browser("reload");
+  await wait("Cancellation confirmed from current facts");
+  await wait("Recorded reason: Customer changed plans");
+  await browser(
+    "eval",
+    `if([...document.querySelectorAll('button')].find(b=>b.textContent==='Cancel quote')?.disabled!==true)throw Error('Terminal action enabled');if(Object.keys(sessionStorage).some(k=>k.includes(':quote-cancel:')))throw Error('Pending command not reconciled');if(document.documentElement.scrollWidth>innerWidth)throw Error('Mobile overflow')`,
+  );
+  const cancelled = await checked<any>(
+    rpc("get_admin_checkout_quote", { quote_id: openQuote }, token),
+  );
+  assert.equal(cancelled.stored_status, "cancelled");
+  assert.equal(cancelled.cancel_reason, "Customer changed plans");
+  const storedOrder = await checked<any[]>(
+    api(`/rest/v1/orders?id=eq.${order.id}&select=status`, { service: true }),
+  );
+  assert.equal(storedOrder[0].status, "cancelled");
+  await browser("set", "viewport", "1280", "900");
+  await browser("screenshot", "/tmp/admin-quote-cancelled.png", "--full");
   console.log(
-    "Quotes smoke passed: real pagination, failed page retry, combined filters, linked order, deep refresh, read-only facts, escaped text, missing quote, mobile.",
+    "Quotes smoke passed: pagination, filters, details, mobile, cancellation validation, saved reason, retry, lost response and reconciliation read, refresh recovery, linked order cancelled.",
   );
 } finally {
   await browser("close").catch(() => {});

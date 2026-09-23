@@ -28,6 +28,7 @@ export function commandKey(
     | "return-receipt"
     | "return-disposition"
     | "return-close"
+    | "quote-cancel"
     | "manual-refund",
   resource: string,
 ) {
