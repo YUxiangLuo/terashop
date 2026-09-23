@@ -155,10 +155,11 @@
       reason can be retried. Closing the tab loses this recovery record; check
       backend facts before another attempt.
     </p>{/if}
+  <!-- HTML maxlength counts UTF-16 units; validation enforces 500 Unicode code points. -->
   <label
     >Customer-visible reason<textarea
       id="quote-cancel-reason"
-      maxlength="500"
+      maxlength="1000"
       bind:value={reason}
       oninput={() => {
         error = "";

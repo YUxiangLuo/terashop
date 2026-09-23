@@ -168,6 +168,16 @@ try {
   await wait("Stored status: converted");
   await click("Cancel quote");
   await wait("Enter a cancellation reason");
+  await browser("fill", "#quote-cancel-reason", "😀".repeat(500));
+  await browser(
+    "eval",
+    `if(Array.from(document.querySelector('#quote-cancel-reason').value).length!==500)throw Error('Unicode reason truncated');`,
+  );
+  await click("Cancel quote");
+  await browser("dialog", "dismiss");
+  await browser("fill", "#quote-cancel-reason", "x".repeat(501));
+  await click("Cancel quote");
+  await wait("Enter a cancellation reason");
   await browser("fill", "#quote-cancel-reason", "Customer changed plans");
   await browser("screenshot", "/tmp/admin-quote-cancel-mobile.png", "--full");
   // Do not send the first attempt, but lose its response. Keep the exact reason on reload.

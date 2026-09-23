@@ -18,7 +18,7 @@ export function isCancelQuoteCommand(
     ) &&
     typeof row.reason === "string" &&
     row.reason.trim().length > 0 &&
-    row.reason.length <= 500
+    Array.from(row.reason).length <= 500
   );
 }
 // Only stored terminal facts settle a pending request; effective expiry is not enough.

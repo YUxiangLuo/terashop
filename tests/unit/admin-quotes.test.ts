@@ -37,9 +37,13 @@ test("cancellation recovery uses stored terminal state, never effective expiry",
     reason: "Customer requested cancellation",
   };
   expect(isCancelQuoteCommand(command)).toBe(true);
+  expect(isCancelQuoteCommand({ ...command, reason: "😀".repeat(500) })).toBe(
+    true,
+  );
   for (const invalid of [
     { ...command, reason: " " },
     { ...command, reason: "x".repeat(501) },
+    { ...command, reason: "😀".repeat(501) },
     { ...command, quote_id: "invalid" },
     { ...command, extra: true },
   ])

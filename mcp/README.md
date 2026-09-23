@@ -16,6 +16,8 @@
 
 已统一手工退款契约：MCP 与 Admin 使用同一 `preview_manual_refund`／`commit_manual_refund` 数据库接口，不各自计算金额或库存影响。**MCP 不再注册旧 `refund_order` 工具（数据库兼容接口仍保留）**；客户端须刷新工具列表，改为显式范围及 `restock` 预览，再携带原 `preview_token`、非空原因和幂等键提交。预览需要 `store:read`，提交需要 `store:write`＋`store:payments`。凭据仅证明状态一致，不证明用户批准；过期后重新预览并确认，不能自动替换。结果未知时保留完整原参数及幂等键，核对账本后才考虑同键重试。手工退款只记账，不调用支付渠道。
 
+已对齐安全输入合同（客户端须刷新工具 schema）：MCP `create_category`／`create_location` 必须显式提供 `changes.is_active`，不再因省略字段而默认启用；建议先停用创建，启用须明确确认。Admin 保留默认停用并显式提交该字段。更新接口的字段仍可省略，省略不改变原启用状态。`cancel_checkout_quote` 必须提供非空白、最多 500 个 Unicode 码点的客户可见原因；MCP 不修剪原始文本，重试保留原请求。Admin 同样按码点校验，HTML 输入容纳最多 1000 个 UTF-16 单元以免截断 500 个非 BMP 字符。数据库默认值与 Storefront 兼容接口未改，不新增逐笔批准凭据。输入不合法时在派发前拒绝，未知结果仍须核对原记录，不能为适配新 schema 自动补值并重放旧请求。验证见 `tests/mcp-alignment.test.ts`、MCP/报价单测及 `scripts/admin-quotes-smoke.ts`。
+
 已提供可选的 Admin 公开构建配置 `PUBLIC_MCP_CONNECTION`，展示受信运维提供的 resource、issuer 和业务 scopes，按允许范围显示只读／日常操作建议。没有配置则不推断地址；非法配置阻止构建。不读取远程元数据、不启动 OAuth、不分发 token，预设不是实际授权，部署配置可能过时且不证明服务健康。配置格式和验证入口见 [Admin 说明](../admin/README.md#本人的-mcp-连接)。
 
 已提供跨页授权撤销预览：单次数据库快照读取本人最多 100 条尚无清理请求的记录，确认与重试复用明确 ID 集合，不扩大到新连接。超过 100 条整体拒绝，不截断；原分页撤销入口保留。预览不是持久任务或批准凭据，无新增 MCP 工具，仍使用原子个人撤销接口。

@@ -598,10 +598,10 @@ export function createAdminServer(
   );
   rpc(
     'create_location',
-    'Create a warehouse with a retained UUID, code and name. Defaults active and non-default; no inventory is created. Not an upsert: read original UUID on uncertain outcome.',
+    'Create a warehouse with a retained UUID, code, name and explicit is_active choice. Prefer inactive until reviewed; enabling requires approval. Always initially non-default; no inventory is created. Not an upsert: read original UUID on uncertain outcome.',
     z.strictObject({
       location_id: id,
-      changes: locationChanges.extend({ code: z.string(), name: z.string() }),
+      changes: locationChanges.extend({ code: z.string(), name: z.string(), is_active: z.boolean() }),
     }),
     true,
     false,
@@ -1135,13 +1135,13 @@ export function createAdminServer(
   );
   rpc(
     'cancel_checkout_quote',
-    'Cancel a quote by its original UUID after reading get_admin_checkout_quote and obtaining explicit approval. A converted quote also cancels its eligible unpaid, unfulfilled order; conversion can occur after your read, so approval must cover this consequence. No expected revision or idempotency key. Completed quotes reject cancellation; in-progress or uncertain Capture blocks order cancellation. Stored cancelled/expired quotes return current quote without changing the original reason. Effective expired status alone does not mean worker cleanup finished. Releases eligible reservations, never adds on_hand or issues a provider refund. Optional reason is at most 500 Unicode characters; omitted uses checkout cancelled. Returns the standard quote snapshot, without admin customer_id/stored_status. No automatic retry: after uncertainty reread the same UUID and any linked order/payment operations, never allocate a new quote or substitute refund.',
+    'Cancel a quote by its original UUID after reading get_admin_checkout_quote and obtaining explicit approval. A converted quote also cancels its eligible unpaid, unfulfilled order; conversion can occur after your read, so approval must cover this consequence. No expected revision or idempotency key. Completed quotes reject cancellation; in-progress or uncertain Capture blocks order cancellation. Stored cancelled/expired quotes return current quote without changing the original reason. Effective expired status alone does not mean worker cleanup finished. Releases eligible reservations, never adds on_hand or issues a provider refund. Requires a nonblank customer-visible reason of at most 500 Unicode code points; preserve the exact reason on retries. Returns the standard quote snapshot, without admin customer_id/stored_status. No automatic retry: after uncertainty reread the same UUID and any linked order/payment operations, never allocate a new quote or substitute refund.',
     z.strictObject({
       quote_id: id,
       reason: z
         .string()
-        .refine((value) => Array.from(value).length <= 500, 'Maximum 500 characters')
-        .optional(),
+        .refine((value) => value.trim().length > 0, 'A cancellation reason is required')
+        .refine((value) => Array.from(value).length <= 500, 'Maximum 500 Unicode code points'),
     }),
     true,
     true,
@@ -1475,10 +1475,10 @@ export function createAdminServer(
   );
   rpc(
     'create_category',
-    'Create a category using a retained UUID; defaults active. Not an upsert: if the response is lost, read that UUID before retrying. No product associations are changed.',
+    'Create a category using a retained UUID and explicit is_active choice. Prefer inactive until reviewed; enabling requires approval. Not an upsert: if the response is lost, read that UUID before retrying. No product associations are changed.',
     z.strictObject({
       category_id: id,
-      changes: categoryChanges.extend({ slug: z.string(), name: z.string() }),
+      changes: categoryChanges.extend({ slug: z.string(), name: z.string(), is_active: z.boolean() }),
     }),
     true,
     false,

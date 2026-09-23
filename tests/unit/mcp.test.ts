@@ -548,7 +548,7 @@ test('订单辅助工具输出保持精确事件 ID、报价快照和独立取�
       cancellation,
       true,
     ],
-    ['cancel_checkout_quote', { quote_id: id }, quote, true],
+    ['cancel_checkout_quote', { quote_id: id, reason: 'Customer requested cancellation' }, quote, true],
   ] as const;
   let response: unknown;
   const { backend, calls } = fakeBackend(() => Response.json(response));
@@ -570,7 +570,7 @@ test('订单辅助工具输出保持精确事件 ID、报价快照和独立取�
         expect(calls.length - before).toBe(3);
       }
     }
-    for (const reason of [null, 'x'.repeat(501), '😀'.repeat(501)]) {
+    for (const reason of [undefined, null, '', ' \t\n', 'x'.repeat(501), '😀'.repeat(501)]) {
       const before = calls.length;
       expect(
         (
@@ -581,6 +581,11 @@ test('订单辅助工具输出保持精确事件 ID、报价快照和独立取�
         ).isError,
       ).toBe(true);
       expect(calls.length).toBe(before);
+    }
+    response = quote;
+    for (const reason of ['😀'.repeat(500), '  Keep exact reason  ']) {
+      await toolData(session.client, 'cancel_checkout_quote', { quote_id: id, reason });
+      expect(await calls.at(-1)!.clone().json()).toEqual({ quote_id: id, reason });
     }
     response = { id, admin_note: null };
     expect(
@@ -1213,7 +1218,7 @@ test('分类、配送和税率输出保留配置边界，拒绝字段漂移且�
       'create_category',
       'update_category',
       { category_id: id },
-      { slug: 'category', name: 'Category' },
+      { slug: 'category', name: 'Category', is_active: false },
       { expected_updated_at: at },
       category,
     ],
@@ -1796,7 +1801,12 @@ test('履约、库存和仓库输出逐字段校验，保留负可用量与精�
       transfer,
       true,
     ],
-    ['create_location', { location_id: id, changes: { code: 'WH', name: 'Warehouse' } }, location, true],
+    [
+      'create_location',
+      { location_id: id, changes: { code: 'WH', name: 'Warehouse', is_active: false } },
+      location,
+      true,
+    ],
     [
       'update_location',
       { location_id: id, expected_revision: 1, changes: { name: 'Warehouse' } },
@@ -2286,6 +2296,7 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
       ],
       ['list_admin_locations', { active: 'true' }],
       ['create_location', { location_id: id, changes: { code: 'only-code' } }],
+      ['create_location', { location_id: id, changes: { code: 'WH', name: 'Warehouse' } }],
       ['update_location', { location_id: id, expected_revision: 1, changes: { is_default: true } }],
       ['set_default_location', { location_id: id }],
       ['create_product', { product_id: id, changes: {} }],
@@ -2305,6 +2316,7 @@ test('MCP 严格 schema 阻止身份注入、非法嵌套 PATCH、退款参数�
       ],
       ['delete_customer_address', { customer_id: id, address_id: id }],
       ['create_category', { category_id: id, changes: { name: 'Missing slug' } }],
+      ['create_category', { category_id: id, changes: { name: 'Category', slug: 'category' } }],
       ['list_admin_categories', { root_only: true, parent_id: id }],
       ['list_admin_metafields', { owner_type_filter: 'customer' }],
       ['list_admin_metaobjects', {}],
