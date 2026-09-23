@@ -153,6 +153,13 @@
           href="/taxes">% <span>Taxes</span></a
         >
         <a
+          class:nav-active={page.url.pathname.startsWith("/promotions")}
+          aria-current={page.url.pathname.startsWith("/promotions")
+            ? "page"
+            : undefined}
+          href="/promotions">◇ <span>Promotions</span></a
+        >
+        <a
           class:nav-active={page.url.pathname.startsWith("/orders")}
           aria-current={page.url.pathname.startsWith("/orders")
             ? "page"
