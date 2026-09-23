@@ -60,6 +60,13 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     const slowArrived = Promise.withResolvers<void>();
     const arrived = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
+    let capacity:
+      | {
+          gates: ReturnType<typeof Promise.withResolvers<void>>[];
+          arrived: ReturnType<typeof Promise.withResolvers<void>>;
+          calls: number;
+        }
+      | undefined;
     let stalled:
       | {
           arrived: ReturnType<typeof Promise.withResolvers<void>>;
@@ -74,6 +81,11 @@ test('real Bun TLS service enforces private configuration and serves an authenti
       async fetch(req) {
         const path = new URL(req.url).pathname;
         if (path === '/introspect') {
+          if (capacity) {
+            const gate = capacity.gates[capacity.calls++];
+            if (capacity.calls === 32) capacity.arrived.resolve();
+            await gate?.promise;
+          }
           if (stalled) {
             const current = stalled;
             current.calls++;
@@ -192,6 +204,55 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     expect(denied.status).toBe(401);
     await denied.body?.cancel();
     await client.close();
+    // Hold exactly the limit in actual TLS requests. The 33rd must be rejected
+    // before touching authorization; releasing one must admit exactly one more.
+    const budget = {
+      gates: Array.from({ length: 32 }, () => Promise.withResolvers<void>()),
+      arrived: Promise.withResolvers<void>(),
+      calls: 0,
+    };
+    capacity = budget;
+    const grantsBeforeCapacity = grantReads;
+    const credentialsBeforeCapacity = credentialReads;
+    const requests = budget.gates.map(() =>
+      local('/mcp', {
+        headers: { authorization: 'Bearer opaque' },
+      }).then(async (response) => {
+        const status = response.status;
+        await response.body?.cancel();
+        return status;
+      }),
+    );
+    for (const request of requests) void request.catch(() => {});
+    let capacityWatchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        budget.arrived.promise,
+        new Promise<never>((_, reject) => {
+          capacityWatchdog = setTimeout(() => reject(new Error('Concurrency barrier not reached')), 3000);
+        }),
+      ]);
+      const excess = await local('/mcp', { headers: { authorization: 'Bearer opaque' } });
+      expect(excess.status).toBe(503);
+      expect(excess.headers.get('retry-after')).toBe('1');
+      expect(excess.headers.get('cache-control')).toBe('no-store');
+      expect(await excess.json()).toEqual({ error: 'service_busy' });
+      expect(budget.calls).toBe(32);
+      budget.gates[0].resolve();
+      // Request arrival order is not required to equal array order.
+      expect(await Promise.race(requests)).toBe(401);
+      const admitted = await local('/mcp', { headers: { authorization: 'Bearer opaque' } });
+      expect(admitted.status).toBe(401);
+      await admitted.body?.cancel();
+      expect(budget.calls).toBe(33);
+      expect(grantReads).toBe(grantsBeforeCapacity);
+      expect(credentialReads).toBe(credentialsBeforeCapacity);
+    } finally {
+      clearTimeout(capacityWatchdog);
+      for (const gate of budget.gates) gate.resolve();
+      await Promise.allSettled(requests);
+      capacity = undefined;
+    }
     active = true;
     // A live TCP connection must be cancelled, not just abandoned locally.
     // The per-introspection deadline is shorter than the service deadline.

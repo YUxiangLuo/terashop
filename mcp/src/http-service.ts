@@ -81,11 +81,20 @@ export async function startAdminHttpService(path: string) {
       port: c.listen.port,
       tls: c.tls,
       maxRequestBodySize: 1024 * 1024,
-      idleTimeout: 30,
+      // Leave room for the 30s application deadline to send its 504 before
+      // the transport closes a socket with a partially received request body.
+      idleTimeout: 35,
       async fetch(req) {
         if (closing) return failure(503, 'service_unavailable');
         if ([...req.headers.keys()].some((name) => name === 'forwarded' || name.startsWith('x-forwarded-')))
           return failure(403, 'forbidden');
+        // Bound work before introspection/DB access. Keep the slot until the
+        // underlying operation settles, even if the client/deadline returns first.
+        if (pending.size >= 32) {
+          const response = failure(503, 'service_busy');
+          response.headers.set('Retry-After', '1');
+          return response;
+        }
         const controller = new AbortController();
         const signal = AbortSignal.any([req.signal, controller.signal]);
         const handler = createAdminHttpHandler(c.authorization, cipher, (url, init) =>

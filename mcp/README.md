@@ -342,7 +342,9 @@ SDK StreamableHTTPClientTransport 测试覆盖初始化、列表、双用户权�
 
 Bun 入口已提供：[remote.ts](src/remote.ts)／[startAdminHttpService](src/http-service.ts)。从仓库根目录执行 `bun mcp/src/remote.ts /absolute/path/to/mcp.json`；只接受配置文件绝对路径，文件须为私有普通文件（如 0600），禁止符号链接，上限 64 KiB。JSON 顶层为 `authorization`、`credentialKeys`、`activeCredentialKey`、`tls`、`listen`，拒绝未知字段。authorization 必填 issuer、resource、introspectionEndpoint、introspectionClientId、introspectionClientSecret、project、supabaseUrl、serviceRoleKey、anonKey、scopes、allowWrites；固定使用 oidc-provider profile。resource 必须是带非根路径的 HTTPS URL；credentialKeys 为 key ID→32 字节规范 base64url 密钥，须能解密授权服务存储的凭据；tls 为 PEM key/cert，启动检查有效期、resource 主机名及密钥配对；listen 为 host（127.0.0.1／::1／0.0.0.0）和 port。生产配置不得提交仓库。
 
-仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。请求体上限 1 MiB，连接空闲超时 30 秒，处理截止时间 30 秒；截止时中止本地读取／下游等待并返回超时，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。真实 TCP／TLS 单测使用一次性证书验证 SDK 初始化／列表、Host/Origin/代理头拒绝、鉴权失效、配置权限、排空及 CLI SIGTERM，该单测的授权后端为本地夹具；真实后端联合读取另由 Node 场景验证。限流、凭据／业务调用阻塞、刷新并发及公网客户端验收仍待完成。启动成功仅表示配置与监听就绪，不证明后端凭据有效。
+仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。请求体上限 1 MiB，连接空闲超时 35 秒，处理截止时间 30 秒；传输层为应用超时响应留出余量，避免两者同时截止导致连接先被关闭。截止时中止本地读取／下游等待并返回超时，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。真实 TCP／TLS 单测使用一次性证书验证 SDK 初始化／列表、Host/Origin/代理头拒绝、鉴权失效、配置权限、排空及 CLI SIGTERM，该单测的授权后端为本地夹具；真实后端联合读取另由 Node 场景验证。限流、凭据／业务调用阻塞、刷新并发及公网客户端验收仍待完成。启动成功仅表示配置与监听就绪，不证明后端凭据有效。
+
+Bun MCP 服务现限制单实例最多 32 个在途处理，无等待队列。名额用已有 pending 操作集合核算，在进入 introspection 和下游请求前检查；满额立即返回 503 `service_busy`、no-store、Retry-After: 1。处理真正结束才释放名额，而不是在客户端断开或超时响应发出时提前释放；这只限制本进程工作，不代表远端已提交的数据库操作被取消。真实 TLS 测试阻塞 32 个认证请求，断言第 33 个不进入认证；释放一个后新请求能够进入，且认证拒绝未访问 grant／凭据。此上限包括该监听器上的元数据请求，不是按 IP／用户限流或连接数上限，不保证公平性；Node 授权服务并发预算、慢握手／请求头和每用户速率限制仍另行推进。Retry-After 是容量恢复提示，不是自动重放写操作的授权。
 
 慢请求与退出组合回归使用真实 TLS 分块请求，每 500 毫秒发送少量字节但不结束请求体，以排除连接空闲超时的作用。观察授权后端收到请求后开始关闭服务，验证拒绝新连接、等待在途请求、约 30 秒返回 504 request_timeout、没有读取下游凭据，随后关闭完成。此验证覆盖已进入处理器的慢请求体，不覆盖 TLS 握手／请求头慢速发送或业务写入取消；临时证书由客户端显式信任，不关闭证书验证，无需公网域名或生产证书。
 
