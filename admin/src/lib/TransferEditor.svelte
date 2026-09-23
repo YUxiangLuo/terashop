@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { beforeNavigate } from "$app/navigation";
+  import { watchAdminChanges } from "./realtime";
   import {
     supabase,
     getProduct,
@@ -33,13 +34,23 @@
   let destination = $state<Inventory | null>(null);
   let pending = $state<TransferCommand | null>(null);
   let receipt = $state<TransferReceipt | null>(null);
+  let live = $state(false);
+  let changes = $state(0),
+    checked = $state(0);
   let key = "";
   let alive = true;
   let dirty = $derived(!pending && (quantity !== undefined || note !== ""));
   onMount(() => {
     void load();
+    const stop = watchAdminChanges(
+      supabase,
+      "inventory",
+      () => changes++,
+      (value) => (live = value),
+    );
     return () => {
       alive = false;
+      stop();
     };
   });
   beforeNavigate(({ cancel }) => {
@@ -103,6 +114,7 @@
     }
   }
   async function balances() {
+    const version = changes;
     source = null;
     destination = null;
     balanceError = "";
@@ -124,6 +136,7 @@
       if (b.error) throw b.error;
       source = a.data as unknown as Inventory;
       destination = b.data as unknown as Inventory;
+      checked = version;
     } catch (cause) {
       if (alive) balanceError = message(cause);
     } finally {
@@ -231,6 +244,20 @@
   confirmed transfer.
 </p>
 {#if error}<p class="notice error" role="alert">{error}</p>{/if}
+<p class="small muted">
+  {live
+    ? "Live stock notifications connected."
+    : "Live stock notifications unavailable; refresh balances to check current facts."}
+  Reservation expiry alone may not send a notification.
+</p>
+{#if changes > checked}<p class="notice" role="status">
+    Inventory may have changed. Refresh balances before confirming a transfer.
+    Inputs and saved operations are preserved; balances do not prove a transfer
+    succeeded.
+  </p>{/if}
+<button type="button" disabled={busy || !ready} onclick={() => balances()}
+  >Refresh balances</button
+>
 {#if pending}<section class="card" aria-label="Unresolved transfer">
     <h2>Unresolved transfer</h2>
     <p class="break-word">

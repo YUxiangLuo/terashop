@@ -55,6 +55,8 @@ Realtime 前置迁移为 `20260923000005_admin_realtime.sql`。`bun run test:cur
 
 商品列表实时回归需再应用 `20260923000006_admin_product_realtime.sql`。本地 Admin 启动后运行 `bun scripts/admin-products-live-smoke.ts`（支持 `ADMIN_URL`），验证 21 条商品的跨页刷新、第二页失败保留全部旧数据及重试、筛选草稿不变、变体价格更新、状态移出和删除。截图为 `/tmp/admin-products-live*.png`；夹具仅创建和清理本轮本地商品与账号。`tests/admin-realtime.test.ts` 同时验证商品频道权限、事务回滚与商品/变体/图片/分类关联四张表的增删改通知，不向客户端发送业务内容。
 
+库存通知需 `20260923000007_admin_inventory_realtime.sql`。`bun scripts/admin-transfer-smoke.ts` 验证已提交但回执丢失的调整，在另一笔调整把余额变回原值后仍保留原请求；显式刷新不解锁、不改参数，原键重试不重复生效。还验证调拨草稿遇到通知后不被覆盖，Refresh balances 保留输入及未知调拨；保留原有停用仓库后的幂等重试回归。截图为 `/tmp/admin-stock-live-pending.png`、`/tmp/admin-transfer-*.png`。库存测试沿用不可变流水夹具约定：归档测试商品、停用测试仓库，保留历史审计，不删除业务流水。`tests/admin-realtime.test.ts` 使用真实报价预占／取消和调整验证通知与余额、回滚无通知、非管理员与降级后的订阅／读取拒绝；自然时间到期不保证产生通知。
+
 该验收覆盖一条代表性跨客户端业务链路，不等于全部 113 个工具的端到端覆盖，也不替代真实域名、SMTP、生产 Edge CORS、目标 Agent 产品客户端与上线运维验收。未设置 `MCP_ADMIN_URL` 时保持原有浏览器只读验收。
 
 ## Storefront 验证与演示数据

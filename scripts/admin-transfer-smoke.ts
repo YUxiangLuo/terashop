@@ -59,6 +59,19 @@ const levels = () =>
     `/rest/v1/inventory_levels?variant_id=eq.${variant}&select=location_id,on_hand`,
     "GET",
   );
+const adjust = (delta: number) =>
+  api(
+    "/rest/v1/rpc/adjust_inventory",
+    "POST",
+    {
+      variant_id: variant,
+      location_id: from,
+      delta,
+      note: "Realtime smoke",
+      idempotency_key: crypto.randomUUID(),
+    },
+    true,
+  );
 try {
   user = (
     await api("/auth/v1/admin/users", "POST", {
@@ -105,11 +118,70 @@ try {
       true,
     );
   }
-  await browser("open", `${origin.origin}/inventory/transfer/${product}`);
+  await browser("open", `${origin.origin}/inventory?product=${product}`);
   await browser("wait", "input[type=email]");
   await browser("fill", "input[type=email]", email);
   await browser("fill", "input[type=password]", password);
   await click("Sign in");
+  await browser("wait", "--text", "Live stock notifications connected.");
+  await browser(
+    "wait",
+    "--fn",
+    `!!document.querySelector('[aria-label="Inventory"] select') && !document.querySelector('[aria-label="Inventory"] fieldset').disabled`,
+  );
+  await browser(
+    "select",
+    '[aria-label="Inventory"] .fields.two label:last-child select',
+    from,
+  );
+  await browser(
+    "wait",
+    "--fn",
+    `document.querySelector('[aria-label="Inventory"] .metrics dd')?.textContent==='11'`,
+  );
+  await browser("fill", '[aria-label="Inventory"] input[type=number]', "2");
+  await browser(
+    "eval",
+    `(() => {
+    const send=window.fetch;
+    window.fetch=async (...args)=>{
+      const result=await send(...args);
+      if(String(args[0]).endsWith('/rpc/adjust_inventory') && result.ok){await result.text(); window.fetch=send; throw Error('Lost committed adjustment');}
+      return result;
+    };
+  })()`,
+  );
+  await click("Confirm stock adjustment");
+  await browser("dialog", "accept");
+  await browser("wait", "--text", "Unresolved stock operation");
+  const stockKey = `tera-admin-command:${user}:stock:${product}`;
+  await browser(
+    "eval",
+    `window.savedStock=sessionStorage.getItem(${JSON.stringify(stockKey)})`,
+  );
+  await adjust(-2);
+  await browser("wait", "--text", "Inventory may have changed.");
+  await click("Refresh stock");
+  await browser(
+    "wait",
+    "--fn",
+    `document.querySelector('[aria-label="Inventory"] .metrics dd')?.textContent==='11'`,
+  );
+  await browser(
+    "eval",
+    `if(sessionStorage.getItem(${JSON.stringify(stockKey)})!==window.savedStock || !document.querySelector('[aria-label="Inventory"] fieldset').disabled)throw Error('Notification resolved or changed pending adjustment')`,
+  );
+  await browser("screenshot", "/tmp/admin-stock-live-pending.png");
+  await click("Retry saved adjustment");
+  await browser("dialog", "accept");
+  await browser("wait", "--text", "Stock adjustment confirmed.");
+  if (
+    (await levels()).find(
+      (r: { location_id: string }) => r.location_id === from,
+    ).on_hand !== 11
+  )
+    throw Error("Adjustment replay duplicated stock");
+  await browser("open", `${origin.origin}/inventory/transfer/${product}`);
   await ready();
   await browser("select", "#transfer-form .two label:first-child select", from);
   await ready();
@@ -132,6 +204,18 @@ try {
     throw Error("Invalid transfer moved stock");
   await browser("fill", "input[type=number]", "4");
   await browser("fill", "textarea", "Move four units to destination");
+  await browser("wait", "--text", "Live stock notifications connected.");
+  await adjust(1);
+  await browser("wait", "--text", "Inventory may have changed.");
+  await click("Refresh balances");
+  await ready();
+  await browser(
+    "eval",
+    `if(document.querySelector('input[type=number]').value!=='4' || document.querySelector('textarea').value!=='Move four units to destination' || !document.querySelector('[data-testid="transfer-balances"]').textContent.includes('12 on hand'))throw Error('Live refresh discarded transfer draft')`,
+  );
+  await adjust(-1);
+  await click("Refresh balances");
+  await ready();
   await browser("set", "viewport", "1440", "1000");
   await browser("screenshot", "/tmp/admin-transfer-form.png");
   await browser(
@@ -165,6 +249,21 @@ try {
     `(() => { const pending = JSON.parse(sessionStorage.getItem(${JSON.stringify(key)})); if (pending.quantity !== 4 || pending.from_location_id !== ${JSON.stringify(from)} || !document.querySelector('#transfer-form fieldset').disabled) throw Error('Pending command not locked'); })()`,
   );
   await browser("screenshot", "/tmp/admin-transfer-pending.png");
+  await browser("wait", "--text", "Inventory may have changed.");
+  await browser(
+    "eval",
+    `window.savedTransfer=sessionStorage.getItem(${JSON.stringify(key)})`,
+  );
+  await click("Refresh balances");
+  await browser(
+    "wait",
+    "--fn",
+    `![...document.querySelectorAll('button')].find(b=>b.textContent==='Refresh balances').disabled`,
+  );
+  await browser(
+    "eval",
+    `if(sessionStorage.getItem(${JSON.stringify(key)})!==window.savedTransfer || !document.querySelector('#transfer-form fieldset').disabled)throw Error('Refresh changed pending transfer')`,
+  );
   // The committed request must replay even after its destination is deactivated.
   await api(`/rest/v1/locations?id=eq.${to}`, "PATCH", { is_active: false });
   await browser("reload");

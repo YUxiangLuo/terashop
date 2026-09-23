@@ -1,7 +1,9 @@
 import { afterAll, expect, test } from 'bun:test';
 import { createClient, type RealtimeChannel, type SupabaseClient } from '@supabase/supabase-js';
-import { API, ANON_KEY, api, checked, rpc, signup, makeAdmin } from './helpers';
+import { API, ANON_KEY, api, checked, rpc, signup, makeAdmin, TEST_ADDRESS } from './helpers';
 import { testDatabase } from './database-concurrency';
+import { stockedProduct } from './support/catalog';
+import { Cleanup } from './support/cleanup';
 
 const db = testDatabase();
 const clients: SupabaseClient[] = [];
@@ -97,6 +99,79 @@ test('product invalidation covers list sources without exposing rows or acceptin
   await db`update public.profiles set role='customer' where id=${admin.userId}::uuid`;
   expect((await rpc('list_admin_products', {}, admin.token)).status).toBe(403);
   expect((await join('admin:products', admin.token)).state).toBe('CHANNEL_ERROR');
+}, 30000);
+
+test('inventory notices cover committed adjustments and reservation/release without exposing stock or quote data', async () => {
+  // As with reservation regression fixtures, archive products and retain immutable audit history.
+  const cleanup = new Cleanup();
+  const admin = await signup(),
+    buyer = await signup();
+  await makeAdmin(admin.userId);
+  try {
+    const stock = await stockedProduct(admin, { onHand: 10, cleanup, label: 'live-stock' });
+    const allowed = await join('admin:inventory', admin.token);
+    expect(allowed.state).toBe('SUBSCRIBED');
+    expect((await join('admin:inventory', buyer.token)).state).toBe('CHANNEL_ERROR');
+    expect((await join('admin:inventory')).state).toBe('CHANNEL_ERROR');
+    await expect(
+      db.begin(async (tx) => {
+        await tx`update public.inventory_levels set on_hand=on_hand+3 where variant_id=${stock.variantId}::uuid`;
+        throw Error('rollback');
+      }),
+    ).rejects.toThrow('rollback');
+    await Bun.sleep(300);
+    expect(allowed.messages).toHaveLength(0);
+    const quote = await checked<{ id: string }>(
+      rpc(
+        'create_checkout_quote',
+        {
+          items: [{ variant_id: stock.variantId, quantity: 2 }],
+          address: TEST_ADDRESS,
+          idempotency_key: crypto.randomUUID(),
+        },
+        buyer.token,
+      ),
+    );
+    cleanup.defer(() =>
+      checked(
+        rpc('cancel_checkout_quote', { quote_id: quote.id, reason: 'Realtime fixture cleanup' }, buyer.token),
+      ),
+    );
+    await until(() => allowed.messages.length > 0);
+    expect(
+      await checked(rpc('get_inventory_availability', { variant_id: stock.variantId }, admin.token)),
+    ).toMatchObject({ on_hand: 10, reserved: 2, available: 8 });
+    await Bun.sleep(200);
+    let before = allowed.messages.length;
+    await checked(
+      rpc('cancel_checkout_quote', { quote_id: quote.id, reason: 'Realtime fixture cleanup' }, buyer.token),
+    );
+    await until(() => allowed.messages.length > before);
+    expect(
+      await checked(rpc('get_inventory_availability', { variant_id: stock.variantId }, admin.token)),
+    ).toMatchObject({ on_hand: 10, reserved: 0, available: 10 });
+    await Bun.sleep(200);
+    before = allowed.messages.length;
+    await checked(
+      rpc(
+        'adjust_inventory',
+        { variant_id: stock.variantId, delta: 1, idempotency_key: crypto.randomUUID() },
+        admin.token,
+      ),
+    );
+    await until(() => allowed.messages.length > before);
+    expect(
+      await checked(rpc('get_inventory_availability', { variant_id: stock.variantId }, admin.token)),
+    ).toMatchObject({ on_hand: 11, reserved: 0, available: 11 });
+    for (const value of allowed.messages) expect(Object.keys(value)).toEqual(['id']);
+    await db`update public.profiles set role='customer' where id=${admin.userId}::uuid`;
+    expect((await join('admin:inventory', admin.token)).state).toBe('CHANNEL_ERROR');
+    expect(
+      (await rpc('get_inventory_availability', { variant_id: stock.variantId }, admin.token)).status,
+    ).toBeGreaterThanOrEqual(400);
+  } finally {
+    await cleanup.run();
+  }
 }, 30000);
 
 test('private category broadcast is commit-only and payload-free; customers and demoted joins are denied', async () => {

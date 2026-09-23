@@ -4,7 +4,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 // reconnect/focus; delivery and cached channel authorization are not guarantees.
 export function watchAdminChanges(
   client: SupabaseClient,
-  scope: "categories" | "products" | "calls",
+  scope: "categories" | "products" | "inventory" | "calls",
   invalidate: () => void,
   status: (connected: boolean) => void,
 ) {
