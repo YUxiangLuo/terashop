@@ -4,6 +4,9 @@ import { AdminBackend } from './backend';
 import type { createCredentialCipher } from './credentials';
 import { createAdminServer } from './server';
 
+// A 1 MiB media tool input expands to ~1.4 MiB in base64 plus its JSON envelope.
+export const MAX_MCP_REQUEST_BYTES = 2 * 1024 * 1024;
+
 // Web Request handler only. Deployment owns TLS, listener limits and shutdown.
 // No sessions, result replay, ambient administrator token or service-role business calls.
 export function createAdminHttpHandler(
@@ -74,7 +77,7 @@ export function createAdminHttpHandler(
           const part = await reader.read();
           if (part.done) break;
           length += part.value.byteLength;
-          if (length > 1024 * 1024) {
+          if (length > MAX_MCP_REQUEST_BYTES) {
             await reader.cancel();
             return reply(413, 'request_too_large');
           }

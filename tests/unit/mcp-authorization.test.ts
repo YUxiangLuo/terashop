@@ -141,6 +141,19 @@ test('transport failures and malformed responses fail closed without disclosing 
   }
 });
 
+test('oversized valid introspection and grant receipts fail closed', async () => {
+  for (const failureAt of [0, 1]) {
+    const f = fixture();
+    let count = 0;
+    const authorizer = new KeycloakGrantAuthorizer(f.config, async (url, init) => {
+      const response = await f.request(url, init);
+      return count++ === failureAt ? new Response(`${await response.text()}${' '.repeat(65536)}`) : response;
+    });
+    await expect(authorizer.authorize('token')).rejects.toThrow(/^AUTHORIZATION_DENIED$/);
+    expect(count).toBe(failureAt + 1);
+  }
+});
+
 test('configuration is snapshotted and unsafe destinations are rejected', async () => {
   const f = fixture();
   f.config.scopes = ['store:privacy'];

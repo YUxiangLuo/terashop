@@ -254,6 +254,11 @@ test('real Bun TLS service enforces private configuration and serves an authenti
     expect((await client.listTools()).tools.some((tool) => tool.name === 'get_admin_shop_settings')).toBe(
       true,
     );
+    // Exercise the native listener's body limit too, with a valid SDK envelope
+    // as large as the maximum media base64, not just the in-process handler.
+    expect(
+      (await client.listTools({ _meta: { padding: 'x'.repeat(1398104) } })).tools.length,
+    ).toBeGreaterThan(0);
     active = false;
     const denied = await local('/mcp', { headers: { authorization: 'Bearer opaque' } });
     expect(denied.status).toBe(401);

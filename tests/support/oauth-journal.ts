@@ -32,9 +32,9 @@ export async function verifyApprovalJournal(db: postgres.Sql) {
     journal.finish(a.interactionId, 'completed'),
     other.finish(a.interactionId, 'revoked'),
   ]);
-  assert.equal(terminal.filter((r) => r.status === 'fulfilled').length, 1);
-  const state = terminal[0].status === 'fulfilled' ? 'completed' : 'revoked';
-  await journal.finish(a.interactionId, state);
+  assert.equal(terminal[1].status, 'fulfilled'); // Revocation wins in either order.
+  await journal.finish(a.interactionId, 'revoked');
+  await assert.rejects(journal.finish(a.interactionId, 'completed'));
   await assert.rejects(journal.begin(winner), /^Error: OIDC_JOURNAL_WRITE_FAILED$/);
   assert(!(await journal.pending()).some((r) => r.interactionId === a.interactionId));
   await assert.rejects(journal.finish('missing', 'completed'));

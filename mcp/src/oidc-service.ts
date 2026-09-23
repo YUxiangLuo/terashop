@@ -70,7 +70,7 @@ export async function startOidcService(path: string) {
         await database?.end({ timeout: 5 });
       } finally {
         releasingOwner = true;
-        owner?.release();
+        if (!ownerClosed) owner?.release();
         await ownerDatabase?.end({ timeout: 5 });
       }
     })());
@@ -116,19 +116,6 @@ export async function startOidcService(path: string) {
     });
     const provider = createOidcProvider(c.provider, createOidcAdapter(database));
     provider.silent = true; // Koa must not print raw database/provider errors.
-    const interaction = createOidcInteractionHandler(
-      provider,
-      {
-        ...c.downstream,
-        publicOrigin: provider.issuer,
-        resource: c.provider.resource,
-        scopes: c.provider.scopes,
-      },
-      cipher,
-      fetch,
-      createOidcApprovalJournal(database),
-    );
-    const handler = createOidcTlsHandler(provider, interaction);
     const globalRate = createRateLimit(120, 60, 1);
     const peerRate = createRateLimit(60, 10);
     // Constructing HTTPS validates the certificate/private-key pair before any DB IO.
@@ -176,6 +163,8 @@ export async function startOidcService(path: string) {
         void operation.finally(() => pending.delete(operation));
       },
     );
+    // Includes TCP peers that have not completed TLS/HTTP admission yet.
+    server.maxConnections = 128;
     server.requestTimeout = 15_000;
     server.headersTimeout = 10_000;
     server.setTimeout(30_000, (socket) => socket.destroy());
@@ -207,6 +196,7 @@ export async function startOidcService(path: string) {
       idle_timeout: 0,
       max_lifetime: null,
       connect_timeout: 5,
+      connection: { statement_timeout: 10000, lock_timeout: 5000 },
       ssl: ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) ? false : 'verify-full',
       onnotice: () => {},
       onclose: () => {
@@ -219,8 +209,27 @@ export async function startOidcService(path: string) {
     });
     owner = await ownerDatabase.reserve();
     const [lease] = await owner`select pg_try_advisory_lock(1952805473,1869177956) as acquired,
-      pg_backend_pid() as pid`;
+      pg_backend_pid() as pid, backend_start::text as started
+      from pg_stat_activity where pid=pg_backend_pid()`;
     if (!lease.acquired || ownerClosed || closing) throw new Error('Issuer ownership unavailable');
+    const journal = createOidcApprovalJournal(owner, {
+      pid: lease.pid,
+      started: lease.started,
+      closed: () => ownerClosed,
+    });
+    const interaction = createOidcInteractionHandler(
+      provider,
+      {
+        ...c.downstream,
+        publicOrigin: provider.issuer,
+        resource: c.provider.resource,
+        scopes: c.provider.scopes,
+      },
+      cipher,
+      fetch,
+      journal,
+    );
+    const handler = createOidcTlsHandler(provider, interaction);
     // No listener until persisted pending approvals are revoked. Track recovery
     // as in-flight work so ownership loss cannot close its pool underneath it.
     const recovery = recoverOidcApprovals(
@@ -234,6 +243,7 @@ export async function startOidcService(path: string) {
         if (ownerClosed || closing) throw new Error('Issuer ownership lost');
         return fetch(url, init);
       },
+      journal,
     ).then(() => {});
     pending.add(recovery);
     try {

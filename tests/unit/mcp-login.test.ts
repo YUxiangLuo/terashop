@@ -100,6 +100,23 @@ test('concurrent and uncertain exchanges never replay a provider request', async
   }
 });
 
+test('oversized otherwise-valid login response is rejected without forwarding credentials', async () => {
+  const f = await fixture();
+  let calls = 0;
+  const attempt = await createDownstreamLogin(config, async () => {
+    calls++;
+    return new Response(`${JSON.stringify(f.result)}${' '.repeat(65536)}`);
+  });
+  const callback = `${config.callbackUrl}?${new URLSearchParams({ code: 'code', state: attempt.state })}`;
+  await expect(attempt.exchange(callback, config.browserSession)).rejects.toThrow(
+    /^LOGIN_EXCHANGE_UNCONFIRMED$/,
+  );
+  await expect(attempt.exchange(callback, config.browserSession)).rejects.toThrow(
+    /^LOGIN_EXCHANGE_UNCONFIRMED$/,
+  );
+  expect(calls).toBe(1);
+});
+
 test('browser and state are independently required before consuming or contacting Auth', async () => {
   const a = await fixture(),
     b = await fixture();

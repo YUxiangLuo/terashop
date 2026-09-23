@@ -44,6 +44,7 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
   );
   let calls = 0;
   let refreshClaims = 0;
+  const uploads: Uint8Array[] = [];
   const handler = createAdminHttpHandler(
     config,
     cipher,
@@ -64,6 +65,16 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
           exp: Math.floor(Date.now() / 1000) + 300,
           scope: user.scopes.join(' '),
         });
+      }
+      if (url.endsWith('/auth/v1/user'))
+        return Response.json({ id: users[1].id, role: 'authenticated', is_anonymous: false });
+      if (url.endsWith('/is_admin')) return Response.json(true);
+      if (url.endsWith('/get_admin_product'))
+        return Response.json({ id: JSON.parse(String(init.body)).product_id });
+      if (url.includes('/storage/v1/object/catalog-media/')) {
+        expect(new Headers(init.headers).get('authorization')).toBe('Bearer downstream-b');
+        uploads.push(new Uint8Array(init.body as Uint8Array));
+        return Response.json({});
       }
       expect(new Headers(init.headers).get('authorization')).toBe('Bearer service-secret');
       const body = JSON.parse(init.body as string);
@@ -86,8 +97,44 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
     },
     admit,
   );
-  return { handler, users, config, calls: () => calls, refreshClaims: () => refreshClaims };
+  return { handler, users, config, uploads, calls: () => calls, refreshClaims: () => refreshClaims };
 }
+
+test('remote SDK uploads the full advertised 1 MiB media size after base64 expansion', async () => {
+  const f = await fixture();
+  const client = new Client({ name: 'media-limit-test', version: '1' });
+  const bytes = Buffer.alloc(1048576, 0xab);
+  const productId = crypto.randomUUID(),
+    mediaId = crypto.randomUUID();
+  try {
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(f.config.resource), {
+        requestInit: { headers: { authorization: 'Bearer b' } },
+        fetch: (input, init) => f.handler(new Request(input, init)),
+      }),
+    );
+    const result = await client.callTool({
+      name: 'upload_product_media',
+      arguments: {
+        product_id: productId,
+        media_id: mediaId,
+        content_type: 'image/png',
+        data_base64: bytes.toString('base64'),
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      data: {
+        path: `products/${productId}/${mediaId}.png`,
+        url: `https://db.example/storage/v1/object/public/catalog-media/products/${productId}/${mediaId}.png`,
+      },
+    });
+    expect(f.uploads).toHaveLength(1);
+    expect(Buffer.from(f.uploads[0]).equals(bytes)).toBe(true);
+  } finally {
+    await client.close();
+  }
+});
 
 test('identity admission follows verified authorization and precedes credentials or body work', async () => {
   const seen: string[] = [];
@@ -201,7 +248,7 @@ test('stateless handler rejects sessions, streaming methods and oversized bodies
       )
     ).status,
   ).toBe(400);
-  for (const size of [1024 * 1024, 1024 * 1024 + 1]) {
+  for (const size of [2 * 1024 * 1024, 2 * 1024 * 1024 + 1]) {
     const response = await f.handler(
       new Request(f.config.resource, {
         method: 'POST',
@@ -213,7 +260,7 @@ test('stateless handler rejects sessions, streaming methods and oversized bodies
         body: ' '.repeat(size),
       }),
     );
-    expect(response.status).toBe(size === 1024 * 1024 ? 400 : 413);
+    expect(response.status).toBe(size === 2 * 1024 * 1024 ? 400 : 413);
     expect(response.headers.get('cache-control')).toBe('no-store');
   }
 });

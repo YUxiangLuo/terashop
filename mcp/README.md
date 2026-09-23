@@ -46,6 +46,8 @@
 
 固定进程内预算：两个监听器各自全局 burst=120、每秒补充 60；直接连接来源 burst=60、每秒补充 10；MCP 另在身份验证后按用户 burst=30、每秒补充 5。来源与用户各最多 1024 个 bucket，不驱逐尚未恢复的活跃身份来接纳新 key。返回 429/no-store/Retry-After，不自动重放写入；重启重置预算，同 NAT 用户共享来源预算，不能代替公网连接数限制和 DDoS 防护。
 
+Node 授权监听器另限制最多 128 个 TCP 连接，未完成 TLS 握手的连接也占名额；超额连接直接关闭。Bun 监听器没有对应的应用层连接总数保证。后端 JSON 响应按实际流字节限制：登录、授权、恢复及错误回执最多 64 KiB，业务结果最多 8 MiB；超限整体拒绝并取消读取，不信任 Content-Length，不截断返回成功数据，写入结果仍可能未知。
+
 浏览器导航请求 `text/html` 时，`GET /interaction/:uid` 在原有 provider Cookie／interaction 校验后渲染真实 client ID、resource、redirect URI、请求 scopes 及离线刷新说明；JSON 消费者保持原协议。页面只有在用户发送邮件或拒绝时创建登录事务，不因 GET 自动启动。CSRF 仅保存在原标签页的 `sessionStorage`，不保存访问令牌、刷新令牌或登录 Cookie；刷新页面只查询状态，不重复 bootstrap。邮件回调结果页提示回原标签页，登录成功不自动批准；新标签页缺少批准凭证、事务过期、服务重启或结果不明时需由客户端重新连接，不自动重试写入。页面使用静态脚本／样式 CSP 哈希、转义的 provider 文本、no-store 和 no-referrer；不加载第三方资源。脚本决策单测及 Node／Bun 原生交互测试分别验证显式单次提交、元数据转义、HTML 内容协商和原授权校验；生产仍需下面的整体验收。
 
 真实浏览器联合验收（可选，不给默认测试增加浏览器依赖）：
@@ -68,7 +70,7 @@ MCP_BROWSER=1 MCP_BROWSER_EXPIRY=1 bun run test:current tests/mcp-oidc-interacti
 
 普通 `MCP_BROWSER=1` 场景还验证待批准时断网恢复：第三名管理员完成真实邮件验证后，使用 agent-browser 的 Chromium offline 模式仅断开浏览器网络，不停止授权服务、不伪造 HTTP 响应。状态轮询失败必须禁用操作并清除 CSRF；恢复网络后手动读取真实 `/login/status` 仍为 authenticated，等待一个轮询间隔后旧页面仍禁用，原生点击禁用批准按钮不能发码。最终数据库断言该用户没有本地授权，之后新的授权请求仍能完成登录与工具调用。可指定 `MCP_BROWSER_OFFLINE_SCREENSHOT=/绝对路径/offline.png` 保存恢复网络后的停止页。此场景不包含批准请求已经提交后的响应丢失、系统级网络分区或浏览器自动重连策略。
 
-同一命令还覆盖批准已提交但页面未收到完成回执：第四名管理员真实登录，测试用数据库锁阻塞凭据写入，观察 `pg_blocking_pids` 并确认本地 grant 已 active，然后用浏览器原生 AbortController 取消实际批准 Fetch 并立即释放锁。测试仅为该请求附加取消信号和计数器，不伪造响应、Cookie 或身份。断言页面停止、清除 CSRF、只提交一次、无客户端回调；数据库只有一个本地 grant，provider 未创建授权码或访问／刷新令牌。本次实际终态为 revoked：两端授权撤销、密文删除、批准日志 revoked。若服务器在观察到断连前已经成功发送，允许 completed／active，但必须有匹配的 provider Grant 与 revision=1 凭据，不能把它称为回滚；pending 或两端不一致不能通过。可用 `MCP_BROWSER_LOST_RESPONSE_SCREENSHOT=/绝对路径/lost.png` 保存停止页。Chromium offline 模式并不保证取消已在途响应；初次实验将等待页面失败放在释放数据库锁之前，还叠加了持久化／清理超时，因此不作为单一回执丢失的证据。该浏览器场景不证明所有完成后回执丢失或网络分区行为。
+同一命令还覆盖批准已提交但页面未收到完成回执：第四名管理员真实登录，测试用数据库锁阻塞凭据写入，观察 `pg_blocking_pids` 并确认本地 grant 已 active，然后用浏览器原生 AbortController 取消实际批准 Fetch 并立即释放锁。测试仅为该请求附加取消信号和计数器，不伪造响应、Cookie 或身份。随后正常排空并重启授权服务，确认未 resume 的交付被恢复撤销：本地 grant revoked、密文删除、上游 Grant 不可见、批准日志 revoked，未创建授权码或访问／刷新令牌。页面须停止、清除 CSRF、只提交一次、无客户端回调。不能把排空前瞬时 completed 当成不会继续清理的终态，也不能把客户端错误本身称为回滚。可用 `MCP_BROWSER_LOST_RESPONSE_SCREENSHOT=/绝对路径/lost.png` 保存停止页；该场景不证明任意网络分区行为。
 
 完成后的应用层回执丢失也在普通浏览器场景中确定性验证：第五名管理员真实登录，夹具为批准 Fetch 包装一个回执丢弃器，消费并核对真实 200 响应及同源 redirectTo 后抛出 TypeError，不把响应交给页面。它没有伪造服务端成功，也不是物理断网。页面须清除 CSRF、禁用操作、不导航且只提交一次；数据库必须精确为一个 active grant、completed 批准日志、revision=1 凭据及属于该用户的 provider Grant，同时没有授权码／访问令牌／刷新令牌。该场景证明客户端错误不代表服务端撤销。可指定 `MCP_BROWSER_DISCARDED_RECEIPT_SCREENSHOT=/绝对路径/discarded.png` 保存页面。之后仍通过全新连接验证正常授权与 MCP 读取。本地代表性链路与授权体验批次据此完成；后续优先推进运行防护／运维，公网与目标产品客户端继续单独验收。
 
@@ -318,25 +320,25 @@ HTTPS 店铺写入断连回归对本地 private.shop_settings 加 SHARE 表锁�
 
 Node 联合场景另验证两次正常授权服务进程重建：用 SIGTERM 停止容器并要求退出码 0，重新使用同一私有配置和数据库启动真实入口。先消费 B 的原刷新令牌并撤销 A 的本地授权；第一次重启后 A 仍被拒绝，B 的旧访问令牌、grant 绑定、加密凭据及店铺调用仍有效，替代刷新令牌可继续轮换且权限不变。随后执行上述下游刷新断连场景，再重放原上游刷新令牌，返回 invalid_grant，整组授权失效；第二次重启后先检查访问令牌仍不可用，再确认最新刷新令牌被拒绝，旧 MCP 上下文也无法调用。此测试不重启数据库，不覆盖强制崩溃、SSO Cookie 恢复或密钥轮换。
 
-在途批准退出验收复用上述 Node 场景：持有 issuer adapter 的写入 advisory lock，通过 pg_blocking_pids 确认批准已阻塞后发送 SIGTERM；观察监听器停止接收，同时数据库写入仍在等待，才释放屏障。保持连接的批准须返回 303，服务退出码须为 0，重启后用原 Cookie 和 resume 地址继续兑换授权码，验证本地 grant、加密凭据及店铺调用。
+在途批准退出验收复用上述 Node 场景：持有 issuer adapter 的写入 advisory lock，通过 pg_blocking_pids 确认批准已阻塞后发送 SIGTERM；观察监听器停止接收，同时数据库写入仍在等待，才释放屏障。保持连接的批准返回 303，服务退出码为 0；若重启前未 resume，启动恢复保守撤销该授权并删除凭据，原 resume 地址返回 400。已在重启前正常 resume 的其他用户仍可调用店铺工具。
 
 第三名管理员另覆盖批准等待期间主动断连再 SIGTERM：释放屏障并正常重启后，必须观察到本地 grant 已撤销、密文已删除、issuer 撤销标记已持久化。此回归曾复现断连后 grant 仍 active；响应发送现检查已销毁连接并触发现有批准失败清理，服务等待处理器完成后才关闭数据库。检查的是发送前已知断连，不保证客户端收到响应，也不覆盖发送后的断连、下游超时、其他登录阶段或强制崩溃补偿；不以固定睡眠推断并发顺序。
 
-崩溃恢复的日志基础：[createOidcApprovalJournal](src/oidc-journal.ts) 与独立 issuer 库的 `oidc.approval_attempts` 保存 interaction ID、完整 grant binding、创建时间及 pending/completed/revoked 状态，不保存登录凭据或 provider payload。日志 API 允许重复记录完全相同的 pending 项，拒绝换绑、同一上游 grant 归属另一 interaction、终态重开及终态互换；完成／撤销并发只允许一个结果。pending 使用 C 排序和 ID 游标，每页最多 100 条，不因时间经过就删除。Node 独立进程测试验证 pending 和终态跨进程保留，Bun/Node 真实 PostgreSQL 测试覆盖冲突和 103 条大小写混合 ID 分页。
+崩溃恢复的日志基础：[createOidcApprovalJournal](src/oidc-journal.ts) 与独立 issuer 库的 `oidc.approval_attempts` 保存 interaction ID、完整 grant binding、创建时间及 pending/completed/revoked 状态，不保存登录凭据或 provider payload。日志 API 允许重复记录完全相同的 pending 项，拒绝换绑和同一上游 grant 归属另一 interaction。completed 表示已准备交付，不证明送达；允许完成后失败清理转为 revoked，禁止 revoked 再 completed。恢复会将尚未 resume 的 completed 项认领为 pending，确保清理跨崩溃重试。分页使用 C 排序和 ID 游标，每页最多 100 条，不因时间经过就删除。
 
-**Node 服务已接入批准日志与监听前 pending 恢复。** 宿主先生成 32 字节随机 base64url Grant ID 并设定 jti，再确认 pending 日志登记，然后保存 provider Grant，最后创建下游授权；保存返回值必须匹配预分配 ID。此顺序依赖固定 oidc-provider 9.12.2 保留预设 jti 的行为，升级时必须重跑兼容性与真实 Node 登录测试。日志登记失败不保存有效 Grant、不调用下游 create，也不擅自修改结果不明或冲突的旧日志；清理仍可为尚未保存的 ID 写入撤销标记。批准失败只有在清理确认后才标记 revoked，清理或日志回执不明保持显式错误。interaction result 保存且发送响应后再标记 completed；标记失败尝试撤销授权。响应发送与日志落盘不是原子事务，completed 不是送达证明，也不是授权有效性依据；日志标记提交但回执丢失时，可能出现 completed 日志对应已撤销授权，在线授权检查仍以两端 grant 为准。
+**Node 服务已接入批准日志与监听前恢复。** 宿主先生成 32 字节随机 base64url Grant ID 并设定 jti，再确认 pending 日志登记，然后保存 provider Grant，最后创建下游授权；保存返回值必须匹配预分配 ID。此顺序依赖固定 oidc-provider 9.12.2 保留预设 jti 的行为，升级时必须重跑兼容性与真实 Node 登录测试。日志登记失败不保存有效 Grant、不调用下游 create，也不擅自修改结果不明或冲突的旧日志；清理仍可为尚未保存的 ID 写入撤销标记。必须先确认 completed 落盘，再保存可继续的 interaction result，最后发送 resume URL；仅延迟响应不足以防止浏览器提前访问已知 resume 地址。标记、保存或发送失败均尝试双端撤销，清理确认后标记 revoked。completed 不是送达证明或授权有效性依据；重启保守撤销尚未 resume 的交付，包括响应可能已到达但浏览器尚未继续的情况。
 
 真实 Node 登录／断连重启测试验证两条 completed 与一条 revoked 记录持久化，单测验证登记前无 provider Grant／下游创建、登记回执丢失不错误收尾、Grant 保存失败／回执丢失／ID 不匹配不创建下游授权、清理失败不写终态。先日志后保存关闭了新批准流程的孤立 Grant 窗口，但不会自动发现旧版本产生的无日志记录；旧部署需单独核对。新入口要求日志表和 DML 权限，旧两表角色将被启动校验拒绝；已有 issuer 数据库须先显式审核添加 storage.sql 中的 approval_attempts 表／索引及权限，不可重跑整份建库基线。下游也须支持带永久 fence 的 revoke_binding。尚未执行任何已有部署的升级。
 
 单实例启动约束已接入：每个 issuer 数据库使用额外一个专用 PostgreSQL 保留连接持有 session advisory lock（与 adapter 写锁不同），关闭空闲／寿命回收，未取得锁不开放监听。正常退出先停止接收并等待处理器与业务连接池关闭，最后释放持锁连接；端口冲突等启动失败也释放锁。意外失去该连接后拒绝新请求并关闭服务，CLI 输出固定 OIDC_SERVICE_OWNERSHIP_LOST、退出码 1，不在原进程重新抢锁。Node 测试覆盖随机端口的同进程／跨进程竞争、正常释放、监听失败后释放、强制终止持锁数据库会话及新实例接管。
 
-这不是跨数据库写入的隔离保证：网络分区的断连检测可能滞后，已进入处理器的下游 HTTP 写入也不会因 advisory lock 丢失而自动取消。启动恢复只处理扫描到的持久化 pending；已撤销绑定的迟到写入由双端永久标记拒绝，但旧进程迟到登记、游标之后出现的新工作不会被持续扫描，不能宣称网络分区接管已获完整验收。部署必须保证旧进程停止后接管，直连支持 session 锁的数据库，不支持事务池代理，并为专用连接预留一个额外连接配额。
+审批登记、完成与恢复认领使用同一个持锁物理连接；每条 SQL 原子校验 PID、backend_start 和实际锁，已知断连则不再向死连接提交查询。失去所有权的旧请求不能经业务池迟到登记新审批或写入 completed；已登记绑定的迟到授权写入由双端永久标记拒绝。Node 故障注入覆盖实际终止持锁会话、同连接释放锁及旧身份被复用。此保证不取消已派发的业务调用，也不禁止所有迟到 Session 数据写入；不是多节点或网络分区接管验收。部署仍须确认旧进程停止后接管，直连支持 session 锁的数据库，不支持事务池代理，并预留专用连接配额。
 
 下游恢复撤销已增加永久 binding fence：`revoke_binding` 与 create 使用同一数据库行锁，即使 grant 尚未创建也封禁该完整绑定。并发在途 create 先提交则恢复随后撤销，恢复先提交则迟到 create 被拒绝；旧 RR 快照不能绕过标记。缺失 grant 的成功回执使用 null 身份，批准宿主仅在未知 grant ID 时接受它；404、超时或错误仍不能证明清理完成。真实 PostgreSQL 测试覆盖双向锁竞争和 RC/RR 快照。该能力不取消已获准的业务调用。已有部署须停写排空旧函数调用后，审核添加私有 fence 表并替换函数，不能混用旧创建协议；只更新了本地一次性测试库。
 
-内部 [recoverOidcApprovals](src/oidc-recovery.ts) 在 Node 启动取得 issuer 锁之后、开放监听之前执行，不提供独立 CLI／HTTP／MCP tool。每条记录先核对 issuer/resource/project，再保存上游撤销标记、调用下游 revoke_binding，验证终态及用户，最后写日志 revoked；不补发授权码，不读取凭据密文，不修改 completed/revoked 日志。任意失败停止扫描，启动返回 OIDC_SERVICE_START_FAILED，不开放监听或输出 READY。恢复纳入在途工作；发现所有权丢失后不再发起下游撤销，等待当前恢复操作结束再关闭连接池，监听前再次检查所有权。重启从 pending 首条开始，不持久化跳过失败项的游标。Bun 真实数据库测试覆盖回执丢失、日志写入中断、跨池续跑及 102 条跨页；Node 测试覆盖恢复 503 后启动失败、真实 HTTP 屏障期间端口未监听、重试成功，以及真实 Supabase 上预置中断记录在 READY 前被双端撤销。目前没有周期性后台恢复。
+内部 [recoverOidcApprovals](src/oidc-recovery.ts) 在 Node 启动取得 issuer 锁之后、开放监听之前执行，不提供独立 CLI／HTTP／MCP tool。恢复扫描 pending，以及仍有未销毁 Interaction 的 completed/revoked 项，先持久化认领，再核对 issuer/resource/project、保存上游撤销标记、调用下游 revoke_binding、验证回执、写日志 revoked，最后销毁 Interaction。认领保证旧 resume 并发销毁 Interaction 后，再次中断也不会丢掉待恢复项；已正常 resume 的 completed 授权保留。离线清理／失效处理销毁未 resume 的 Interaction 前也保留 pending 恢复标记。不补发授权码、不读取凭据密文；任意失败停止启动，不开放监听或输出 READY。重启从头扫描，失败项游标不落盘。目前没有周期性后台恢复。
 
-`bun scripts/mcp-oidc-compat.ts --with-storage` 另验证真实 Node CLI 恢复中连续两次 SIGKILL：使用同一 issuer PostgreSQL，阻塞下游撤销 HTTP 回执后观察上游撤销标记已持久化、日志仍 pending、未监听且没有 READY，再强杀进程；第二进程重复同一恢复并再次强杀。随后分别测试恢复中终止持锁数据库会话，下游保持阻塞直至请求超时，以及下游成功回包两种分支：旧进程均退出码 1、仅输出 OIDC_SERVICE_START_FAILED、从未 READY；超时保持 pending，成功回包可完成该条 revoked，但不允许继续启动监听。最后新进程恢复待处理项并开放 TLS，SIGTERM 正常退出。屏障基于收到完整请求，不用睡眠推断。此场景下游为可控 HTTP 回执夹具，不是真实 Supabase 写入；终止数据库连接也不等同于网络分区或无缝双实例接管验收。
+`bun scripts/mcp-oidc-compat.ts --with-storage` 另验证真实 Node CLI 恢复中连续两次 SIGKILL：使用同一 issuer PostgreSQL，阻塞下游撤销 HTTP 回执后观察上游撤销标记已持久化、日志仍 pending、未监听且没有 READY，再强杀进程；第二进程重复同一恢复并再次强杀。随后分别测试恢复中终止持锁数据库会话，下游保持阻塞直至请求超时，以及下游成功回包两种分支：旧进程均退出码 1、仅输出 OIDC_SERVICE_START_FAILED、从未 READY；两种情况均保留 pending，不能借另一数据库连接写终态。最后新进程恢复待处理项并开放 TLS，SIGTERM 正常退出。屏障基于收到完整请求，不用睡眠推断。此场景下游为可控 HTTP 回执夹具，不是真实 Supabase 写入；终止数据库连接也不等同于网络分区或无缝双实例接管验收。
 
 真实 Supabase 强杀验收在 `bun run test:current tests/mcp-oidc-interaction.test.ts` 的 Node 场景：第四名管理员走真实邮件 PKCE／同意流程，使用本地测试库凭据表锁与 pg_blocking_pids 屏障阻塞在途凭据 RPC，再 SIGKILL 容器并核对退出码 137。进程死亡后先观察 grant 仍 active、日志 pending，释放锁并确认原 RPC 确实提交 revision=1 密文，之后才重启授权服务。READY 后必须观察 grant revoked、密文已删除、上游撤销标记持久化、日志 revoked；前两名管理员的正常授权仍能调用店铺工具。未模拟 Supabase 响应，未以固定睡眠推断时序；表锁只用于一次性本地数据库。该测试覆盖凭据写入阶段，其他批准阶段的强杀与网络分区接管仍未验证。
 
@@ -346,17 +348,17 @@ provider 禁用开发登录、userinfo 和动态注册，忽略数据库残留�
 
 ## 远程 MCP HTTP 入口与验证边界
 
-Streamable HTTP 第一层已实现：[createAdminHttpHandler](src/http.ts) 使用 SDK 2.0.0 WebStandard transport，每个 POST 独立 server、JSON 响应、无 MCP session／GET SSE／DELETE；逐请求在线授权并读取该用户的加密凭据，工具执行仍复查权限。凭据剩余不超过 30 秒时调用已有 claim-refresh 协议一次，再重新读取；回执不明返回 503，不重放刷新或业务请求。只接收 Authorization Bearer，不接受 URL token，拒绝错误 Host／跨源 Origin，流式读取请求体并限制 1 MiB，响应 no-store。提供 resource 路径对应的 RFC 9728 元数据和 401 resource_metadata challenge。写工具仍须宿主显式 allowWrites，且受 token／grant／部署 scopes 交集限制。
+Streamable HTTP 第一层已实现：[createAdminHttpHandler](src/http.ts) 使用 SDK 2.0.0 WebStandard transport，每个 POST 独立 server、JSON 响应、无 MCP session／GET SSE／DELETE；逐请求在线授权并读取该用户的加密凭据，工具执行仍复查权限。凭据剩余不超过 30 秒时调用已有 claim-refresh 协议一次，再重新读取；回执不明返回 503，不重放刷新或业务请求。只接收 Authorization Bearer，不接受 URL token，拒绝错误 Host／跨源 Origin，流式读取请求体并限制 2 MiB，为 1 MiB 图片的 base64 编码和 JSON 封装留出空间，响应 no-store。提供 resource 路径对应的 RFC 9728 元数据和 401 resource_metadata challenge。写工具仍须宿主显式 allowWrites，且受 token／grant／部署 scopes 交集限制。
 
 SDK StreamableHTTPClientTransport 测试覆盖初始化、列表、双用户权限隔离、降权／撤销、体积边界、凭据错绑与刷新回执丢失；真实授权服务＋Supabase 联合场景中，Bun 模式直接调用 handler，Node 模式另启动独立 Bun HTTPS MCP CLI，通过实际网络调用店铺读取，范围见上方 Node 联合验收。
 
 Bun 入口已提供：[remote.ts](src/remote.ts)／[startAdminHttpService](src/http-service.ts)。从仓库根目录执行 `bun mcp/src/remote.ts /absolute/path/to/mcp.json`；只接受配置文件绝对路径，文件须为私有普通文件（如 0600），禁止符号链接，上限 64 KiB。JSON 顶层为 `authorization`、`credentialKeys`、`activeCredentialKey`、`tls`、`listen`，拒绝未知字段。authorization 必填 issuer、resource、introspectionEndpoint、introspectionClientId、introspectionClientSecret、project、supabaseUrl、serviceRoleKey、anonKey、scopes、allowWrites；固定使用 oidc-provider profile。resource 必须是带非根路径的 HTTPS URL；credentialKeys 为 key ID→32 字节规范 base64url 密钥，须能解密授权服务存储的凭据；tls 为 PEM key/cert，启动检查有效期、resource 主机名及密钥配对；listen 为 host（127.0.0.1／::1／0.0.0.0）和 port。生产配置不得提交仓库。
 
-仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。请求体上限 1 MiB，连接空闲超时 35 秒，处理截止时间 30 秒；传输层为应用超时响应留出余量。截止时中止本地读取／下游等待，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。TCP／TLS 单测使用一次性证书及本地后端夹具验证协议、鉴权、限流、阻塞取消、配置权限及排空；真实后端联合链路另由 Node 场景验证。启动成功仅表示配置与监听就绪，不证明后端凭据有效；公网客户端验收仍待完成。
+仅直接 HTTPS，不信任代理头、不支持跨源浏览器 CORS；显式关闭 Bun development 模式。监听器与 handler 共用 2 MiB 请求体上限，连接空闲超时 35 秒，处理截止时间 30 秒；传输层为应用超时响应留出余量。截止时中止本地读取／下游等待，但不能证明已派发的业务写入未提交，调用方必须核对结果，不能自动重放。SIGINT/SIGTERM 停止接收新连接并等待在途处理；READY 为 MCP_HTTP_READY，失败仅输出固定错误，不打印秘密。TCP／TLS 单测使用一次性证书及本地后端夹具验证协议、鉴权、限流、阻塞取消、配置权限及排空；真实后端联合链路另由 Node 场景验证。启动成功仅表示配置与监听就绪，不证明后端凭据有效；公网客户端验收仍待完成。
 
 Bun MCP 服务限制单实例最多 32 个在途处理，无等待队列。名额用 pending 操作集合核算，在进入 introspection 和下游请求前检查；满额返回 503 `service_busy`、no-store、Retry-After: 1。处理真正结束才释放名额，而不是在客户端断开或超时响应发出时提前释放；这不代表远端数据库操作被取消。真实 TLS 测试阻塞 32 个认证请求，断言第 33 个不进入认证；释放一个后新请求能够进入，且认证拒绝未访问 grant／凭据。此上限包括元数据，不限制连接总数；额外的来源／用户速率预算见顶部当前状态。Retry-After 不是自动重放写操作的授权。
 
-Node 授权服务同样限制单实例最多 32 个在途处理，在进入 provider／登录同意处理器前检查；满额返回相同的 503 `service_busy`、no-store、Retry-After: 1，并关闭连接，不读取超额请求体。名额直到处理器及失败清理真正结束才释放，保留原有退出排空语义。`bun scripts/mcp-oidc-compat.ts --with-storage` 在受支持的 Node 22、真实 TLS／PostgreSQL 下，以 32 个未完成的 token 请求体占用名额；收到全部 100 Continue 后验证元数据请求被拒绝，完成一个请求后验证元数据恢复。此预算覆盖该监听器所有路由，但不限制尚未完成握手／请求头的连接，也不能代替按身份限流或公网防护。
+Node 授权服务同样限制单实例最多 32 个在途处理，在进入 provider／登录同意处理器前检查；满额返回相同的 503 `service_busy`、no-store、Retry-After: 1，并关闭连接，不读取超额请求体。名额直到处理器及失败清理真正结束才释放，保留原有退出排空语义。`bun scripts/mcp-oidc-compat.ts --with-storage` 在受支持的 Node 22、真实 TLS／PostgreSQL 下，以 32 个未完成的 token 请求体占用名额；收到全部 100 Continue 后验证元数据请求被拒绝，完成一个请求后验证元数据恢复。另验证 128 个未发送 ClientHello 的 TCP 连接占满连接预算后，超额连接立即关闭，释放后 JWKS 恢复；不能代替公网防护或容量压测。
 
 Node 慢连接验收使用未完成的 TLS record 和已完成 TLS 的未完成 HTTP 请求头，每 250 毫秒发送少量字节，排除空闲超时。握手截止时间为 10 秒；请求头截止时间为 10 秒，并显式每 1 秒检查一次，避免 Node 默认 30 秒检查间隔延迟关闭。真实 Node 22 测试要求连接不早于 9 秒且在 15 秒测试上限内关闭，慢请求头返回 HTTP 408，随后正常 JWKS 读取仍成功。此测试不代表 Bun 监听器已通过同类验收，也不覆盖大量连接耗尽、按用户限流或公网压测。
 

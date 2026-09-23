@@ -2,6 +2,7 @@ import * as z from 'zod/v4';
 import type { AdminScope, ToolAuthorization } from './permissions';
 import { AdminBackend } from './backend';
 import type { createCredentialCipher, DownstreamCredentials } from './credentials';
+import { readBackendJson } from './backend-response';
 
 type CredentialCipher = Awaited<ReturnType<typeof createCredentialCipher>>;
 const storedCredentials = z.union([
@@ -103,7 +104,7 @@ export class GrantAuthorizer {
       cache: 'no-store',
     });
     if (!response.ok) throw new Error('Authorization request failed');
-    return response.json();
+    return readBackendJson(response);
   }
 
   private rpc(

@@ -2,6 +2,7 @@ import type postgres from 'postgres';
 import * as z from 'zod/v4';
 import { createOidcAdapter } from './oidc-adapter';
 import { createOidcApprovalJournal } from './oidc-journal';
+import { readBackendJson } from './backend-response';
 
 const receipt = z.union([
   z.strictObject({
@@ -28,6 +29,7 @@ export async function recoverOidcApprovals(
   database: postgres.Sql,
   config: { issuer: string; resource: string; project: string; supabaseUrl: string; serviceRoleKey: string },
   request: (url: string, init: RequestInit) => Promise<Response> = fetch,
+  journal = createOidcApprovalJournal(database),
 ): Promise<number> {
   try {
     const c = { ...config };
@@ -46,13 +48,13 @@ export async function recoverOidcApprovals(
       !c.resource
     )
       throw new Error('Invalid recovery configuration');
-    const journal = createOidcApprovalJournal(database);
     const Adapter = createOidcAdapter(database);
     const grants = new Adapter('Grant');
+    const interactions = new Adapter('Interaction');
     let after = '',
       recovered = 0;
     for (;;) {
-      const entries = await journal.pending(after);
+      const entries = await journal.pending(after, true);
       if (!entries.length) return recovered;
       for (const entry of entries) {
         const binding = entry.binding;
@@ -74,10 +76,13 @@ export async function recoverOidcApprovals(
           signal: AbortSignal.timeout(10_000),
         });
         if (!response.ok) throw new Error('Unconfirmed revocation');
-        const revoked = receipt.parse(await response.json());
+        const revoked = receipt.parse(await readBackendJson(response));
         if (revoked.user_id !== null && revoked.user_id !== binding.subject)
           throw new Error('Recovery identity mismatch');
         await journal.finish(entry.interactionId, 'revoked');
+        // Retain the live Interaction as retry evidence until both fences and
+        // the terminal journal write are confirmed. Also blocks stale saves.
+        await interactions.destroy(entry.interactionId);
         recovered++;
         after = entry.interactionId;
       }

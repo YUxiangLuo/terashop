@@ -10,6 +10,7 @@ import { verifyOAuthProvider } from './oauth-provider-compat';
 import { verifyOAuthInteraction } from './oauth-interaction';
 import { verifyOidcService } from './oauth-service-runtime';
 import { verifyOidcMaintenance } from './oauth-maintenance-runtime';
+import { verifyOidcOwnership } from './oauth-ownership-runtime';
 import { createOidcApprovalJournal } from '../../mcp/src/oidc-journal';
 import { journalFixture, verifyApprovalJournal } from './oauth-journal';
 
@@ -71,6 +72,8 @@ try {
     assert.equal(phase, undefined);
     await verifyApprovalJournal(db);
     console.log('PASS: durable approval journal, immutable binding, terminal races and pagination');
+    await verifyOidcOwnership(url);
+    console.log('PASS: physical owner fencing and durable abandoned-completion recovery');
     await verifyOAuthProvider('opaque', Adapter, true);
     console.log('PASS: Node LTS PostgreSQL protocol and barrier-controlled HTTP code/refresh races');
     await verifyOAuthInteraction(Adapter);

@@ -148,6 +148,34 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
     service = await startOidcService(path);
     assert(service.address && typeof service.address !== 'string');
     const port = service.address.port;
+    // TCP peers that never send ClientHello must count before HTTP admission.
+    const peers: ReturnType<typeof connectTcp>[] = [];
+    try {
+      for (let index = 0; index < 128; index++) {
+        const peer = connectTcp({ host: '127.0.0.1', port });
+        peers.push(peer);
+        await new Promise<void>((resolve, reject) => {
+          peer.once('connect', resolve);
+          peer.once('error', reject);
+        });
+      }
+      const excess = connectTcp({ host: '127.0.0.1', port });
+      peers.push(excess);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Excess TLS peer was not rejected')), 1000);
+        excess.once('error', () => {});
+        excess.once('close', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+      assert(peers.slice(0, 128).every((peer) => !peer.destroyed));
+    } finally {
+      for (const peer of peers) peer.destroy();
+    }
+    // Let the accepted sockets' close events release the listener slots.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal((await get(port, '/jwks')).status, 200);
     const metadata = await get(port, '/.well-known/openid-configuration');
     assert.equal(metadata.status, 200);
     assert.equal(metadata.data.issuer, config.provider.issuer);
@@ -491,7 +519,7 @@ export async function verifyOidcService(databaseUrl: string, tls: { key: string;
             assert.equal(stdout, '');
             const [finished] = await observer`select state from oidc.approval_attempts
               where interaction_id=${interrupted.interactionId}`;
-            assert.equal(finished.state, phase === 'ownership' ? 'revoked' : 'pending');
+            assert.equal(finished.state, 'pending'); // Lost owner cannot mark completion via another pool.
             await assert.rejects(get(port, '/jwks'));
             // A successor must also recover remaining work, not just start on an empty journal.
             if (phase === 'ownership') {

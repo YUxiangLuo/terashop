@@ -2,6 +2,13 @@ import type { Database, Json } from '../../types/database';
 import { createHash } from 'node:crypto';
 import * as z from 'zod/v4';
 import { paypalRefund, paypalRefundResult, productMediaIdentity, managedMedia } from './schemas';
+import { readBackendJson } from './backend-response';
+
+// Auth and error schemas are tiny; 64 KiB leaves generous diagnostic headroom.
+// List RPCs can legitimately be much larger, but 8 MiB bounds one tool result.
+// These are byte limits on the stream (not character limits or Content-Length).
+const SMALL_JSON_RESPONSE_BYTES = 64 * 1024;
+const RPC_JSON_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export type Functions = Database['public']['Functions'];
 // Supabase emits Args: never for parameterless RPCs; PostgREST accepts {}.
@@ -83,15 +90,23 @@ export class AdminBackend {
     if (!response.ok) {
       // SQL messages/details can contain PII, request values and secrets. Only
       // expose a validated machine code; do not stringify backend exceptions.
-      const failure = await response.json().catch(() => null);
+      const failure = await readBackendJson(response, SMALL_JSON_RESPONSE_BYTES).catch(() => null);
       const code =
-        typeof failure?.code === 'string' && /^(?:[0-9A-Z]{5}|PGRST\d{3})$/.test(failure.code)
+        failure !== null &&
+        typeof failure === 'object' &&
+        'code' in failure &&
+        typeof failure.code === 'string' &&
+        /^(?:[0-9A-Z]{5}|PGRST\d{3})$/.test(failure.code)
           ? failure.code
           : `HTTP_${response.status}`;
       throw new BackendError(code, mutation && response.status >= 500);
     }
     try {
-      return await response.json();
+      const limit =
+        path === '/auth/v1/user' || path === '/rest/v1/rpc/is_admin'
+          ? SMALL_JSON_RESPONSE_BYTES
+          : RPC_JSON_RESPONSE_BYTES;
+      return (await readBackendJson(response, limit)) as Json;
     } catch {
       throw new BackendError('INVALID_BACKEND_RESPONSE', mutation);
     }

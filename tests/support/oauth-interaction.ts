@@ -5,6 +5,7 @@ import Provider, { errors, type AdapterConstructor } from 'oidc-provider';
 import { createOidcInteractionHandler } from '../../mcp/src/oidc-interaction';
 import { createCredentialCipher, type CredentialEnvelope } from '../../mcp/src/credentials';
 import { createOidcProvider } from '../../mcp/src/oidc-provider';
+import type { createOidcApprovalJournal } from '../../mcp/src/oidc-journal';
 
 // Real provider HTTP/cookies/code/token, synthetic Supabase HTTP responses.
 // The loopback fixture impersonates a trusted TLS proxy; NOT a deployment entrypoint.
@@ -73,13 +74,36 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonC
         },
       });
   provider.proxy = true; // Loopback-only fixture with a fixed, synthetic TLS authority.
-  let failCompletion = false;
   let completions = 0;
+  let failProviderResult = false;
+  let completionCommit: 'normal' | 'blocked' | 'failed' = 'normal';
+  let completionCommitReached = Promise.withResolvers<void>();
+  let releaseCompletionCommit = Promise.withResolvers<void>();
+  const journalStates = new Map<string, 'pending' | 'completed' | 'revoked'>();
+  const journal = {
+    async begin({ interactionId }: { interactionId: string }) {
+      assert.equal(journalStates.has(interactionId), false);
+      journalStates.set(interactionId, 'pending');
+    },
+    async finish(interactionId: string, state: 'completed' | 'revoked') {
+      if (state === 'completed') {
+        completionCommitReached.resolve();
+        if (completionCommit === 'blocked') await releaseCompletionCommit.promise;
+        if (completionCommit === 'failed') throw new Error('completion commit failed');
+      }
+      const prior = journalStates.get(interactionId);
+      assert(prior === 'pending' || (prior === 'completed' && state === 'revoked'));
+      journalStates.set(interactionId, state);
+    },
+    async pending() {
+      return [];
+    },
+  } as unknown as ReturnType<typeof createOidcApprovalJournal>;
   const originalResult = provider.interactionResult.bind(provider);
   provider.interactionResult = async (...args) => {
     completions++;
     const location = await originalResult(...args);
-    if (failCompletion) throw new Error('lost secret completion receipt');
+    if (failProviderResult) throw new Error('lost secret completion receipt');
     return location;
   };
   const buildHandler = () =>
@@ -163,6 +187,7 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonC
         }
         throw new Error('Unexpected fixture call');
       },
+      journal,
     );
   let handler = buildHandler();
   const server = createServer((req, res) => {
@@ -355,6 +380,7 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonC
     assert.equal(grants.size, 0);
     const reached = Promise.withResolvers<void>(),
       release = Promise.withResolvers<void>();
+    completionCommit = 'blocked';
     onWrite = async () => {
       reached.resolve();
       await release.promise;
@@ -373,9 +399,24 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonC
     } finally {
       release.resolve();
       clearTimeout(timer);
-      result = await pending;
       onWrite = async () => {};
     }
+    await completionCommitReached.promise;
+    let completionExposed = false;
+    void pending.then(() => {
+      completionExposed = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(completionExposed, false); // Resume URL waits for the durable completion commit.
+      const held = await provider.Interaction.find(a.path.split('/').at(-1)!);
+      assert(held);
+      assert.equal(held.result, undefined); // A browser knowing /auth/:uid cannot resume early either.
+    } finally {
+      releaseCompletionCommit.resolve();
+    }
+    result = await pending;
+    completionCommit = 'normal';
     assert.equal(result.status, jsonCompletion ? 200 : 303, result.text);
     assert.equal(result.headers.get('vary'), 'Accept');
     assert.equal(result.headers.get('cache-control'), 'no-store');
@@ -453,19 +494,33 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonC
     const failed = await begin('store:write');
     await failed.b.start(failed.path);
     await failed.b.login();
-    failCompletion = true;
+    completionCommit = 'failed';
+    completionCommitReached = Promise.withResolvers<void>();
     const failure = await failed.b.call(`${failed.path}/approve`, 'approve');
     assert.equal(failure.status, 403, failure.text);
     const [upstream, revoked] = [...grants.entries()].at(-1)!;
     assert.equal(revoked.state, 'revoked');
     assert.equal(revoked.envelope, undefined);
     assert.equal(await provider.Grant.find(upstream), undefined);
-    assert.equal((await failed.b.call(`${failed.path}/approve`, 'approve')).status, 403);
+    assert.equal(journalStates.get(failed.path.split('/').at(-1)!), 'revoked');
+    assert.equal((await failed.b.call(`${failed.path}/approve`, 'approve')).status, 409);
     assert.equal(grants.size, 2);
+    completionCommit = 'normal';
+    // Provider-save/lost-receipt failure after journal completion still revokes.
+    const lostResult = await begin();
+    await lostResult.b.start(lostResult.path);
+    await lostResult.b.login();
+    failProviderResult = true;
+    assert.equal((await lostResult.b.call(`${lostResult.path}/approve`, 'approve')).status, 403);
+    failProviderResult = false;
+    const [lostGrantId, lostGrant] = [...grants.entries()].at(-1)!;
+    assert.equal(lostGrant.state, 'revoked');
+    assert.equal(lostGrant.envelope, undefined);
+    assert.equal(await provider.Grant.find(lostGrantId), undefined);
+    assert.equal(journalStates.get(lostResult.path.split('/').at(-1)!), 'revoked');
     // Persisted provider results reject even when the host's transient store is lost.
     handler = buildHandler();
-    assert.equal((await failed.b.call(`${failed.path}/start`, 'start')).status, 403);
-    failCompletion = false;
+    assert.equal((await lostResult.b.call(`${lostResult.path}/start`, 'start')).status, 403);
     const originalNow = Date.now;
     const start = originalNow();
     Date.now = () => start;
@@ -475,7 +530,7 @@ export async function verifyOAuthInteraction(adapter?: AdapterConstructor, jsonC
       await expired.b.login();
       Date.now = () => start + 300_000;
       assert.equal((await expired.b.call(`${expired.path}/approve`, 'approve')).status, 403);
-      assert.equal(grants.size, 2);
+      assert.equal(grants.size, 3);
     } finally {
       Date.now = originalNow;
     }

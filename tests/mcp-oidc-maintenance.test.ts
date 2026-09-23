@@ -177,3 +177,24 @@ test('invalidation rolls back revocation and payload changes together on SQL fai
     grantsRevoked: 1,
   });
 });
+
+test('scrubbing an unresumed completion retains durable recovery work', async () => {
+  for (const operation of ['cleanup', 'invalidate'] as const) {
+    const id = `unresumed-${operation}`;
+    await db`insert into oidc.approval_attempts(interaction_id,binding,state)
+      values (${id},'{"session_id":"unresumed-grant"}','completed'),
+        (${`${id}-resumed`},'{"session_id":"resumed-grant"}','completed')`;
+    await db`insert into oidc.artifacts(model,id,payload,expires_at)
+      values ('Interaction',${id},'{"result":{}}',clock_timestamp())`;
+    if (operation === 'cleanup') expect(await cleanupExpiredOidcPayloads(db, 1)).toBe(1);
+    else await invalidateRestoredOidcAuthorization(db);
+    expect((await db`select state from oidc.approval_attempts where interaction_id=${id}`)[0].state).toBe(
+      'pending',
+    );
+    expect(
+      (await db`select state from oidc.approval_attempts where interaction_id=${`${id}-resumed`}`)[0].state,
+    ).toBe('completed');
+    expect((await db`select destroyed from oidc.artifacts where id=${id}`)[0].destroyed).toBe(true);
+    await db`delete from oidc.approval_attempts where interaction_id in (${id},${`${id}-resumed`})`;
+  }
+});

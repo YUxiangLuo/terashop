@@ -6,6 +6,7 @@ import type { createCredentialCipher } from './credentials';
 import type { createDownstreamLogin } from './login';
 import type { AdminScope } from './permissions';
 import type { createOidcApprovalJournal } from './oidc-journal';
+import { readBackendJson } from './backend-response';
 
 type Identity = Awaited<ReturnType<Awaited<ReturnType<typeof createDownstreamLogin>>['exchange']>>;
 type Cipher = Awaited<ReturnType<typeof createCredentialCipher>>;
@@ -64,7 +65,7 @@ export function createOidcApproval(
       signal: AbortSignal.timeout(10_000),
     });
     if (!response.ok) throw new Error('Approval persistence failed');
-    return response.json();
+    return z.record(z.string(), z.unknown()).parse(await readBackendJson(response));
   }
   let used = false;
   let completedCleanup: (() => Promise<void>) | undefined;

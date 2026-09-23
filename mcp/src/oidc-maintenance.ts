@@ -43,7 +43,12 @@ export async function invalidateRestoredOidcAuthorization(
 ): Promise<OidcInvalidationCounts> {
   const [counts] = await maintain(
     database,
-    `with grants as (
+    `with abandoned as (
+      update oidc.approval_attempts a set state='pending'
+      where a.state='completed' and exists (
+        select 1 from oidc.artifacts i where i.model='Interaction'
+          and i.id=a.interaction_id and not i.destroyed)
+      returning 1), grants as (
       insert into oidc.revoked_grants(id)
       select grant_value from (
         select id as grant_value from oidc.artifacts where model='Grant'
@@ -82,6 +87,11 @@ export async function cleanupExpiredOidcPayloads(database: postgres.Sql, limit =
         order by expires_at, model, id
         limit ${limit}
         for update
+      ), abandoned as (
+        update oidc.approval_attempts a set state='pending'
+        from candidates c where c.model='Interaction' and c.id=a.interaction_id
+          and a.state='completed'
+        returning 1
       ), changed as (
       update oidc.artifacts a
       set destroyed=true, payload=null, uid=null, user_code=null

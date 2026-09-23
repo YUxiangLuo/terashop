@@ -2,6 +2,7 @@ import * as z from 'zod/v4';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { AdminBackend } from './backend';
 import type { DownstreamCredentials } from './credentials';
+import { readBackendJson } from './backend-response';
 
 const token = z
   .string()
@@ -135,7 +136,7 @@ export async function createDownstreamLogin(
           signal: AbortSignal.timeout(10_000),
         });
         if (!response.ok) throw new Error('Login exchange failed');
-        const result = responseSchema.parse(await response.json());
+        const result = responseSchema.parse(await readBackendJson(response));
         const backend = new AdminBackend(
           {
             url: origin,

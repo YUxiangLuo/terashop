@@ -3,7 +3,7 @@ import { isIP } from 'node:net';
 import * as z from 'zod/v4';
 import { readOidcProviderConfiguration } from './oidc-host';
 import { createCredentialCipher } from './credentials';
-import { createAdminHttpHandler } from './http';
+import { createAdminHttpHandler, MAX_MCP_REQUEST_BYTES } from './http';
 import { createRateLimit } from './rate-limit';
 
 const secret = z
@@ -84,7 +84,7 @@ export async function startAdminHttpService(path: string) {
       hostname: c.listen.host,
       port: c.listen.port,
       tls: c.tls,
-      maxRequestBodySize: 1024 * 1024,
+      maxRequestBodySize: MAX_MCP_REQUEST_BYTES,
       // Leave room for the 30s application deadline to send its 504 before
       // the transport closes a socket with a partially received request body.
       idleTimeout: 35,

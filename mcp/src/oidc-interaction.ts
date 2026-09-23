@@ -234,6 +234,9 @@ export function createOidcInteractionHandler(
           throw new Error('Different provider account');
         const result = await approval.approve(identity);
         persisted = true;
+        // interactionResult persists a resumable result. Commit first: a browser
+        // can know the resume endpoint without receiving our completion response.
+        await journal?.finish(uid, 'completed');
         const latest = await details(req, res, uid);
         current(uid, latest.fingerprint);
         const location = await provider.interactionResult(
@@ -249,7 +252,6 @@ export function createOidcInteractionHandler(
         if (identity.credentials.expiresAt <= Math.floor(Date.now() / 1000))
           throw new Error('Login expired during completion');
         await send(res, completion(web, location));
-        await journal?.finish(uid, 'completed');
       } catch (error) {
         if (persisted) await approval.revoke();
         throw error;
