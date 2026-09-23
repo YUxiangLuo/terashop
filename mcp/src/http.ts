@@ -4,6 +4,7 @@ import { AdminBackend } from './backend';
 import type { createCredentialCipher } from './credentials';
 import { createAdminServer } from './server';
 import { validateAdminOrigin } from './admin-links';
+import { createToolAudit } from './tool-audit';
 
 // A 1 MiB media tool input expands to ~1.4 MiB in base64 plus its JSON envelope.
 export const MAX_MCP_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -11,7 +12,12 @@ export const MAX_MCP_REQUEST_BYTES = 2 * 1024 * 1024;
 // Web Request handler only. Deployment owns TLS, listener limits and shutdown.
 // No sessions, result replay, ambient administrator token or service-role business calls.
 export function createAdminHttpHandler(
-  config: AuthorizationConfig & { anonKey: string; allowWrites?: boolean; adminOrigin?: string },
+  config: AuthorizationConfig & {
+    anonKey: string;
+    allowWrites?: boolean;
+    adminOrigin?: string;
+    auditTools?: boolean;
+  },
   cipher: Awaited<ReturnType<typeof createCredentialCipher>>,
   request: (url: string, init: RequestInit) => Promise<Response> = fetch,
   admit?: (verifiedUserId: string) => number,
@@ -125,6 +131,7 @@ export function createAdminHttpHandler(
       allowWrites: c.allowWrites,
       adminOrigin: c.adminOrigin,
       authorization: identity.authorization,
+      audit: c.auditTools ? createToolAudit(c, identity, request) : undefined,
     });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

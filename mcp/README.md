@@ -22,6 +22,8 @@
 
 已提供可选的 MCP → Admin 记录导航：受信宿主配置 Admin origin 后，`get_admin_product/order/customer` 及对应三个列表工具在成功、非空结果中追加标准 `resource_link`。目标仅为固定商品／订单／商业客户详情路由，使用已校验结果中的 UUID，不用客户 Auth UUID、订单号或自由文本拼接地址；不附带 token、邮箱、查询串或批准参数。文本 JSON 和 `structuredContent.data` 保持原合同，未配置则不返回链接，写入／错误／缺失结果不附加链接。客户端是否显示链接取决于其 MCP 支持，不提供 `resources/read` 或自动打开／抓取网页。用户仍须在 Admin 独立登录，链接不证明权限、批准、业务成功或可信调用来源。
 
+已提供可选的远程工具调用审计底座：先部署店铺迁移，再设置 `authorization.auditTools: true`（默认关闭）。宿主生成调用 UUID，数据库核对有效绑定并复制 user/grant/client 身份；不使用客户端声明的来源，不保存参数、业务结果或 token。登记失败不派发业务，完成回执不明不自动重试写操作。`pending/returned/rejected/unknown` 是宿主观察状态，不是原子业务审计或送达证明；不覆盖 stdio、非法输入和登记前拒绝，也不新增工具。目前仅受限运维数据库访问，没有 Admin 查询页面或自动清理；启用前须批准个人数据保留策略。完整语义与验证命令见 [运维说明](OPERATIONS.md#logs-incidents-and-public-acceptance)。
+
 后续按融合计划推进：其他关键业务契约对照、更多资源互通与可信来源审计；现有事件 `actor_id` 只能证明数据库识别的用户，不能区分 Admin 与 MCP。不得用 tool 参数、浏览器 header 或备注中的自报来源冒充可信审计。角色降级是否永久撤销、SSO/PAT、跨用户管理及逐笔审批分别定义，不能混入本批默认行为。公网与目标客户端验收仍需域名／证书和部署批准。
 
 验证入口：`bun run test:current tests/mcp-connections.test.ts` 覆盖本人权限、脱敏分页、原子撤销、快照重试与凭据写入竞争；`tests/mcp-oidc-interaction.test.ts` 的 Node 场景验证真实授权后的个人撤销、轮询清理及其他用户隔离；`bun scripts/admin-connections-smoke.ts` 验证真实 Admin 登录、丢失回执、原 ID 重试及降级后的安全页。单测另验证清理失败不确认、回执丢失重放和退出停止后续清理。

@@ -3,7 +3,7 @@ import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/cli
 import { createAdminHttpHandler } from '../../mcp/src/http';
 import { createCredentialCipher } from '../../mcp/src/credentials';
 
-async function fixture(expired = false, admit?: (userId: string) => number) {
+async function fixture(expired = false, admit?: (userId: string) => number, auditTools = false) {
   const cipher = await createCredentialCipher(
     new Map([['test', crypto.getRandomValues(new Uint8Array(32))]]),
     'test',
@@ -21,6 +21,7 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
     scopes: ['store:read', 'store:write'] as const,
     allowWrites: true,
     adminOrigin: 'https://admin.example',
+    auditTools,
   };
   const users = await Promise.all(
     ['a', 'b'].map(async (token) => {
@@ -46,6 +47,7 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
   let calls = 0;
   let refreshClaims = 0;
   const uploads: Uint8Array[] = [];
+  const audits: Record<string, unknown>[] = [];
   const handler = createAdminHttpHandler(
     config,
     cipher,
@@ -97,6 +99,10 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
       }
       expect(new Headers(init.headers).get('authorization')).toBe('Bearer service-secret');
       const body = JSON.parse(init.body as string);
+      if (url.endsWith('/mcp_tool_audit_command')) {
+        audits.push(body);
+        return Response.json({ id: body.p_id, outcome: body.p_outcome ?? 'pending' });
+      }
       const user = users.find((u) => u.id === body.p_binding.subject)!;
       if (url.endsWith('/mcp_grant_command'))
         return Response.json({
@@ -116,8 +122,37 @@ async function fixture(expired = false, admit?: (userId: string) => number) {
     },
     admit,
   );
-  return { handler, users, config, uploads, calls: () => calls, refreshClaims: () => refreshClaims };
+  return { handler, users, config, uploads, audits, calls: () => calls, refreshClaims: () => refreshClaims };
 }
+
+test('remote audit uses verified grant identity and excludes tool data and spoofed headers', async () => {
+  const f = await fixture(false, undefined, true);
+  const client = new Client({ name: 'untrusted-agent-label', version: '1' });
+  try {
+    await client.connect(
+      new StreamableHTTPClientTransport(new URL(f.config.resource), {
+        requestInit: { headers: { authorization: 'Bearer b', 'x-user-id': f.users[0].id } },
+        fetch: (input, init) => f.handler(new Request(input, init)),
+      }),
+    );
+    expect(f.audits).toHaveLength(0);
+    expect((await client.callTool({ name: 'list_admin_orders', arguments: {} })).isError).not.toBe(true);
+    expect(f.audits).toHaveLength(2);
+    expect(f.audits[0]).toMatchObject({
+      p_action: 'begin',
+      p_user_id: f.users[1].id,
+      p_grant_id: f.users[1].grantId,
+      p_tool_name: 'list_admin_orders',
+      p_mutation: false,
+    });
+    expect(f.audits[1]).toMatchObject({ p_action: 'finish', p_id: f.audits[0].p_id, p_outcome: 'returned' });
+    expect(JSON.stringify(f.audits)).not.toContain('private@example.test');
+    expect(JSON.stringify(f.audits)).not.toContain(f.users[0].id);
+    expect(JSON.stringify(f.audits)).not.toContain('untrusted-agent-label');
+  } finally {
+    await client.close();
+  }
+});
 
 test('remote SDK receives Admin links from trusted host config, not request headers', async () => {
   const f = await fixture();

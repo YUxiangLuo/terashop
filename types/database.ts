@@ -2291,6 +2291,21 @@ export type Database = {
         }
         Returns: Json
       }
+      mcp_tool_audit_command: {
+        Args: {
+          p_action: string
+          p_grant_id: string
+          p_id: string
+          p_issuer: string
+          p_mutation?: boolean
+          p_outcome?: string
+          p_project: string
+          p_resource: string
+          p_tool_name?: string
+          p_user_id: string
+        }
+        Returns: Json
+      }
       moderate_review: {
         Args: { expected_revision?: number; review_id: string; status: string }
         Returns: {

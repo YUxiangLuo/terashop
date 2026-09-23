@@ -3,6 +3,7 @@ import * as z from 'zod/v4';
 import { AdminBackend, BackendError, type Functions, type RpcArgs } from './backend';
 import { requiredToolScopes, permitsTool, type ToolAuthorization } from './permissions';
 import { adminRecordLinks, validateAdminOrigin } from './admin-links';
+import type { ToolAudit } from './tool-audit';
 import type { Json } from '../../types/database';
 import {
   id,
@@ -119,7 +120,12 @@ Returns, receipts, disposition, refunds and fulfillment cancellation are distinc
 
 export function createAdminServer(
   backend: AdminBackend,
-  options: { allowWrites?: boolean; authorization?: ToolAuthorization; adminOrigin?: string } = {},
+  options: {
+    allowWrites?: boolean;
+    authorization?: ToolAuthorization;
+    adminOrigin?: string;
+    audit?: ToolAudit;
+  } = {},
 ) {
   const adminOrigin = validateAdminOrigin(options.adminOrigin);
   const server = new McpServer({ name: 'tera-admin', version: '0.1.0' }, { instructions });
@@ -151,6 +157,7 @@ export function createAdminServer(
         },
       },
       async (args) => {
+        let finishAudit: Awaited<ReturnType<ToolAudit>> | undefined;
         try {
           if (authorization) {
             let permitted: boolean;
@@ -161,9 +168,25 @@ export function createAdminServer(
             }
             if (!permitted) throw new BackendError('INSUFFICIENT_SCOPE', false);
           }
+          if (options.audit) {
+            try {
+              finishAudit = await options.audit(name, mutation);
+            } catch {
+              throw new BackendError('AUDIT_UNAVAILABLE', false);
+            }
+          }
           const parsed = dataSchema.safeParse(await execute(args));
           if (!parsed.success) throw new BackendError('INVALID_BACKEND_RESPONSE', mutation);
           const result = { data: parsed.data };
+          if (finishAudit) {
+            const finish = finishAudit;
+            finishAudit = undefined;
+            try {
+              await finish('returned');
+            } catch {
+              throw new BackendError('AUDIT_COMPLETION_UNCONFIRMED', mutation);
+            }
+          }
           return {
             content: [
               { type: 'text' as const, text: JSON.stringify(result) },
@@ -172,8 +195,14 @@ export function createAdminServer(
             structuredContent: result,
           };
         } catch (error) {
-          const failure =
-            error instanceof BackendError ? error : new BackendError('INTERNAL_ERROR', mutation);
+          let failure = error instanceof BackendError ? error : new BackendError('INTERNAL_ERROR', mutation);
+          if (finishAudit) {
+            try {
+              await finishAudit(failure.outcomeUnknown ? 'unknown' : 'rejected');
+            } catch {
+              failure = new BackendError('AUDIT_COMPLETION_UNCONFIRMED', failure.outcomeUnknown);
+            }
+          }
           const result = {
             code: failure.code,
             outcome_unknown: failure.outcomeUnknown,
