@@ -15,7 +15,7 @@
 | 能力 | 已实现与证据 | 尚未完成的验收 |
 | --- | --- | --- |
 | 业务工具 | [工具测试](../tests/unit/mcp.test.ts) 断言 112 个工具及只读 53 个；业务合同见下表 | 工具数不代表全部新业务；真实 PayPal Sandbox 另需外部配置 |
-| 授权与用户隔离 | [授权入口](src/auth.ts)、[宿主](src/oidc-service.ts)、逐用户加密凭据、在线撤销／scope 检查、刷新准入；[登录／同意页](src/consent-page.ts)；[联合测试](../tests/mcp-oidc-interaction.test.ts) 使用真实本地 Auth／SMTP／数据库，已加入真实浏览器跨标签页登录、批准／拒绝及 SDK 读取 | 浏览器过期／重启等异常交互、目标客户端兼容性 |
+| 授权与用户隔离 | [授权入口](src/auth.ts)、[宿主](src/oidc-service.ts)、逐用户加密凭据、在线撤销／scope 检查、刷新准入；[登录／同意页](src/consent-page.ts)；[联合测试](../tests/mcp-oidc-interaction.test.ts) 使用真实本地 Auth／SMTP／数据库，已加入真实浏览器跨标签页登录、批准／拒绝、授权服务重启失效及 SDK 读取 | 浏览器自然过期／网络中断等异常交互、目标客户端兼容性 |
 | 持久化与恢复 | [批准日志](src/oidc-journal.ts)、[启动恢复](src/oidc-recovery.ts)、单实例锁；已有正常退出、强杀和迟到凭据写入回归 | 其他批准阶段故障、密钥轮换与备份恢复演练；不承诺网络分区接管 |
 | MCP 网络入口 | [HTTP handler](src/http.ts)、[Bun HTTPS 服务](src/http-service.ts)、[CLI](src/remote.ts)；无状态 POST、RFC 9728 元数据、逐请求身份与凭据刷新；真实 HTTPS 店铺读写、版本冲突、降权／撤销、刷新 pending 竞争及刷新断连后重启拒绝已验证；另以测试转发器验证双请求领取和完成回执丢失；店铺设置断连后迟到提交与重读已验证 | 其他写入类型的未知结果须按各自幂等／版本合同验收；尚非公网或全部工具端到端验收 |
 | 网络故障边界 | [TLS 测试](../tests/unit/mcp-http-service.test.ts) 覆盖慢请求体、introspection 超时／断连、排空及 CLI SIGTERM | 凭据／刷新／业务调用阶段阻塞与断连、握手和请求头慢连接防护、并发与资源预算 |
@@ -30,7 +30,7 @@
   - 已串联真实浏览器登录／同意与测试客户端授权码兑换、SDK HTTPS 工具读取；目标产品客户端仍需单独验收。
 - [ ] 用户授权体验：展示真实 client/resource/scopes 与离线刷新，覆盖登录、批准、拒绝、取消、到期及失败，使用真实浏览器验收 Cookie／CSRF 与页面。
   - 已实现服务端 HTML 同意页、邮件验证结果页和失败页；以 agent-browser 检查桌面／移动端渲染，并使用受控 HTTP 响应夹具验证邮件等待、刷新恢复、显式批准、未登录拒绝与失败禁用。此检查不是实际邮件、TLS Cookie 或真实客户端的浏览器端到端验收。
-  - 后续已加入下述真实浏览器联合场景，覆盖邮件跨标签页、原页刷新、HttpOnly 不可读、错误 CSRF 拒绝、显式批准和拒绝。过期／服务重启后的浏览器异常流程仍待补齐，不以协议单测代替。
+  - 后续已加入下述真实浏览器联合场景，覆盖邮件跨标签页、原页刷新、HttpOnly 不可读、错误 CSRF 拒绝、显式批准和拒绝。真实授权服务重启后旧页面失效、CSRF 清除和重新连接已验证；自然过期等浏览器异常流程仍待补齐，不以协议单测代替。
 - [ ] 运行防护与运维：限流和并发预算、慢连接防护、日志脱敏核对、健康／退出、密钥轮换、敏感 payload 保留、备份恢复、部署与升级手册。已有永久撤销标记不可随意清理。
 - [ ] 公网与目标客户端：域名及可信证书就绪后，验证预注册客户端的完整授权、调用、刷新、重连和撤销；部署／共享数据库升级须另行授权。生产启用支付能力前完成对应 Sandbox 与渠道验收。
 
@@ -45,6 +45,8 @@ MCP_BROWSER=1 bun run test:current tests/mcp-oidc-interaction.test.ts -t 'node:'
 ```
 
 需要运行中的本地 Supabase、Docker、OpenSSL、agent-browser／Chromium 和 `certutil`（Fedora 的 `nss-tools`）。[浏览器场景](../tests/support/oidc-browser.ts) 复用真实 Node 授权服务、独立 Bun MCP HTTPS 入口及临时 issuer 数据库，显式用 `--ca-cert` 信任一次性证书，不关闭 TLS 验证、不注入 Cookie、不模拟 Auth、不使用 admin generateLink。页面发送邮件后，从真实本地 SMTP 读取链接，由浏览器新标签页打开，再回原页刷新并明确批准；断言邮件验证和刷新不自动发码，错误 CSRF 返回 403，正常批准后实际 HTTPS 测试客户端收到 code、完成 PKCE 兑换，并经 MCP SDK 读取已知店铺币种。随后新授权请求直接拒绝，回调必须只有 access_denied、无 code。浏览器调用失败不输出含代码／邮件链接的命令参数和响应；结束关闭浏览器、回调服务器并沿用集成测试清理临时账号、授权、数据库和容器。可指定 `MCP_BROWSER_SCREENSHOT=/绝对路径/consent.png` 保存不含邮箱或令牌的待批准页截图。该场景不是公网或目标产品客户端兼容性验收；Supabase 的本地邮件验证端点仍使用本地 HTTP。
+
+同一浏览器场景先让另一名管理员完成真实邮件验证，停在待批准状态，然后正常停止并重启 Node 授权服务。原页面轮询失败后须禁用批准／拒绝、清除 sessionStorage 中的 CSRF，经过下一轮轮询间隔仍不可操作且无客户端回调；直接访问旧 `/login/status` 返回不可继续的错误页。之后从新授权请求重新登录并完成上述工具调用，证明不是服务整体不可用造成的“拒绝”。数据库断言中断用户未创建本地授权，新登录用户仅有一个 active 授权（随后拒绝的请求不能增加授权）。可指定 `MCP_BROWSER_FAILURE_SCREENSHOT=/绝对路径/restart.png` 保留重启失效页。该场景验证实际进程重启导致内存事务丢失，不等同于五分钟自然过期或网络中断验收。
 
 独立扩展不阻塞上述首版：大文件媒体、冻结快照导出、Metafield 定义删除和 Storefront 设置消费端。代客下单、通用 Order Edit、客户合并、复杂税制、多币种等仍需单独业务设计。库存调拨保持即时原子调拨，不增加在途／收货追踪。
 

@@ -13,6 +13,7 @@ export async function verifyOidcBrowser(input: {
   resource: string;
   redirect: string;
   email: string;
+  interruptedEmail: string;
 }) {
   const { node, origin, resource, redirect, email } = input;
   const session = `mcp-consent-${crypto.randomUUID()}`;
@@ -70,15 +71,14 @@ export async function verifyOidcBrowser(input: {
       code_challenge_method: 'S256',
       code_challenge: createHash('sha256').update(verifier).digest('base64url'),
     })}`;
-  let client: Client | undefined;
-  try {
+  async function login(address: string) {
     await browser('open', authorization());
     await browser('wait', '--text', '验证管理员邮箱');
     assert.equal(await browser('is', 'visible', '#approve'), 'false');
-    const previous = (await authMessages(email)).map((m) => m.ID);
-    await browser('fill', '#email', email);
+    const previous = (await authMessages(address)).map((m) => m.ID);
+    await browser('fill', '#email', address);
     await click('button[type=submit]');
-    const mail = await authMail(email, 'magiclink', previous);
+    const mail = await authMail(address, 'magiclink', previous);
     await browser('wait', '--text', '同一浏览器');
     // A second tab uses the actual browser cookie jar, but not the first tab's
     // sessionStorage. Return to the original tab before consenting.
@@ -87,10 +87,36 @@ export async function verifyOidcBrowser(input: {
     assert.equal(new URL(await browser('get', 'url')).pathname, '/login/status');
     assert.equal(callback, undefined, 'Email verification must not issue a code');
     await browser('tab', 't1');
+    await browser('tab', 'close', 'mail');
     await browser('reload');
     await browser('wait', '--text', '邮箱验证已完成');
     assert.equal(await browser('is', 'visible', '#approve'), 'true');
     assert.equal(callback, undefined, 'Reload must not approve');
+  }
+  let client: Client | undefined;
+  try {
+    await login(input.interruptedEmail);
+    await node.restart();
+    await browser('wait', '--text', '此授权已失效或结果无法确认');
+    assert.equal(await browser('is', 'enabled', '#approve'), 'false');
+    assert.equal(await browser('is', 'enabled', '#deny'), 'false');
+    assert.equal(
+      await browser('eval', "sessionStorage.getItem('tera-consent:' + location.pathname) === null"),
+      'true',
+    );
+    assert.equal(callback, undefined, 'Restart must not issue a code');
+    // Wait through another polling interval: failure must remain terminal.
+    await browser('wait', '2200');
+    assert.equal(await browser('is', 'enabled', '#approve'), 'false');
+    assert.equal(callback, undefined);
+    if (process.env.MCP_BROWSER_FAILURE_SCREENSHOT)
+      await browser('screenshot', '--full', process.env.MCP_BROWSER_FAILURE_SCREENSHOT);
+    await browser('open', `${origin}/login/status`);
+    await browser('wait', '--text', '无法继续授权');
+    assert.equal(await browser('get', 'count', 'button'), '0');
+    // A new authorization and a fresh real email login must still work after
+    // losing the in-memory transaction; do not reuse the old approval proof.
+    await login(email);
     assert.equal(await browser('eval', "document.cookie.includes('__Host-tera-mcp-login=')"), 'false');
     assert.equal(
       await browser(
