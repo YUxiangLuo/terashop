@@ -1047,10 +1047,14 @@ for (const runtime of ['bun', 'node'] as const)
           const lostResponse = await signup();
           users.push(lostResponse);
           await makeAdmin(lostResponse.userId);
+          const discardedReceipt = await signup();
+          users.push(discardedReceipt);
+          await makeAdmin(discardedReceipt.userId);
           await verifyOidcBrowser({
             node, origin, resource, redirect: browserRedirect,
             email: user.email, interruptedEmail: interrupted.email, offlineEmail: offline.email,
             lostResponseEmail: lostResponse.email,
+            discardedReceiptEmail: discardedReceipt.email,
             interruptApproval: async (submit, disconnect) => {
               const blocker = postgres(process.env.DB_URL!, { max: 1 });
               try {
@@ -1115,6 +1119,22 @@ for (const runtime of ['bun', 'node'] as const)
             where binding->>'project'=${project} and user_id=${offline.userId}::uuid`).toHaveLength(0);
           expect(await db`select id from private.mcp_grants
             where binding->>'project'=${project} and user_id=${lostResponse.userId}::uuid`).toHaveLength(1);
+          const completedGrants = await db`select id,state,binding from private.mcp_grants
+            where binding->>'project'=${project} and user_id=${discardedReceipt.userId}::uuid`;
+          expect(completedGrants).toHaveLength(1);
+          const completed = completedGrants[0];
+          expect(completed.state).toBe('active');
+          const [attempt] = await store!`select state from oidc.approval_attempts
+            where binding->>'subject'=${discardedReceipt.userId}`;
+          expect(attempt.state).toBe('completed');
+          const credentials = await db`select revision from private.mcp_credentials where grant_id=${completed.id}`;
+          expect(credentials).toHaveLength(1);
+          expect(Number(credentials[0].revision)).toBe(1);
+          const upstream = await new (createOidcAdapter(store!))('Grant').find(completed.binding.session_id);
+          expect(upstream?.accountId).toBe(discardedReceipt.userId);
+          expect(await store!`select 1 from oidc.artifacts
+            where grant_id=${completed.binding.session_id} and not destroyed
+            and model in ('AuthorizationCode','AccessToken','RefreshToken')`).toHaveLength(0);
           const approvedGrants = await db`select state from private.mcp_grants
             where binding->>'project'=${project} and user_id=${user.userId}::uuid`;
           expect(approvedGrants).toHaveLength(1);

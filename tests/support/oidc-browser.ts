@@ -16,6 +16,7 @@ export async function verifyOidcBrowser(input: {
   interruptedEmail: string;
   offlineEmail: string;
   lostResponseEmail: string;
+  discardedReceiptEmail: string;
   interruptApproval: (submit: () => Promise<void>, disconnect: () => Promise<void>) => Promise<void>;
 }) {
   const { node, origin, resource, redirect, email } = input;
@@ -191,6 +192,35 @@ export async function verifyOidcBrowser(input: {
     assert.equal(await browser('eval', 'window.approvalRequests'), '1');
     if (process.env.MCP_BROWSER_LOST_RESPONSE_SCREENSHOT)
       await browser('screenshot', '--full', process.env.MCP_BROWSER_LOST_RESPONSE_SCREENSHOT);
+    await login(input.discardedReceiptEmail);
+    // Deliberately discard a REAL successful response before the page consumes
+    // it. This models application receipt loss, not a physical network failure.
+    await browser(
+      'eval',
+      `(() => {
+      const original = window.fetch.bind(window);
+      window.approvalRequests = 0;
+      window.receiptDiscarded = false;
+      window.fetch = async (url, init) => {
+        if (typeof url !== 'string' || !url.endsWith('/approve')) return original(url, init);
+        window.approvalRequests++;
+        const response = await original(url, init);
+        const body = await response.json();
+        window.receiptDiscarded = response.status === 200 &&
+          typeof body.redirectTo === 'string' &&
+          new URL(body.redirectTo, location.origin).origin === location.origin;
+        throw new TypeError('Controlled loss of completion receipt');
+      };
+    })()`,
+    );
+    await click('#approve');
+    await assertStopped();
+    assert.equal(await browser('eval', 'window.receiptDiscarded'), 'true');
+    await browser('wait', '2200');
+    await assertStopped();
+    assert.equal(await browser('eval', 'window.approvalRequests'), '1');
+    if (process.env.MCP_BROWSER_DISCARDED_RECEIPT_SCREENSHOT)
+      await browser('screenshot', '--full', process.env.MCP_BROWSER_DISCARDED_RECEIPT_SCREENSHOT);
     // A new authorization and a fresh real email login must still work after
     // losing the page's approval proof; do not reuse the old transaction.
     await login(email);
