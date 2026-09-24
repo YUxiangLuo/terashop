@@ -52,6 +52,8 @@ test('personal audit pages isolate users, retain removed grants, and paginate ex
       'admitted_at',
       'finished_at',
       'outcome',
+      'resource_type',
+      'resource_id',
     ].sort(),
   );
   await checked(

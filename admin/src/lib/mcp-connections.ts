@@ -84,6 +84,19 @@ export interface McpToolCall extends ToolCallCursor {
   mutation: boolean;
   finished_at: string | null;
   outcome: "pending" | "returned" | "rejected" | "unknown";
+  resource_type:
+    | "product"
+    | "customer"
+    | "order"
+    | "location"
+    | "promotion"
+    | "checkout_quote"
+    | "category"
+    | "tax_rate"
+    | "shipping_method"
+    | "managed_media"
+    | null;
+  resource_id: string | null;
 }
 const timestamp = (value: unknown): value is string =>
   typeof value === "string" && Number.isFinite(Date.parse(value));
@@ -105,6 +118,21 @@ export function toolCallPage(value: unknown): {
         typeof item.resource === "string" &&
         typeof item.tool_name === "string" &&
         typeof item.mutation === "boolean" &&
+        (item.resource_type === null ||
+          [
+            "product",
+            "customer",
+            "order",
+            "location",
+            "promotion",
+            "checkout_quote",
+            "category",
+            "tax_rate",
+            "shipping_method",
+            "managed_media",
+          ].includes(item.resource_type as string)) &&
+        (item.resource_id === null || uuid(item.resource_id)) &&
+        (item.resource_type === null) === (item.resource_id === null) &&
         timestamp(item.admitted_at) &&
         typeof item.outcome === "string" &&
         ["pending", "returned", "rejected", "unknown"].includes(item.outcome) &&

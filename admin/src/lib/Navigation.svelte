@@ -19,6 +19,7 @@
       links: [
         ["Products", "/"],
         ["Categories", "/categories"],
+        ["Managed media", "/media"],
       ],
     },
     {
@@ -46,6 +47,7 @@
         ["Reconciliation issues", "/reconciliation"],
         ["Payment events", "/payment-events"],
         ["Event delivery (Outbox)", "/outbox"],
+        ["Agent approvals", "/approvals"],
       ],
     },
     {

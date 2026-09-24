@@ -1,11 +1,13 @@
 import * as z from 'zod/v4';
 import type { AuthorizationConfig } from './authorization';
 import { readBackendJson } from './backend-response';
+import { auditResourceRef } from './audit-resource-ref';
 
 export type AuditOutcome = 'returned' | 'rejected' | 'unknown';
 export type ToolAudit = (
   tool: string,
   mutation: boolean,
+  context?: unknown,
 ) => Promise<(outcome: AuditOutcome) => Promise<void>>;
 
 // Config/identity come only from the verified remote host, never tool arguments.
@@ -22,8 +24,9 @@ export function createToolAudit(
     p_resource: config.resource,
     p_project: config.project,
   };
-  return async (tool, mutation) => {
+  return async (tool, mutation, context) => {
     const id = crypto.randomUUID();
+    const resource = auditResourceRef(tool, context);
     const command = async (body: Record<string, unknown>, outcome: string) => {
       const response = await request(endpoint, {
         method: 'POST',
@@ -43,7 +46,15 @@ export function createToolAudit(
         .parse(await readBackendJson(response));
       if (receipt.id !== id || receipt.outcome !== outcome) throw new Error('AUDIT_UNCONFIRMED');
     };
-    await command({ p_action: 'begin', p_tool_name: tool, p_mutation: mutation }, 'pending');
+    await command(
+      {
+        p_action: 'begin',
+        p_tool_name: tool,
+        p_mutation: mutation,
+        ...(resource ? { p_resource_type: resource.resourceType, p_resource_id: resource.resourceId } : {}),
+      },
+      'pending',
+    );
     return (outcome) => command({ p_action: 'finish', p_outcome: outcome }, outcome);
   };
 }

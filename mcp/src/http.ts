@@ -5,6 +5,7 @@ import type { createCredentialCipher } from './credentials';
 import { createAdminServer } from './server';
 import { validateAdminOrigin } from './admin-links';
 import { createToolAudit } from './tool-audit';
+import { createActionApprovalHost } from './action-approvals';
 
 // A 1 MiB media tool input expands to ~1.4 MiB in base64 plus its JSON envelope.
 export const MAX_MCP_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -132,6 +133,7 @@ export function createAdminHttpHandler(
       adminOrigin: c.adminOrigin,
       authorization: identity.authorization,
       audit: c.auditTools ? createToolAudit(c, identity, request) : undefined,
+      approvals: createActionApprovalHost(c, identity, request),
     });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,

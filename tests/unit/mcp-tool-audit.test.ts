@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { AdminBackend } from '../../mcp/src/backend';
 import { createToolAudit } from '../../mcp/src/tool-audit';
 import { mcpSession } from '../support/mcp';
+import { auditResourceRef } from '../../mcp/src/audit-resource-ref';
 
 const config = {
   issuer: 'https://auth.example',
@@ -15,6 +16,39 @@ const config = {
   scopes: ['store:read'] as const,
 };
 const identity = { grantId: crypto.randomUUID(), expectedUserId: crypto.randomUUID() };
+
+test('resource references use only exact tool/key mappings and UUIDs', () => {
+  const id = crypto.randomUUID();
+  expect(auditResourceRef('get_admin_product', { product_id: id, url: 'https://secret' })).toEqual({
+    resourceType: 'product',
+    resourceId: id,
+  });
+  expect(auditResourceRef('get_admin_product', { product_id: 'bad', order_id: id })).toBeUndefined();
+  expect(auditResourceRef('unknown_tool', { product_id: id })).toBeUndefined();
+  expect(auditResourceRef('get_admin_user', { user_id: id })).toBeUndefined();
+  expect(auditResourceRef('get_admin_customer', { user_id: id })).toBeUndefined();
+});
+
+test('audit admits only the extracted resource reference and never repeats it at finish', async () => {
+  const id = crypto.randomUUID();
+  const bodies: Record<string, unknown>[] = [];
+  const audit = createToolAudit(config, identity, async (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    bodies.push(body);
+    return Response.json({ id: body.p_id, outcome: body.p_outcome ?? 'pending' });
+  });
+  const finish = await audit('update_order_admin_note', true, {
+    order_id: id,
+    changes: { admin_note: 'DO-NOT-AUDIT' },
+    supplied_url: 'https://attacker.example/private',
+  });
+  await finish('returned');
+  expect(bodies[0]).toMatchObject({ p_resource_type: 'order', p_resource_id: id });
+  expect(bodies[1].p_resource_type).toBeUndefined();
+  expect(bodies[1].p_resource_id).toBeUndefined();
+  expect(JSON.stringify(bodies)).not.toContain('DO-NOT-AUDIT');
+  expect(JSON.stringify(bodies)).not.toContain('attacker');
+});
 
 test('audit failures block dispatch or preserve uncertainty without retries; payloads never reach the audit writer', async () => {
   for (const mode of [
@@ -89,7 +123,7 @@ test('audit failures block dispatch or preserve uncertainty without retries; pay
         );
       }
       expect(JSON.stringify(bodies)).not.toContain('SECRET');
-      expect(JSON.stringify(bodies)).not.toContain(id);
+      expect(bodies[0]).toMatchObject({ p_resource_type: 'order', p_resource_id: id });
       expect(JSON.stringify(result)).not.toContain('PRIVATE-ERROR');
       if (mode === 'ok') expect(result.isError).not.toBe(true);
       else {

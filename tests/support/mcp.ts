@@ -3,6 +3,7 @@ import { AdminBackend } from '../../mcp/src/backend';
 import { createAdminServer } from '../../mcp/src/server';
 import type { ToolAuthorization } from '../../mcp/src/permissions';
 import type { ToolAudit } from '../../mcp/src/tool-audit';
+import type { ActionApprovalHost } from '../../mcp/src/action-approvals';
 
 export async function mcpSession(
   backend: AdminBackend,
@@ -10,8 +11,9 @@ export async function mcpSession(
   authorization?: ToolAuthorization,
   adminOrigin?: string,
   audit?: ToolAudit,
+  approvals?: ActionApprovalHost,
 ) {
-  const server = createAdminServer(backend, { allowWrites, authorization, adminOrigin, audit });
+  const server = createAdminServer(backend, { allowWrites, authorization, adminOrigin, audit, approvals });
   const client = new Client({ name: 'tera-tests', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);

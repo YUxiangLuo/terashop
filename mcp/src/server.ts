@@ -5,6 +5,7 @@ import { requiredToolScopes, permitsTool, type ToolAuthorization } from './permi
 import { adminRecordLinks, validateAdminOrigin } from './admin-links';
 import type { ToolAudit } from './tool-audit';
 import type { Json } from '../../types/database';
+import { ApprovalRequired, type ActionApprovalHost } from './action-approvals';
 import {
   id,
   version,
@@ -125,6 +126,7 @@ export function createAdminServer(
     authorization?: ToolAuthorization;
     adminOrigin?: string;
     audit?: ToolAudit;
+    approvals?: ActionApprovalHost;
   } = {},
 ) {
   const adminOrigin = validateAdminOrigin(options.adminOrigin);
@@ -170,12 +172,21 @@ export function createAdminServer(
           }
           if (options.audit) {
             try {
-              finishAudit = await options.audit(name, mutation);
+              finishAudit = await options.audit(name, mutation, args);
             } catch {
               throw new BackendError('AUDIT_UNAVAILABLE', false);
             }
           }
-          const parsed = dataSchema.safeParse(await execute(args));
+          if (options.approvals) await backend.assertAdmin();
+          const approval: {
+            args: unknown;
+            result?: unknown;
+            executed?: boolean;
+            finalize?: () => Promise<unknown>;
+          } = options.approvals ? await options.approvals(name, args as Record<string, unknown>) : { args };
+          const raw = approval.executed ? approval.result : await execute(approval.args as A);
+          if (approval.finalize) await approval.finalize();
+          const parsed = dataSchema.safeParse(raw);
           if (!parsed.success) throw new BackendError('INVALID_BACKEND_RESPONSE', mutation);
           const result = { data: parsed.data };
           if (finishAudit) {
@@ -195,6 +206,38 @@ export function createAdminServer(
             structuredContent: result,
           };
         } catch (error) {
+          if (error instanceof ApprovalRequired) {
+            if (finishAudit) {
+              try {
+                await finishAudit('rejected');
+              } catch {
+                return {
+                  isError: true,
+                  content: [
+                    {
+                      type: 'text' as const,
+                      text: JSON.stringify({ code: 'AUDIT_COMPLETION_UNCONFIRMED', outcome_unknown: false }),
+                    },
+                  ],
+                };
+              }
+            }
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({
+                    code: 'HUMAN_APPROVAL_REQUIRED',
+                    approval_id: error.approvalId,
+                    outcome_unknown: false,
+                    guidance:
+                      'A human administrator must review this exact request. After approval, explicitly replay identical arguments with this approval_id.',
+                  }),
+                },
+              ],
+            };
+          }
           let failure = error instanceof BackendError ? error : new BackendError('INTERNAL_ERROR', mutation);
           if (finishAudit) {
             try {
@@ -471,7 +514,7 @@ export function createAdminServer(
   rpc(
     'anonymize_customer',
     'Irreversibly anonymize customer contact data, addresses, carts and metafields. Historical order snapshots remain. Does not delete or revoke the Auth account.',
-    z.strictObject({ customer_id: id }),
+    z.strictObject({ customer_id: id, ...(options.approvals ? { approval_id: id.optional() } : {}) }),
     true,
     false,
     customerResult,
@@ -1187,7 +1230,7 @@ export function createAdminServer(
   rpc(
     'commit_manual_refund',
     'MANUAL BOOKKEEPING ONLY: does not move provider money. After explicit approval, submit the exact preview scope/restock and preview_token with a nonblank reason and idempotency_key. Stale preview requires a new preview and renewed confirmation, never automatic replacement. restock only releases cancelled unshipped units, not received returns. After an unknown outcome retain identical arguments and key; inspect the ledger before an approved identical retry. A preview token is not human authorization.',
-    commitManualRefund,
+    options.approvals ? commitManualRefund.safeExtend({ approval_id: id.optional() }) : commitManualRefund,
     true,
     true,
     manualRefundReceipt,
@@ -1195,7 +1238,7 @@ export function createAdminServer(
   tool(
     'refund_paypal',
     'REAL MONEY: issue a PayPal refund through the authenticated Edge function. Obtain explicit approval for order, amount/lines/shipping and any restock. Retain idempotency_key and identical arguments; never retry automatically or generate a new key after uncertainty. Explicit scope required; amounts are positive USD decimal strings with at most two decimals. No implicit full-balance refund. restock only releases cancelled unshipped units, not received returns. Success is a provider observation, not guaranteed local settlement: inspect pending_reconciliation and list_admin_payment_operations plus get_order_ledger before claiming completion. Any Edge failure may follow a durable request or dispatch; read current operations and confirm intent before an identical-key retry. No arbitrary endpoint, provider reference or actor override.',
-    paypalRefund,
+    options.approvals ? paypalRefund.safeExtend({ approval_id: id.optional() }) : paypalRefund,
     (args) => backend.refundPayPal(args),
     true,
     false,
@@ -1345,7 +1388,11 @@ export function createAdminServer(
   rpc(
     'set_user_role',
     'Change an Auth user role, not a Customer ID. Read get_admin_user first and obtain explicit approval for the exact user and role. The final admin cannot be demoted. No expected-version protection: reread after uncertain outcomes rather than automatically replaying. Demoting yourself removes access to subsequent admin calls. Does not create/login/delete an Auth account or alter Customer identity.',
-    z.strictObject({ user_id: id, role: z.enum(['admin', 'customer']) }),
+    z.strictObject({
+      user_id: id,
+      role: z.enum(['admin', 'customer']),
+      ...(options.approvals ? { approval_id: id.optional() } : {}),
+    }),
     true,
     true,
     profileResult,
@@ -1374,7 +1421,7 @@ export function createAdminServer(
   rpc(
     'anonymize_user',
     'Irreversibly anonymize the Auth-linked profile, customer and audit actor. Does not delete Auth credentials or historical orders.',
-    z.strictObject({ p_user_id: id }),
+    z.strictObject({ p_user_id: id, ...(options.approvals ? { approval_id: id.optional() } : {}) }),
     true,
     false,
     profileResult,

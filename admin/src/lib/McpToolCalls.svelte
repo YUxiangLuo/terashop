@@ -19,6 +19,25 @@
     attempted = $state(0);
   let older = $state(false);
   let alive = true;
+  const resourceRoutes: Record<
+    Exclude<McpToolCall["resource_type"], null>,
+    string
+  > = {
+    product: "products",
+    customer: "customers",
+    order: "orders",
+    location: "locations",
+    promotion: "promotions",
+    checkout_quote: "quotes",
+    category: "categories",
+    tax_rate: "taxes",
+    shipping_method: "shipping",
+    managed_media: "media",
+  };
+  const resourceHref = (item: McpToolCall) =>
+    item.resource_type === "managed_media"
+      ? "/media"
+      : `/${resourceRoutes[item.resource_type!]}/${item.resource_id}`;
   onMount(() => {
     void load();
     const stop = watchAdminChanges(
@@ -115,7 +134,14 @@
               ><strong>{item.tool_name}</strong>
               <p class="small muted">
                 {item.mutation ? "Write" : "Read"} · {item.id}
-              </p></td
+              </p>
+              {#if item.resource_type && item.resource_id}
+                <p class="small">
+                  <a href={resourceHref(item)}
+                    >Open {item.resource_type.replaceAll("_", " ")}</a
+                  >
+                </p>
+              {/if}</td
             >
             <td
               >{item.client_id}

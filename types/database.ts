@@ -1837,6 +1837,10 @@ export type Database = {
         Returns: Json
       }
       current_customer_id: { Args: never; Returns: string }
+      decide_my_mcp_action_approval: {
+        Args: { p_decision: string; p_id: string }
+        Returns: Json
+      }
       delete_customer_address: {
         Args: {
           address_id: string
@@ -2213,6 +2217,7 @@ export type Database = {
         }
         Returns: Json
       }
+      list_my_mcp_action_approvals: { Args: { p_id?: string }; Returns: Json }
       list_my_mcp_connections: {
         Args: { after_id?: string; page_size?: number }
         Returns: Json
@@ -2251,6 +2256,20 @@ export type Database = {
           order_id: string
           provider?: string
           provider_ref?: string
+        }
+        Returns: Json
+      }
+      mcp_action_approval_command: {
+        Args: {
+          p_action: string
+          p_approval_id: string
+          p_arguments: Json
+          p_grant_id: string
+          p_issuer: string
+          p_project: string
+          p_resource: string
+          p_tool_name: string
+          p_user_id: string
         }
         Returns: Json
       }
@@ -2305,6 +2324,8 @@ export type Database = {
           p_outcome?: string
           p_project: string
           p_resource: string
+          p_resource_id?: string
+          p_resource_type?: string
           p_tool_name?: string
           p_user_id: string
         }
