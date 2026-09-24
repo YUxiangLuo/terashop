@@ -7,7 +7,8 @@ const request = crypto.randomUUID(),
 const email = `${session}@example.test`,
   password = crypto.randomUUID() + 'Aa1!';
 let user = '',
-  customer = '';
+  customer = '',
+  recoveredCustomer = '';
 async function api(path: string, method: string, body?: unknown) {
   const response = await fetch(`${config.API_URL}${path}`, {
     method,
@@ -32,6 +33,7 @@ async function browser(...args: string[]) {
     proc.exited,
   ]);
   if (code) throw Error(`Browser ${args[0]} failed: ${err || out}`);
+  return out.trim();
 }
 const click = (name: string) => browser('find', 'role', 'button', 'click', '--name', name, '--exact');
 async function browserUrl() {
@@ -48,7 +50,13 @@ async function browserUrl() {
   return new URL(out.trim());
 }
 try {
-  user = (await api('/auth/v1/admin/users', 'POST', { email, password, email_confirm: true })).id;
+  user = (
+    await api('/auth/v1/admin/users', 'POST', {
+      email,
+      password,
+      email_confirm: true,
+    })
+  ).id;
   await api(`/rest/v1/profiles?id=eq.${user}`, 'PATCH', { role: 'admin' });
   await browser('open', `${origin.origin}/customers/new`);
   await browser('wait', 'input[type=email]');
@@ -58,6 +66,57 @@ try {
   await browser('wait', '--text', 'New customer');
   if (!/^[0-9a-f-]{36}$/.test((await browserUrl()).searchParams.get('request') ?? ''))
     throw Error('Direct customer-create route did not initialize its request identity');
+  const blankRequest = (await browserUrl()).searchParams.get('request');
+  await browser(
+    'eval',
+    `(() => {
+    const e = new Event('beforeunload', {cancelable:true}); window.dispatchEvent(e);
+    if(e.defaultPrevented) throw Error('Pristine form should allow leaving');
+    const original = window.fetch.bind(window); let lost = false;
+    window.fetch = async (...args) => {
+      const response = await original(...args);
+      if(!lost && String(args[0]?.url ?? args[0]).includes('/rpc/create_customer') && response.ok) {
+        lost = true; window.reviewCreatedId = (await response.clone().json()).id;
+        throw Error('Lost committed create receipt');
+      }
+      return response;
+    };
+  })()`,
+  );
+  await click('Create customer');
+  await browser('wait', '--text', 'Retry customer creation');
+  recoveredCustomer = JSON.parse(await browser('eval', 'window.reviewCreatedId'));
+  if (!recoveredCustomer) throw Error('Lost-receipt fixture did not commit');
+  await browser(
+    'eval',
+    `(() => {
+    window.reviewConfirm = window.confirm; window.reviewConfirmations = 0;
+    window.confirm = () => { window.reviewConfirmations++; return false; };
+    const e = new Event('beforeunload', {cancelable:true}); window.dispatchEvent(e);
+    if(!e.defaultPrevented) throw Error('Unknown blank creation must guard tab close');
+    window.reviewConfirmations = 0;
+  })()`,
+  );
+  await browser('click', 'a[href="/customers"]');
+  await browser('wait', '--fn', 'window.reviewConfirmations === 1');
+  await browser(
+    'eval',
+    `(() => { if(location.pathname !== '/customers/new') throw Error('Unknown create lost navigation protection'); window.confirm = window.reviewConfirm; })()`,
+  );
+  if ((await browserUrl()).searchParams.get('request') !== blankRequest)
+    throw Error('Recovery request changed');
+  await click('Retry customer creation');
+  await browser('wait', '--url', `**/customers/${recoveredCustomer}`);
+  await browser(
+    'eval',
+    `(() => { const e = new Event('beforeunload', {cancelable:true}); window.dispatchEvent(e); if(e.defaultPrevented) throw Error('Completed creation still blocks leaving'); })()`,
+  );
+  const replay = await api('/rest/v1/rpc/create_customer', 'POST', {
+    idempotency_key: blankRequest,
+  });
+  if (replay.id !== recoveredCustomer) throw Error('Recovery created a duplicate customer');
+  await browser('open', `${origin.origin}/customers/new`);
+  await browser('wait', '--text', 'New customer');
   await browser('fill', 'form.card label:first-of-type input', 'Smoke Customer');
   await browser('fill', 'form.card input[type=email]', 'customer@example.test');
   await click('Create customer');
@@ -92,15 +151,19 @@ try {
   await click('Delete');
   await browser('dialog', 'accept');
   await browser('wait', '--text', 'Address deleted.');
-  const saved = await api(`/rest/v1/rpc/get_admin_customer`, 'POST', { customer_id: customer });
+  const saved = await api(`/rest/v1/rpc/get_admin_customer`, 'POST', {
+    customer_id: customer,
+  });
   if (saved.full_name !== 'Smoke Customer' || saved.addresses.length)
     throw Error('Customer lifecycle state mismatch');
-  console.log('Customer smoke passed: direct create identity and address create/default/unset/edit/delete.');
+  console.log(
+    'Customer smoke passed: blank lost-receipt navigation protection, exact-key recovery and address lifecycle.',
+  );
 } finally {
   try {
     await browser('close');
   } catch {}
-  if (customer) {
+  for (const customerId of [customer, recoveredCustomer].filter(Boolean)) {
     const sessionData = await api('/auth/v1/token?grant_type=password', 'POST', { email, password });
     const response = await fetch(`${config.API_URL}/rest/v1/rpc/anonymize_customer`, {
       method: 'POST',
@@ -109,7 +172,7 @@ try {
         Authorization: `Bearer ${sessionData.access_token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ customer_id: customer }),
+      body: JSON.stringify({ customer_id: customerId }),
     });
     if (!response.ok) throw Error(`Customer anonymization failed (${response.status})`);
   }

@@ -29,7 +29,9 @@ This runbook covers one directly TLS-terminating authorization process and one d
 
 ### Admin integration upgrade
 
-Apply the shop migrations through `20260924000003_mcp_audit_resources.sql` before upgrading the remote MCP host and Admin build. The new host fails closed if approval RPCs are unavailable; do not bypass this by reverting to raw high-risk dispatch. The audit RPC replaces its prior signature with compatible optional resource arguments, not an ambiguous overload. Keep the shop schema and generated `types/database.ts` at the same revision.
+Apply the shop migrations through `20260924000004_mcp_approval_cart_versions.sql` before upgrading the remote MCP host and Admin build. The new host fails closed if approval RPCs are unavailable; do not bypass this by reverting to raw high-risk dispatch. The audit RPC replaces its prior signature with compatible optional resource arguments, not an ambiguous overload. Keep the shop schema and generated `types/database.ts` at the same revision.
+
+The cart-version migration invalidates previously staged customer/user anonymization fingerprints, including already approved requests that have not executed. Inspect current business state and obtain a fresh approval; do not rewrite stored fingerprints to preserve old approvals. New approvals bind cart IDs and versions and reject edits made before consumption.
 
 The five high-risk remote tools now stage human approvals. Confirm the Admin `/approvals` route is reachable after independent login, then verify a disposable role change through stage → approve → exact replay and rejection/expiry. Never use a real refund for a smoke test. `consuming` requires business reconciliation, not an automatic retry; `consumed` is not payment settlement. Keep original approval IDs and refund idempotency keys. Admin manual bookkeeping remains on its existing preview/commit contract.
 

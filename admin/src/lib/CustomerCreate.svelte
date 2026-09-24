@@ -17,6 +17,10 @@
     full_name?: string;
     phone?: string;
   } | null>(null);
+  let unsettled = $derived(
+    !completed &&
+      (busy || submitted !== null || Object.values(fields).some(Boolean)),
+  );
   onMount(() => {
     if (key) return;
     key = crypto.randomUUID();
@@ -29,9 +33,12 @@
   });
   beforeNavigate(({ cancel }) => {
     if (
-      !completed &&
-      (busy || Object.values(fields).some(Boolean)) &&
-      !window.confirm("Leave and discard this customer draft?")
+      unsettled &&
+      !window.confirm(
+        uncertain
+          ? "Creation may have succeeded. Leave and lose the original request recovery context?"
+          : "Leave and discard this customer draft?",
+      )
     )
       cancel();
   });
@@ -61,7 +68,7 @@
 <svelte:head><title>New customer · Tera Admin</title></svelte:head>
 <svelte:window
   onbeforeunload={(event) => {
-    if (busy || Object.values(fields).some(Boolean)) event.preventDefault();
+    if (unsettled) event.preventDefault();
   }}
 />
 <div class="page-heading">
