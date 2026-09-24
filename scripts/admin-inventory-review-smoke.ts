@@ -164,6 +164,18 @@ try {
   await click('Retry saved adjustment');
   await dialog('accept');
   await browser('wait', '--text', 'Stock adjustment confirmed.');
+  await api(`/rest/v1/locations?id=eq.${location}`, 'PATCH', { is_active: false });
+  await browser('reload');
+  await browser('wait', '[aria-label="Inventory"] select');
+  await browser('select', '[aria-label="Inventory"] .fields.two label:last-child select', location);
+  await browser('wait', '--text', 'This warehouse is inactive.');
+  await browser('wait', `${movements} tbody tr`);
+  await check(
+    `document.querySelector('[aria-label="Inventory"] input[type=number]').matches(':disabled') && document.querySelectorAll('${movements} tbody tr').length>0 && [...document.querySelectorAll('[aria-label="Inventory"] option')].some(o=>o.value===${JSON.stringify(location)}&&o.textContent.includes('Inactive (history only)'))`,
+  );
+  await browser('eval', `document.querySelector('[aria-label="Inventory"]').scrollIntoView()`);
+  await browser('screenshot', '/tmp/admin-inventory-inactive-history.png', '--full');
+  await api(`/rest/v1/locations?id=eq.${location}`, 'PATCH', { is_active: true });
   await browser('open', `${origin.origin}/products/${product}`);
   await browser(
     'wait',

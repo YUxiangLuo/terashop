@@ -296,15 +296,12 @@ export function customerReceipt(value: unknown, id: string, expected: string | n
       label: 'string',
       recipient_name: 'string',
       country: 'string',
-      region: 'string',
-      city: 'string',
       line1: 'string',
-      postal_code: 'string',
       is_default: 'boolean',
       updated_at: 'string',
     });
-    nullable(address, 'phone', 'string', 'customer');
-    nullable(address, 'line2', 'string', 'customer');
+    for (const key of ['phone', 'region', 'city', 'line2', 'postal_code'] as const)
+      nullable(address, key, 'string', 'customer');
   }
   return item;
 }

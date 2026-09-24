@@ -7,6 +7,7 @@
   import ManagedMediaUpload from "./ManagedMediaUpload.svelte";
   import {
     optionChanges,
+    parseProductTags,
     validateVariants,
     variantLabel,
     type ProductOption,
@@ -29,7 +30,12 @@
     description: "",
     vendor: "",
     product_type: "",
+    tags: [] as string[],
+    seo_title: "",
+    seo_description: "",
   });
+  let tagsInput = $state("");
+  let tagsEdited = $state(false);
   let images = $state<ProductImage[]>([]);
   let status = $state<ProductStatus>("draft");
   let variants = $state<ProductVariant[]>([]);
@@ -49,6 +55,7 @@
     loaded &&
       JSON.stringify({
         fields,
+        tagsInput: tagsEdited ? tagsInput : null,
         images,
         status,
         variants,
@@ -80,7 +87,12 @@
       description: value?.description ?? "",
       vendor: value?.vendor ?? "",
       product_type: value?.product_type ?? "",
+      tags: [...(value?.tags ?? [])],
+      seo_title: value?.seo_title ?? "",
+      seo_description: value?.seo_description ?? "",
     };
+    tagsInput = value?.tags.join(", ") ?? "";
+    tagsEdited = false;
     images = value?.images.map((image) => ({ ...image })) ?? [];
     status = value?.status ?? "draft";
     variants = structuredClone(value?.variants ?? []);
@@ -88,6 +100,7 @@
     categories = structuredClone(value?.categories ?? []);
     baseline = JSON.stringify({
       fields,
+      tagsInput: null,
       images,
       status,
       variants,
@@ -146,15 +159,33 @@
     try {
       // The URL retains this UUID across refreshes and uncertain create responses.
       const saved = await saveProduct(id, product?.revision ?? null, {
-        product: { ...fields, status },
+        product: {
+          ...fields,
+          tags: tagsEdited ? parseProductTags(tagsInput) : fields.tags,
+          seo_title: fields.seo_title.trim() || null,
+          seo_description: fields.seo_description.trim() || null,
+          status,
+        },
         ...optionChanges(options, product?.options ?? []),
         category_ids: categories.map((category) => category.id),
-        // Preserve cost, barcode, ordering and metadata outside this editor.
+        // Omitted position and metafields are extension data and remain untouched.
         variants: variants.map(
-          ({ id, sku, price, is_active, track_inventory }) => ({
+          ({
+            id,
+            sku,
+            barcode,
+            price,
+            compare_at_price,
+            cost,
+            is_active,
+            track_inventory,
+          }) => ({
             id,
             sku: sku || null,
+            barcode: barcode || null,
             price,
+            compare_at_price,
+            cost,
             is_active,
             track_inventory,
           }),
@@ -295,6 +326,34 @@
                   /></label
                 >
               </div>
+              <label
+                >Tags<input
+                  bind:value={tagsInput}
+                  maxlength="2000"
+                  placeholder="summer, linen, dresses"
+                  oninput={() => (tagsEdited = true)}
+                /><span class="small muted">Comma-separated.</span></label
+              >
+            </div>
+          </section>
+          <section class="card">
+            <h2>Search preview</h2>
+            <div class="fields">
+              <label
+                >SEO title<input
+                  bind:value={fields.seo_title}
+                  maxlength="200"
+                /></label
+              >
+              <label
+                >SEO description<textarea
+                  bind:value={fields.seo_description}
+                  rows="3"
+                  maxlength="1000"></textarea></label
+              >
+              <p class="small muted">
+                Blank values use the storefront defaults.
+              </p>
             </div>
           </section>
           <VariantEditor

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
   import { message, dateTime } from "$lib/api";
   import {
     listCustomers,
@@ -68,9 +69,15 @@
       Search customer contact records and order history.
     </p>
   </div>
-  <button onclick={() => load(false)} disabled={loading}
-    >Refresh customers</button
-  >
+  <div class="actions">
+    <button onclick={() => load(false)} disabled={loading}
+      >Refresh customers</button
+    ><button
+      class="primary"
+      onclick={() => goto(`/customers/new?request=${crypto.randomUUID()}`)}
+      >New customer</button
+    >
+  </div>
 </div>
 <section class="card" aria-label="Customers">
   <form

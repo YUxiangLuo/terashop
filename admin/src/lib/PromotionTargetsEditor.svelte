@@ -11,6 +11,7 @@
     type PromotionTarget,
   } from "./promotion-targets";
   import { promotionReceipt } from "./write-receipts";
+  import PromotionTargetPicker from "./PromotionTargetPicker.svelte";
   let { id }: { id: string } = $props();
   let rule = $state.raw<Promotion | null>(null);
   let draft = $state<TargetDraft>({
@@ -246,6 +247,10 @@
               aria-label={`Remove target ${index + 1}`}
               onclick={() => draft.rows.splice(index, 1)}>Remove</button
             >
+            <PromotionTargetPicker
+              kind={row.kind}
+              onselect={(reference: string) => (row.reference = reference)}
+            />
           </div>{/each}
         {#if !draft.rows.length}<p class="muted">
             No target references. Selected scopes match no items.

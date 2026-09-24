@@ -16,6 +16,10 @@ export interface ManagedMedia extends MediaRequest {
   upload_status: "not_started" | "pending" | "settled";
   published: boolean;
 }
+export interface ManagedMediaPage {
+  items: ManagedMedia[];
+  next_cursor: string | null;
+}
 const uuid = (value: unknown) =>
   typeof value === "string" &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
@@ -72,6 +76,44 @@ export function mediaReceipt(
     );
   }
   return v;
+}
+
+export function managedMedia(value: unknown): ManagedMedia {
+  const candidate = value as ManagedMedia;
+  if (!isMediaRequest(candidate))
+    throw Error("Unconfirmed managed media record.");
+  return mediaReceipt(candidate, candidate);
+}
+
+export function mediaPage(value: unknown): ManagedMediaPage {
+  if (!value || typeof value !== "object")
+    throw Error("Unconfirmed managed media list.");
+  const page = value as { items?: unknown; next_cursor?: unknown };
+  if (
+    !Array.isArray(page.items) ||
+    !(page.next_cursor === null || uuid(page.next_cursor))
+  )
+    throw Error("Unconfirmed managed media list.");
+  const items = page.items.map(managedMedia);
+  if (new Set(items.map((item) => item.id)).size !== items.length)
+    throw Error("Unconfirmed managed media list.");
+  return { items, next_cursor: page.next_cursor as string | null };
+}
+
+export function canDiscardMedia(media: ManagedMedia): boolean {
+  return (
+    !media.published &&
+    media.state === "staged" &&
+    media.upload_status === "settled"
+  );
+}
+
+export function canDeleteMedia(media: ManagedMedia): boolean {
+  return (
+    !media.published &&
+    media.state === "discard_prepared" &&
+    media.upload_status === "settled"
+  );
 }
 
 export async function mediaFile(file: File, requestId: string) {

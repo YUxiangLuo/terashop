@@ -6,6 +6,9 @@ const id = '00000000-0000-4000-8000-000000000001';
 const variant = (price: number): ProductVariant => ({
   id,
   sku: null,
+  barcode: null,
+  compare_at_price: null,
+  cost: null,
   price,
   is_active: true,
   track_inventory: false,

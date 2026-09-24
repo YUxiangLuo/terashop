@@ -47,6 +47,9 @@ export interface ProductDetail {
   description: string;
   vendor: string;
   product_type: string;
+  tags: string[];
+  seo_title: string | null;
+  seo_description: string | null;
   images: ProductImage[];
   variants: ProductVariant[];
   options: ProductOption[];

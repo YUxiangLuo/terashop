@@ -179,7 +179,16 @@ try {
   await click("Add target");
   await browser("select", "#target-role-21", "get");
   await browser("select", "#target-kind-21", "variant_id");
-  await fill("Reference 22", variant);
+  const picker = '.target-row:has(#target-kind-21) .picker';
+  await browser("click", `${picker} summary`);
+  await browser("fill", `${picker} input[type=search]`, session);
+  await browser("click", `${picker} .fields button`);
+  await browser("wait", `${picker} button.choice`);
+  await browser("click", `${picker} button.choice`);
+  await browser("wait", `${picker} .section-heading`);
+  await browser("click", `${picker} button.choice`);
+  await browser("eval", `if(document.querySelector('#target-reference-21')?.value !== ${JSON.stringify(variant)} && ![...document.querySelectorAll('.target-row:has(#target-kind-21) input')].some(input=>input.value===${JSON.stringify(variant)})) throw Error('Variant picker returned the product ID or wrong variant');`);
+  await browser("screenshot", "/tmp/admin-target-picker.png");
   await browser(
     "eval",
     `(() => { const original = window.fetch; window.fetch = async (...args) => {

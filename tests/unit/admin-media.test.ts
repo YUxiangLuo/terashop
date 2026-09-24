@@ -1,5 +1,14 @@
 import { expect, test } from 'bun:test';
-import { isMediaRequest, mediaFile, mediaReceipt, sameMedia } from '../../admin/src/lib/media';
+import {
+  canDeleteMedia,
+  canDiscardMedia,
+  isMediaRequest,
+  managedMedia,
+  mediaFile,
+  mediaPage,
+  mediaReceipt,
+  sameMedia,
+} from '../../admin/src/lib/media';
 
 const request = {
   request_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
@@ -30,6 +39,25 @@ test('media file fingerprints retain the original byte identity and enforce the 
     await expect(
       mediaFile(new File([new Uint8Array(bytes)], 'x', { type }), request.request_id),
     ).rejects.toThrow('1 MiB');
+});
+test('managed media pages validate every record and expose only safe private lifecycle actions', () => {
+  expect(mediaPage({ items: [receipt], next_cursor: receipt.id })).toEqual({
+    items: [receipt],
+    next_cursor: receipt.id,
+  });
+  expect(managedMedia(receipt)).toEqual(receipt);
+  expect(canDiscardMedia(receipt)).toBe(true);
+  expect(canDiscardMedia({ ...receipt, published: true, state: 'retained' })).toBe(false);
+  expect(canDiscardMedia({ ...receipt, upload_status: 'pending' })).toBe(false);
+  expect(canDeleteMedia({ ...receipt, state: 'discard_prepared' })).toBe(true);
+  expect(canDeleteMedia(receipt)).toBe(false);
+  for (const bad of [
+    null,
+    { items: [], next_cursor: 'bad' },
+    { items: [{ ...receipt, published: true }], next_cursor: null },
+    { items: [receipt, receipt], next_cursor: null },
+  ])
+    expect(() => mediaPage(bad)).toThrow('Unconfirmed');
 });
 test('media recovery rejects mismatched identities and inconsistent publication receipts', () => {
   expect(isMediaRequest(request)).toBe(true);

@@ -1,3 +1,5 @@
+import { isCatalogMoney } from "../../../shared/admin-contracts";
+
 export interface ProductOption {
   id: string;
   name: string;
@@ -7,10 +9,20 @@ export interface ProductOption {
 export interface ProductVariant {
   id: string;
   sku: string | null;
+  barcode: string | null;
   price: number;
+  compare_at_price: number | null;
+  cost: number | null;
   is_active: boolean;
   track_inventory: boolean;
   option_value_ids: string[];
+}
+
+export function parseProductTags(value: string): string[] {
+  return value
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
 }
 
 export function variantLabel(
@@ -49,15 +61,6 @@ function validateOptions(options: ProductOption[]) {
     throw new Error("Option names and values within an option must be unique.");
 }
 
-function validMoney(value: number) {
-  return (
-    Number.isFinite(value) &&
-    value >= 0 &&
-    value <= 9999999999.99 &&
-    Number(value.toFixed(2)) === value
-  );
-}
-
 export function validateVariants(
   options: ProductOption[],
   variants: ProductVariant[],
@@ -68,8 +71,16 @@ export function validateVariants(
   if (active && !variants.length)
     throw new Error("Add a variant before publishing.");
   for (const variant of variants) {
-    if (!validMoney(variant.price))
+    if (!isCatalogMoney(variant.price))
       throw new Error("Enter a valid price for every variant.");
+    if (
+      (variant.compare_at_price !== null &&
+        !isCatalogMoney(variant.compare_at_price)) ||
+      (variant.cost !== null && !isCatalogMoney(variant.cost))
+    )
+      throw new Error(
+        "Enter valid compare-at prices and costs, or leave them blank.",
+      );
     if (active && variant.is_active) {
       if (
         options.some(
@@ -99,7 +110,7 @@ export function missingVariants(
   price: number,
 ): ProductVariant[] {
   validateOptions(options);
-  if (!validMoney(price))
+  if (!isCatalogMoney(price))
     throw new Error("Enter a valid price for new variants.");
   let count = 1;
   for (const option of options) {
@@ -125,7 +136,10 @@ export function missingVariants(
   return missing.map((ids) => ({
     id: crypto.randomUUID(),
     sku: null,
+    barcode: null,
     price,
+    compare_at_price: null,
+    cost: null,
     is_active: true,
     track_inventory: true,
     option_value_ids: ids,

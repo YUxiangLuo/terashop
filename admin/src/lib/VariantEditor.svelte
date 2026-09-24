@@ -185,6 +185,13 @@
           /></label
         >
         <label
+          >Barcode<input
+            aria-label={`Variant ${index + 1} barcode`}
+            bind:value={variant.barcode}
+            maxlength="200"
+          /></label
+        >
+        <label
           >Price · USD<input
             aria-label={`Variant ${index + 1} price`}
             type="number"
@@ -193,6 +200,36 @@
             step="0.01"
             required
             bind:value={variant.price}
+          /></label
+        >
+        <label
+          >Compare-at price · USD<input
+            aria-label={`Variant ${index + 1} compare-at price`}
+            type="number"
+            min="0"
+            max="9999999999.99"
+            step="0.01"
+            value={variant.compare_at_price ?? ""}
+            oninput={(event) =>
+              (variant.compare_at_price =
+                event.currentTarget.value === ""
+                  ? null
+                  : event.currentTarget.valueAsNumber)}
+          /></label
+        >
+        <label
+          >Cost · USD<input
+            aria-label={`Variant ${index + 1} cost`}
+            type="number"
+            min="0"
+            max="9999999999.99"
+            step="0.01"
+            value={variant.cost ?? ""}
+            oninput={(event) =>
+              (variant.cost =
+                event.currentTarget.value === ""
+                  ? null
+                  : event.currentTarget.valueAsNumber)}
           /></label
         >
       </div>

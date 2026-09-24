@@ -13,9 +13,12 @@
   import {
     getCustomer,
     updateCustomer,
+    deleteCustomerAddress,
+    setDefaultCustomerAddress,
     type CustomerDetail,
     type CustomerAddress,
   } from "./customers";
+  import CustomerAddressEditor from "./CustomerAddressEditor.svelte";
 
   let { id }: { id: string } = $props();
   let customer = $state.raw<CustomerDetail | null>(null);
@@ -29,6 +32,9 @@
   let ordersError = $state("");
   let notice = $state("");
   let uncertain = $state(false);
+  let addressEditor = $state.raw<CustomerAddress | "new" | null>(null);
+  let addressUnsettled = $state(false);
+  let addressBusy = $state(false);
   let alive = true;
   let request = 0;
   let dirty = $derived(!!customer && JSON.stringify(fields) !== baseline);
@@ -43,7 +49,7 @@
   });
   beforeNavigate(({ cancel }) => {
     if (
-      (loading || dirty) &&
+      (loading || dirty || addressUnsettled || addressBusy) &&
       !window.confirm("Leave and discard unsaved customer edits?")
     )
       cancel();
@@ -58,6 +64,9 @@
     };
     baseline = JSON.stringify(fields);
     uncertain = false;
+    addressEditor = null;
+    addressUnsettled = false;
+    addressBusy = false;
   }
   async function load() {
     const current = ++request;
@@ -82,14 +91,23 @@
   }
   function reload() {
     if (
-      !dirty ||
+      (!dirty && !addressUnsettled) ||
       window.confirm("Discard local edits and load the saved customer?")
     )
       void load();
   }
   async function save(event: SubmitEvent) {
     event.preventDefault();
-    if (!customer || loading || uncertain || readOnly) return;
+    if (
+      !customer ||
+      loading ||
+      uncertain ||
+      readOnly ||
+      addressBusy ||
+      addressUnsettled ||
+      addressEditor
+    )
+      return;
     loading = true;
     error = "";
     notice = "";
@@ -144,10 +162,65 @@
       address.recipient_name,
       address.line1,
       address.line2,
-      `${address.city}, ${address.region} ${address.postal_code}`.trim(),
+      [address.city, address.region, address.postal_code]
+        .filter(Boolean)
+        .join(", "),
       address.country,
       address.phone,
     ].filter(Boolean);
+  }
+  function installAddressResult(value: CustomerDetail, text: string) {
+    install(value);
+    addressEditor = null;
+    addressUnsettled = false;
+    notice = text;
+  }
+  async function addressCommand(
+    action: "delete" | "default" | "unset",
+    address: CustomerAddress,
+  ) {
+    if (
+      !customer ||
+      loading ||
+      dirty ||
+      addressBusy ||
+      uncertain ||
+      addressUnsettled ||
+      readOnly
+    )
+      return;
+    const prompt =
+      action === "delete"
+        ? `Delete ${address.label || "this address"}? Historical orders are unchanged.`
+        : action === "default"
+          ? `Make ${address.label || "this address"} the default address?`
+          : `Unset ${address.label || "this address"} as the default address?`;
+    if (!window.confirm(prompt)) return;
+    addressBusy = true;
+    error = "";
+    notice = "";
+    try {
+      const value =
+        action === "delete"
+          ? await deleteCustomerAddress(customer.id, address)
+          : await setDefaultCustomerAddress(
+              customer.id,
+              address.id,
+              action === "default",
+            );
+      if (alive)
+        installAddressResult(
+          value,
+          action === "delete" ? "Address deleted." : "Default address changed.",
+        );
+    } catch (cause) {
+      if (alive) {
+        uncertain = true;
+        error = `${message(cause)} Reload the customer before another command; the request may have succeeded.`;
+      }
+    } finally {
+      if (alive) addressBusy = false;
+    }
   }
 </script>
 
@@ -156,7 +229,7 @@
 >
 <svelte:window
   onbeforeunload={(event) => {
-    if (loading || dirty) event.preventDefault();
+    if (loading || dirty || addressUnsettled || addressBusy) event.preventDefault();
   }}
 />
 <div class="page-heading">
@@ -169,7 +242,9 @@
           : "Guest"}
       </p>{/if}
   </div>
-  <button onclick={reload} disabled={loading}>Reload customer</button>
+  <button onclick={reload} disabled={loading || addressBusy}
+    >Reload customer</button
+  >
 </div>
 {#if error}<p class="notice error" role="alert">{error}</p>{/if}
 {#if notice}<p class="notice" role="status">{notice}</p>{/if}
@@ -191,28 +266,48 @@
         <label
           >Full name<input
             bind:value={fields.full_name}
-            disabled={loading || readOnly || uncertain}
+            disabled={loading ||
+              readOnly ||
+              uncertain ||
+              addressBusy ||
+              addressUnsettled ||
+              !!addressEditor}
           /></label
         >
         <label
           >Email<input
             type="email"
             bind:value={fields.email}
-            disabled={loading || readOnly || uncertain}
+            disabled={loading ||
+              readOnly ||
+              uncertain ||
+              addressBusy ||
+              addressUnsettled ||
+              !!addressEditor}
           /></label
         >
         <label
           >Phone<input
             type="tel"
             bind:value={fields.phone}
-            disabled={loading || readOnly || uncertain}
+            disabled={loading ||
+              readOnly ||
+              uncertain ||
+              addressBusy ||
+              addressUnsettled ||
+              !!addressEditor}
           /></label
         >
         <div class="actions form-action">
           <button
             class="primary"
-            disabled={loading || readOnly || uncertain || !dirty}
-            >Save customer</button
+            disabled={loading ||
+              readOnly ||
+              uncertain ||
+              addressBusy ||
+              addressUnsettled ||
+              !!addressEditor ||
+              !dirty}>Save customer</button
           >
         </div>
       </form>
@@ -261,7 +356,18 @@
     </div>
     <aside class="editor-side">
       <section class="card">
-        <h2>Addresses</h2>
+        <div class="page-heading">
+          <h2>Addresses</h2>
+          <button
+            disabled={loading ||
+              dirty ||
+              addressBusy ||
+              uncertain ||
+              readOnly ||
+              !!addressEditor}
+            onclick={() => (addressEditor = "new")}>Add address</button
+          >
+        </div>
         {#if customer.addresses.length}{#each customer.addresses as address (address.id)}<div
               class="shipment"
             >
@@ -274,10 +380,54 @@
                 >
                   {line}
                 </div>{/each}
+              <div class="actions">
+                <button
+                  disabled={dirty ||
+                    addressBusy ||
+                    uncertain ||
+                    !!addressEditor}
+                  onclick={() => (addressEditor = address)}>Edit</button
+                >{#if address.is_default}<button
+                    disabled={dirty ||
+                      addressBusy ||
+                      uncertain ||
+                      !!addressEditor}
+                    onclick={() => addressCommand("unset", address)}
+                    >Unset default</button
+                  >{:else}<button
+                    disabled={dirty ||
+                      addressBusy ||
+                      uncertain ||
+                      !!addressEditor}
+                    onclick={() => addressCommand("default", address)}
+                    >Make default</button
+                  >{/if}<button
+                  disabled={dirty ||
+                    addressBusy ||
+                    uncertain ||
+                    !!addressEditor}
+                  onclick={() => addressCommand("delete", address)}
+                  >Delete</button
+                >
+              </div>
             </div>{/each}{:else}<p class="muted small">
             No saved addresses.
           </p>{/if}
       </section>
+      {#if addressEditor}<CustomerAddressEditor
+          {customer}
+          address={addressEditor === "new" ? undefined : addressEditor}
+          onstate={(value, busy) => { addressUnsettled = value; addressBusy = busy; }}
+          oncancel={() => {
+            addressEditor = null;
+            addressUnsettled = false;
+          }}
+          onsaved={(value) =>
+            installAddressResult(
+              value,
+              addressEditor === "new" ? "Address added." : "Address saved.",
+            )}
+        />{/if}
     </aside>
   </div>
 {/if}

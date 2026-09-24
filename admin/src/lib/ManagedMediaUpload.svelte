@@ -8,6 +8,7 @@
     mediaReceipt,
     mediaExtensions,
     sameMedia,
+    managedMedia,
     type MediaRequest,
     type ManagedMedia,
   } from "./media";
@@ -32,6 +33,7 @@
     error = $state("");
   let key = "",
     alive = true;
+  let recoveryId = $state("");
 
   onMount(() => {
     void run(async () => {
@@ -109,6 +111,39 @@
       throw Error("Unconfirmed media list.");
     media = data.items.length ? mediaReceipt(data.items[0], pending) : null;
   }
+  async function recoverRequest() {
+    if (busy || disabled || !ready || pending) return;
+    await run(async () => {
+      const requestId = recoveryId.trim().toLowerCase();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(requestId))
+        throw Error("Enter the original request UUID.");
+      const { data, error } = await supabase.rpc("list_admin_managed_media", {
+        request_id_filter: requestId,
+        page_size: 1,
+      });
+      if (error) throw error;
+      if (
+        !data ||
+        typeof data !== "object" ||
+        !("items" in data) ||
+        !Array.isArray(data.items)
+      )
+        throw Error("Unconfirmed media list.");
+      if (data.items.length !== 1)
+        throw Error("No managed media matches that request ID.");
+      const found = managedMedia(data.items[0]);
+      const request: MediaRequest = {
+        request_id: found.request_id,
+        content_type: found.content_type,
+        byte_size: found.byte_size,
+        sha256: found.sha256,
+      };
+      sessionStorage.setItem(key, JSON.stringify(request));
+      pending = request;
+      media = found;
+      recoveryId = "";
+    });
+  }
   async function command(body: Record<string, unknown>) {
     const { data, error } = await supabase.functions.invoke("managed-media", {
       body,
@@ -177,6 +212,25 @@
     from saving the product. JPEG, PNG or WebP · Up to 1 MiB.
   </p>
   {#if error}<p class="notice error" role="alert">{error}</p>{/if}
+  {#if ready && !pending}
+    <div class="recovery">
+      <label
+        >Original request ID<input
+          aria-label="Original request ID"
+          bind:value={recoveryId}
+          placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+          onkeydown={(event) => { if (event.key === "Enter") { event.preventDefault(); void recoverRequest(); } }}
+        /></label
+      >
+      <button type="button" onclick={recoverRequest} disabled={busy || disabled}
+        >Recover another tab or Agent upload</button
+      >
+    </div>
+    <p class="small muted">
+      This only reads the original server record. It does not retry, publish,
+      attach, or store bytes.
+    </p>
+  {/if}
   {#if pending}
     <p class="small">Request: {pending.request_id}</p>
     <p class="small muted">
@@ -260,5 +314,14 @@
 <style>
   .upload {
     overflow-wrap: anywhere;
+  }
+  .recovery {
+    display: flex;
+    align-items: end;
+    gap: 0.7rem;
+    flex-wrap: wrap;
+  }
+  .recovery label {
+    flex: 1 1 18rem;
   }
 </style>

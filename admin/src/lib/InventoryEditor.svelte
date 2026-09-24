@@ -5,6 +5,10 @@
   import { watchAdminChanges } from "./realtime";
   import { variantLabel } from "./catalog";
   import {
+    allowsNewInventoryOperation,
+    inventoryLocationSelection,
+  } from "./inventory-locations";
+  import {
     supabase,
     message,
     type ProductDetail,
@@ -46,6 +50,9 @@
   let changes = $state(0),
     checked = $state(0);
   let dirty = $derived(!pending && (delta !== undefined || note.length > 0));
+  let operationAllowed = $derived(
+    allowsNewInventoryOperation(locations, location),
+  );
   $effect(() => {
     unsettled = busy || dirty;
   });
@@ -112,7 +119,6 @@
       let cursor: string | null = null;
       do {
         const result = await supabase.rpc("list_admin_locations", {
-          active: true,
           page_size: 100,
           ...(cursor ? { after_id: cursor } : {}),
         });
@@ -127,11 +133,7 @@
       if (!alive) return;
       locations = items;
       pending = saved;
-      location =
-        saved?.location_id ??
-        items.find((item) => item.is_default)?.id ??
-        items[0]?.id ??
-        "";
+      location = inventoryLocationSelection(items, saved?.location_id);
       variant =
         saved?.variant_id ??
         product.variants.find(
@@ -175,7 +177,7 @@
   }
   async function adjust(event?: SubmitEvent) {
     event?.preventDefault();
-    if (busy || disabled || !ready) return;
+    if (busy || disabled || !ready || (!pending && !operationAllowed)) return;
     if (
       !pending &&
       (!inventory ||
@@ -321,7 +323,9 @@
             event.currentTarget.value = location;
           }}
           >{#each locations as item}<option value={item.id}
-              >{item.name}{item.is_default ? " · Default" : ""}</option
+              >{item.name}{item.is_default ? " · Default" : ""}{item.is_active
+                ? ""
+                : " · Inactive (history only)"}</option
             >{/each}</select
         ></label
       >
@@ -342,8 +346,14 @@
         <dd>{inventory.available}</dd>
       </div>
     </dl>
+    {#if !operationAllowed}<p class="notice" role="status">
+        This warehouse is inactive. Current balances and movement history remain
+        available, but new stock adjustments are disabled.
+      </p>{/if}
     <form onsubmit={adjust}>
-      <fieldset disabled={busy || !!pending || !ready || disabled}>
+      <fieldset
+        disabled={busy || !!pending || !ready || disabled || !operationAllowed}
+      >
         <div class="fields two">
           <label
             >Quantity change<input
