@@ -66,6 +66,19 @@ async function browser(...args: string[]) {
 }
 const click = (name: string) => browser('find', 'role', 'button', 'click', '--name', name, '--exact');
 const wait = (text: string) => browser('wait', '--text', text);
+async function mediaDialog(action: 'accept' | 'dismiss') {
+  // Library actions re-read the server before opening their native dialog.
+  const deadline = Date.now() + 5000;
+  while (true) {
+    try {
+      await browser('dialog', action);
+      return;
+    } catch (error) {
+      if (!String(error).includes('No dialog is showing') || Date.now() >= deadline) throw error;
+      await Bun.sleep(100);
+    }
+  }
+}
 async function capture(path: string, selector = '.upload') {
   await browser(
     'eval',
@@ -191,8 +204,34 @@ try {
     `(() => {const card=document.querySelector('.card');if(!card.textContent.includes('retained')||!card.textContent.includes('published'))throw Error('Managed media list omitted published record');if(card.textContent.includes('Delete private bytes')||card.textContent.includes('Prepare discard'))throw Error('Published record exposed destructive action')})()`,
   );
   await capture('/tmp/admin-media-library.png', '.card');
+  await browser('open', `${origin.origin}/products/${product}`);
+  await browser('wait', 'input[type=file]:enabled');
+  await route('none');
+  await selectFile();
+  await wait('Media state: staged');
+  const privateRequest = [...requests].at(-1)!;
+  assert.notEqual(privateRequest, requestId);
+  await browser('open', `${origin.origin}/media`);
+  await wait(privateRequest);
+  await route('none');
+  await click('Prepare discard');
+  await mediaDialog('dismiss');
+  await browser('wait', 'button:enabled');
+  assert.equal(calls.filter((action) => action === 'discard').length, 0);
+  await click('Prepare discard');
+  await mediaDialog('accept');
+  await wait('Media is now discard_prepared.');
+  await capture('/tmp/admin-media-discard-prepared.png', '.records');
+  await click('Recover deletion state');
+  await wait('Deletion state recovered: discard_prepared.');
+  await click('Delete private bytes');
+  await mediaDialog('accept');
+  await wait('Media is now discarded.');
+  const [deleted] = await db`select state from private.managed_media where request_id=${privateRequest}::uuid`;
+  assert.equal(deleted.state, 'discarded');
+  assert.equal((await fetch(publicUrl)).ok, true, 'Private deletion must not remove published media');
   console.log(
-    'PASS: private staging, CORS, lost upload/publication receipts, reload, explicit publication, attachment deduplication, save recovery and safe managed-media listing',
+    'PASS: private staging, CORS, lost receipts, publication, attachment, listing, confirmed discard, recovery and private deletion',
   );
 } finally {
   await browser('close').catch(() => {});

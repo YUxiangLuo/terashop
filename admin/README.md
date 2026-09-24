@@ -4,11 +4,21 @@
 
 ## 导航
 
-管理入口分为 Orders（订单、Checkout quotes）、Products（商品、分类）、Inventory（库存、仓库）、Customers、Promotions、Operations（对账异常、支付事件、事件投递 Outbox）及 Settings（配送与运费、税率）。模块名称进入默认页面，旁边的展开按钮只切换二级菜单；同时展开一个模块，深链接及浏览器前进／后退会自动展开当前模块。保留所有原 URL、查询参数和业务页面，不新增概览页。退款／退货／履约仍从订单进入，调拨仍从库存进入。
+管理入口分为 Orders（订单、Checkout quotes）、Products（商品、分类、Managed media）、Inventory（库存、仓库）、Customers、Promotions、Operations（对账异常、支付事件、事件投递 Outbox、Agent approvals）及 Settings（配送与运费、税率）。模块名称进入默认页面，旁边的展开按钮只切换二级菜单；同时展开一个模块，深链接及浏览器前进／后退会自动展开当前模块。保留所有原 URL、查询参数和业务页面，不新增概览页。退款／退货／履约仍从订单进入，调拨仍从库存进入。
 
 My Agent connections 位于独立 Personal 区域，非管理员仍仅能进入本人连接页面；导航可见性不替代 RPC 权限检查。650px 及以下使用 Menu 模态抽屉，支持焦点约束、Escape／Close／遮罩关闭，导航成功后关闭；取消离开草稿页则保持原页及抽屉。切回桌面时关闭抽屉并解除滚动锁。
 
 本地验收：`bun scripts/admin-navigation-smoke.ts`。覆盖所有主页面分组及商品深链接、历史返回、桌面和手机布局、键盘焦点、抽屉关闭与屏幕切换、草稿导航取消、降级及退出。截图为 `/tmp/admin-menu-desktop.png`、`/tmp/admin-menu-mobile-closed.png` 和 `/tmp/admin-menu-mobile-open.png`。
+
+## Agent 操作的人工接管
+
+- 客户：创建线下商业客户，不创建 Auth 账号。地址支持增删改、设为默认和取消默认；地址编辑保留微秒版本令牌。未知结果先重读；客户创建保留 URL 请求键及内存中原参数，不把联系人信息写入恢复存储。关闭标签页会丢失内存草稿，不能猜测新参数重试。
+- 商品：条码、成本、原价、标签及 SEO 与 MCP 共用数据库合同；不修改未编辑的 metafields 和变体排序。促销目标可搜索商品／分类，先选商品再选变体；UUID 输入仍保留。
+- 素材：`/media` 查询状态或原 request ID；私有 settled 素材可明确准备丢弃、删除及恢复删除结果。公开／retained／pending 上传不提供删除入口。商品页可凭原 request ID 找回其他标签页或 Agent 的上传；读取不会自动发布或关联。配置 Edge CORS 后方能执行素材动作。
+- 库存：停用仓库仍可核查余额和流水，不允许新库存调整；原键重放用于核对历史，不产生新的库存变动。
+- 高风险审批：`/approvals` 独立核对并批准本人 Agent 的五类高风险请求，支持原 ID 查询和显式刷新；详情见 [MCP 逐笔审批](../mcp/README.md#远程逐笔人工审批)。页面不提供资金重放按钮，也不能用审批状态证明渠道结算。
+
+Realtime 只提示可能变化，不是可靠事件流；断线、限流、历史页和审批页都以显式重读为准，不覆盖编辑中的草稿。浏览器回归：`scripts/admin-customers-smoke.ts`、`scripts/admin-fusion-smoke.ts`、`scripts/admin-media-smoke.ts`、`scripts/admin-promotion-targets-smoke.ts` 和 `scripts/admin-inventory-review-smoke.ts`，仅限本地可丢弃环境。
 
 ## 本地运行
 

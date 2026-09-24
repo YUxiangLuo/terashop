@@ -1,14 +1,26 @@
 # Admin MCP
 
-独立于 `admin/` SPA 的管理员客户端层。工具调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。没有直连数据库、任意 SQL、任意 RPC/表名或 service-role 回退入口。
+独立于 `admin/` SPA 的管理员客户端层。普通业务调用使用当前管理员 JWT 访问 Supabase；数据库负责授权、事务、幂等、库存与资金规则。远程高风险审批使用宿主的受限 service-only RPC，在原子身份／授权／参数／状态检查后仅能执行固定的角色和匿名化命令；不提供直连数据库、任意 SQL、任意 RPC/表名或失败后的提权回退。
 
 **已实现 stdio 和直接 HTTPS 的无状态 Streamable HTTP MCP，113 个显式工具（54 个只读、59 个写入）；远程交付验收尚未完成。** 下方覆盖表是完成范围，不以 SPA 当前功能为上限，也不将工具数量视为完整 Admin 覆盖证明。
 
-最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。登录授权、逐用户凭据刷新、Streamable HTTP 与本地代表性验收已串联；生产环境及目标产品客户端仍须单独验收。大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器只用于登录和授权，不依赖 Admin SPA 执行业务。
+最终交付目标是可部署的远程 Admin MCP；stdio 仅为开发调试与兼容入口，不作为完成标准。登录授权、逐用户凭据刷新、Streamable HTTP 与本地代表性验收已串联；生产环境及目标产品客户端仍须单独验收。大文件及快照导出独立收尾，不阻塞已有工具的远程链路。浏览器用于登录、授权及高风险人工审批；MCP 不驱动 Admin 页面来执行普通业务。
 
 远程授权方案已实现：独立 Node 22 LTS 运行 `oidc-provider 9.12.2`，MCP 与安装、构建、测试工具使用 Bun。Supabase 保持唯一用户目录；授权服务从真实 Supabase 登录取得 UUID，不建立第二套账号或按邮箱推断身份。采用 opaque access token、在线 introspection 和 PostgreSQL provider adapter；已提供两个服务入口，但尚未完成生产部署验收。
 
 ## Admin 融合进度
+
+联合交付清单见 [分阶段计划](../docs/admin-mcp-fusion.md)。共享 scope／金额／税率合同；Admin 增加客户创建和地址操作、商品高级字段、促销目标搜索、素材查询恢复及停用仓库只读历史。新库存调整在数据库强制要求启用仓库，已提交原键重放仍能返回历史资源。
+
+### 远程逐笔人工审批
+
+远程 `refund_paypal`、`commit_manual_refund`、`set_user_role`、`anonymize_customer`、`anonymize_user` 必须先取得逐笔人工批准。首次原参数调用返回 `HUMAN_APPROVAL_REQUIRED` 和 `approval_id`，**不执行业务**。用户在 Admin `/approvals`（Operations → Agent approvals）独立登录、核对身份／资源 UUID／客户端／金额和完整原参数后批准或拒绝。Agent 不能通过 MCP 创建批准决定，没有 `approved:true`，也没有通用 RPC 工具。
+
+随后只能显式重放相同参数并附上该 `approval_id`。批准绑定原用户、grant、client、resource、project、工具和完整参数，15 分钟有效且只消费一次；角色／匿名化还在持有业务记录锁时核验原状态指纹并原子执行。手工退款仍绑定原 preview_token；PayPal 批准绑定明确金额／行范围、restock 和原幂等键，现有资金校验仍由 Edge/数据库执行，不把批准解释为冻结余额或渠道结算。
+
+消费后失联显示 `consuming` 或返回未知结果。不得自动重放、换键或重新批准来绕过：先核对角色／客户／支付操作／账本，再由人决定是否以原业务键发起新的审批。`consumed` 仅表示执行已返回，不证明渠道退款已结算。页面显示最新 100 条，并支持按原审批 ID 查询更旧记录；不保存回执 payload 或原 PII 快照，只存参数和状态指纹。stdio 保留本机可信客户端确认边界，不能冒充具备远程服务端审批。
+
+可选调用审计现在只额外保存固定工具映射得到的业务类型与 UUID，不保存完整参数或结果；Admin 记录页提供导航链接，不自动执行命令。高风险审批参数属于单独的受控记录，不是调用日志 payload。SQL、宿主和浏览器验收分别见 `tests/mcp-action-approvals.test.ts`、`tests/unit/mcp-action-approvals.test.ts`、`scripts/admin-fusion-smoke.ts`。
 
 已落地第一批本人连接管理：Admin `/connections` 展示脱敏授权，支持单个和当前页明确 ID 集合的确认撤销；降级用户仍可进入个人安全页，但不进入业务页面。店铺库原子撤销本地授权、删除密文并登记清理任务，授权宿主按部署边界轮询任务，持久撤销上游 grant/token 家族后确认；回执丢失保留任务并安全重试。详见 [Admin 说明](../admin/README.md#本人的-mcp-连接)、[RPC 合同](../docs/api.md#本人-mcp-授权管理) 和 [运维顺序](OPERATIONS.md)。没有增加 MCP 工具或把管理 RPC 开放为任意工具调用。
 

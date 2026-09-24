@@ -132,6 +132,7 @@
       if (data.items.length !== 1)
         throw Error("No managed media matches that request ID.");
       const found = managedMedia(data.items[0]);
+      if (found.request_id !== requestId) throw Error("Media request identity mismatch.");
       const request: MediaRequest = {
         request_id: found.request_id,
         content_type: found.content_type,

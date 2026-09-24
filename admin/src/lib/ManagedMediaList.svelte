@@ -21,12 +21,15 @@
   let busy = $state(false);
   let error = $state("");
   let notice = $state("");
+  let appliedFilters = $state("");
+  let filterKey = $derived(JSON.stringify([requestId, stateFilter, uploadStatus, publication]));
 
   async function load(after: string | null = null, history = pages) {
     if (busy) return;
     busy = true;
     error = "";
     notice = "";
+    const requestedFilters = filterKey;
     try {
       const { data, error: queryError } = await supabase.rpc(
         "list_admin_managed_media",
@@ -49,6 +52,7 @@
       cursor = page.next_cursor;
       currentAfter = after;
       pages = history;
+      appliedFilters = requestedFilters;
     } catch (cause) {
       error = message(cause);
     } finally {
@@ -209,14 +213,14 @@
   </div>
   <div class="actions pager">
     <button
-      disabled={busy || !pages.length}
+      disabled={busy || filterKey !== appliedFilters || !pages.length}
       onclick={() => {
         const previous = pages.slice(0, -1);
         void load(pages.at(-1) ?? null, previous);
       }}>Previous</button
     >
     <button
-      disabled={busy || !cursor}
+      disabled={busy || filterKey !== appliedFilters || !cursor}
       onclick={() => {
         const history = [...pages, currentAfter];
         void load(cursor, history);

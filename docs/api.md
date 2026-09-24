@@ -18,6 +18,8 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 
 ## 本人 MCP 授权管理
 
+远程五类高风险调用另有逐笔人工审批，详见 [MCP 审批流程](../mcp/README.md#远程逐笔人工审批)。`list_my_mcp_action_approvals(p_id?)` 仅当前管理员可查询本人最新 100 条或指定原 UUID；返回 ID、工具、原参数、客户端、resource、状态、创建／过期时间，不返回内部指纹。`decide_my_mcp_action_approval(p_id,p_decision)` 只接受本人尚未过期的 pending 请求，决定为 approved/rejected；不直接执行业务。两者不注册为 MCP 工具。service-only 的 `mcp_action_approval_command` 不允许浏览器直接创建或消费批准。
+
 以下三个 RPC 仅允许当前非匿名 `authenticated` 用户管理本人授权，使用 `auth.uid()`，无用户 ID 入参；降级为 customer 后仍可撤销本人授权，不赋予任何业务或新授权创建权限。匿名、service-role 及他人授权不能通过这些个人入口操作；完整 binding 和凭据始终不返回浏览器。
 
 | RPC | 参数 | 返回 |

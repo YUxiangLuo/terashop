@@ -27,6 +27,14 @@ This runbook covers one directly TLS-terminating authorization process and one d
 
 ## Provisioning
 
+### Admin integration upgrade
+
+Apply the shop migrations through `20260924000003_mcp_audit_resources.sql` before upgrading the remote MCP host and Admin build. The new host fails closed if approval RPCs are unavailable; do not bypass this by reverting to raw high-risk dispatch. The audit RPC replaces its prior signature with compatible optional resource arguments, not an ambiguous overload. Keep the shop schema and generated `types/database.ts` at the same revision.
+
+The five high-risk remote tools now stage human approvals. Confirm the Admin `/approvals` route is reachable after independent login, then verify a disposable role change through stage → approve → exact replay and rejection/expiry. Never use a real refund for a smoke test. `consuming` requires business reconciliation, not an automatic retry; `consumed` is not payment settlement. Keep original approval IDs and refund idempotency keys. Admin manual bookkeeping remains on its existing preview/commit contract.
+
+Keep `PUBLIC_MCP_CONNECTION` resource, issuer and scopes aligned with the trusted authorization/MCP configurations and pre-registered clients. Keep `adminOrigin` an exact HTTPS origin. Public configuration display is not a health check. Enable auditing deliberately; resource links contain no token and confer no permission. Realtime may be rate-limited and is not a durable event log; approval recovery uses explicit reads. Production DNS/TLS, target Agent clients, quotas, backups and key-rotation rehearsal remain separate release gates requiring deployment authorization.
+
 ### Authorization database
 
 Use a dedicated PostgreSQL database, not the shop database. During a reviewed maintenance window, its non-superuser schema owner applies `mcp/auth/storage.sql` with `psql -v ON_ERROR_STOP=1 -f mcp/auth/storage.sql`. This is the only initial schema supplied here; there is no application auto-migration.
