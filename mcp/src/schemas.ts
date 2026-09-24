@@ -1,4 +1,5 @@
 import * as z from 'zod/v4';
+import { catalogMoney, taxRateScale } from '../../shared/admin-contracts';
 
 export const id = z.uuid();
 export const version = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -114,7 +115,11 @@ const money = z
   .number()
   .nonnegative()
   .max(Number.MAX_SAFE_INTEGER / 100);
-const inputMoney = z.number().nonnegative().max(9999999999.99).multipleOf(0.01);
+const inputMoney = z
+  .number()
+  .nonnegative()
+  .max(catalogMoney.maximum)
+  .multipleOf(10 ** -catalogMoney.decimalPlaces);
 const totals = {
   subtotal: money,
   discount_total: money,
@@ -1145,7 +1150,11 @@ export const metaobjectPage = z.strictObject({
   next_cursor: id.nullable(),
 });
 export const metadataDeletion = z.strictObject({ id, deleted: z.literal(true) });
-export const taxFraction = z.number().min(0).max(1).multipleOf(0.0001);
+export const taxFraction = z
+  .number()
+  .min(0)
+  .max(1)
+  .multipleOf(1 / taxRateScale);
 export const taxRateChanges = z.strictObject({
   name: z.string().optional(),
   country: z.string().optional(),

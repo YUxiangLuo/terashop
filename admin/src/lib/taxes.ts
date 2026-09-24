@@ -1,3 +1,5 @@
+import { taxRateScale } from "../../../shared/admin-contracts";
+
 export interface TaxRate {
   id: string;
   revision: number;
@@ -18,8 +20,8 @@ export function taxRatio(value: string): number {
     );
   const [whole, fraction = ""] = text.split(".");
   const units = Number(whole) * 100 + Number(fraction.padEnd(2, "0"));
-  if (units > 10000) throw Error("Tax percentage cannot exceed 100.");
-  return units / 10000;
+  if (units > taxRateScale) throw Error("Tax percentage cannot exceed 100.");
+  return units / taxRateScale;
 }
 
 export function taxPercent(rate: number): string {

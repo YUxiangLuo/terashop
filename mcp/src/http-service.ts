@@ -5,6 +5,7 @@ import { readOidcProviderConfiguration } from './oidc-host';
 import { createCredentialCipher } from './credentials';
 import { createAdminHttpHandler, MAX_MCP_REQUEST_BYTES } from './http';
 import { createRateLimit } from './rate-limit';
+import { adminScopes } from '../../shared/admin-contracts';
 
 const secret = z
   .string()
@@ -21,10 +22,7 @@ const configuration = z.strictObject({
     supabaseUrl: z.url(),
     serviceRoleKey: secret,
     anonKey: secret,
-    scopes: z
-      .array(z.enum(['store:read', 'store:write', 'store:payments', 'store:access', 'store:privacy']))
-      .min(1)
-      .max(5),
+    scopes: z.array(z.enum(adminScopes)).min(1).max(5),
     allowWrites: z.boolean(),
     adminOrigin: z.string().optional(),
     auditTools: z.boolean().optional(),

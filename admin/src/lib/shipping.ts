@@ -1,3 +1,5 @@
+import { catalogMoney } from "../../../shared/admin-contracts";
+
 export interface ShippingMethod {
   id: string;
   revision: number;
@@ -20,7 +22,7 @@ export function shippingMoney(value: string): number {
       "Enter a non-negative USD amount with at most two decimal places.",
     );
   const amount = Number(text);
-  if (amount > 9999999999.99)
+  if (amount > catalogMoney.maximum)
     throw Error("USD amounts cannot exceed 9999999999.99.");
   return amount;
 }

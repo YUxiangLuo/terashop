@@ -7,13 +7,11 @@ import type { createDownstreamLogin } from './login';
 import type { AdminScope } from './permissions';
 import type { createOidcApprovalJournal } from './oidc-journal';
 import { readBackendJson } from './backend-response';
+import { adminScopes } from '../../shared/admin-contracts';
 
 type Identity = Awaited<ReturnType<Awaited<ReturnType<typeof createDownstreamLogin>>['exchange']>>;
 type Cipher = Awaited<ReturnType<typeof createCredentialCipher>>;
-const scopesSchema = z
-  .array(z.enum(['store:read', 'store:write', 'store:payments', 'store:access', 'store:privacy']))
-  .min(1)
-  .max(5);
+const scopesSchema = z.array(z.enum(adminScopes)).min(1).max(5);
 
 // Internal, one-shot approval for ONE verified provider interaction. No HTTP/tool entrypoint.
 // The host must bind client/scopes to that interaction, show consent, and obtain identity

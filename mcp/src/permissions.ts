@@ -1,5 +1,6 @@
 // Explicit business policy, never inferred from tool names or annotations.
-export type AdminScope = 'store:read' | 'store:write' | 'store:payments' | 'store:access' | 'store:privacy';
+import type { AdminScope } from '../../shared/admin-contracts';
+export type { AdminScope } from '../../shared/admin-contracts';
 const read: readonly AdminScope[] = Object.freeze(['store:read']);
 const write: readonly AdminScope[] = Object.freeze(['store:write']);
 const payments: readonly AdminScope[] = Object.freeze(['store:write', 'store:payments']);

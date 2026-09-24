@@ -3,6 +3,7 @@ import type { AdminScope, ToolAuthorization } from './permissions';
 import { AdminBackend } from './backend';
 import type { createCredentialCipher, DownstreamCredentials } from './credentials';
 import { readBackendJson } from './backend-response';
+import { adminScopes } from '../../shared/admin-contracts';
 
 type CredentialCipher = Awaited<ReturnType<typeof createCredentialCipher>>;
 const storedCredentials = z.union([
@@ -10,7 +11,7 @@ const storedCredentials = z.union([
   z.strictObject({ revision: z.number().int().positive(), envelope: z.record(z.string(), z.unknown()) }),
 ]);
 
-const scope = z.enum(['store:read', 'store:write', 'store:payments', 'store:access', 'store:privacy']);
+const scope = z.enum(adminScopes);
 const text = z.string().refine((value) => value.trim().length > 0);
 const claims = z.object({
   active: z.literal(true),

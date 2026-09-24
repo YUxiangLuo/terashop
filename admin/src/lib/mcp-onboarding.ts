@@ -1,12 +1,4 @@
-import type { AdminScope } from "../../../mcp/src/permissions.ts";
-
-const scopes: AdminScope[] = [
-  "store:read",
-  "store:write",
-  "store:payments",
-  "store:access",
-  "store:privacy",
-];
+import { adminScopes as scopes, type AdminScope } from "../../../shared/admin-contracts.ts";
 
 // Public deployment data only. Never derive endpoints from grants or URL parameters.
 export function mcpOnboarding(raw: string | undefined) {

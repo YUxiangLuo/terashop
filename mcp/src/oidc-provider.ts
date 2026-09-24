@@ -1,6 +1,7 @@
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import Provider, { errors, type AdapterConstructor, type ClientMetadata } from 'oidc-provider';
 import * as z from 'zod/v4';
+import { adminScopes } from '../../shared/admin-contracts';
 
 const text = z
   .string()
@@ -36,10 +37,7 @@ export const oidcProviderConfiguration = z.strictObject({
     .refine((value) => new URL(value).pathname === '/')
     .transform((value) => new URL(value).origin),
   resource: https,
-  scopes: z
-    .array(z.enum(['store:read', 'store:write', 'store:payments', 'store:access', 'store:privacy']))
-    .min(1)
-    .max(5),
+  scopes: z.array(z.enum(adminScopes)).min(1).max(5),
   signingKey: z.strictObject({
     kty: z.literal('EC'),
     crv: z.literal('P-256'),
