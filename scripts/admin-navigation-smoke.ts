@@ -58,13 +58,19 @@ try {
   const routes = [
     ['/quotes', 'Orders'],
     ['/categories', 'Products'],
+    ['/reviews', 'Products'],
+    ['/metadata', 'Products'],
     ['/locations', 'Inventory'],
+    ['/inventory/transfers', 'Inventory'],
     ['/customers', 'Customers'],
+    ['/users', 'Customers'],
     ['/promotions', 'Promotions'],
     ['/reconciliation', 'Operations'],
     ['/payment-events', 'Operations'],
     ['/outbox', 'Operations'],
+    ['/reports', 'Operations'],
     ['/shipping', 'Settings'],
+    ['/settings', 'Settings'],
     ['/taxes', 'Settings'],
     ['/orders', 'Orders'],
     ['/inventory', 'Inventory'],
@@ -99,8 +105,15 @@ try {
   await click('Menu');
   await browser('wait', 'dialog[open]');
   await check(`document.querySelector('dialog').contains(document.activeElement)`);
-  for (let i = 0; i < 20; i++) await browser('press', 'Tab');
-  await check(`document.querySelector('dialog').contains(document.activeElement)`);
+  // Native Tab traversal can expose body as activeElement at the browser-chrome
+  // boundary. Test every step: no background control may receive focus.
+  for (let i = 0; i < 25; i++) {
+    await browser('press', 'Tab');
+    await check(`document.querySelector('dialog').matches(':modal') && (document.querySelector('dialog').contains(document.activeElement) || document.activeElement === document.body)`);
+  }
+  await browser('eval', `document.querySelector('.topbar button').focus()`);
+  await check(`document.activeElement !== document.querySelector('.topbar button')`);
+  await browser('focus', 'dialog [aria-label="Close navigation"]');
   await browser('press', 'Escape');
   await check(`!document.querySelector('dialog').open && document.activeElement.textContent.trim()==='Menu'`);
   await click('Menu');

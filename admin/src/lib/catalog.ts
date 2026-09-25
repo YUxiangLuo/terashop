@@ -13,6 +13,7 @@ export interface ProductVariant {
   price: number;
   compare_at_price: number | null;
   cost: number | null;
+  position?: number;
   is_active: boolean;
   track_inventory: boolean;
   option_value_ids: string[];
@@ -71,6 +72,13 @@ export function validateVariants(
   if (active && !variants.length)
     throw new Error("Add a variant before publishing.");
   for (const variant of variants) {
+    if (
+      variant.position !== undefined &&
+      (!Number.isInteger(variant.position) ||
+        variant.position < -2147483648 ||
+        variant.position > 2147483647)
+    )
+      throw new Error("Variant position must be a signed 32-bit integer.");
     if (!isCatalogMoney(variant.price))
       throw new Error("Enter a valid price for every variant.");
     if (

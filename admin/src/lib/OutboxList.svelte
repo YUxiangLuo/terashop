@@ -8,6 +8,9 @@
   let cursor = $state<string | null>(null);
   let busy = $state(true),
     error = $state("");
+  let reasons = $state<Record<string, string>>({});
+  let submitted = $state<Record<string, boolean>>({});
+  let notice = $state("");
   let alive = true;
   onMount(() => {
     void load();
@@ -15,6 +18,38 @@
       alive = false;
     };
   });
+  async function redrive(item: Page["items"][number]) {
+    const reason = reasons[item.id]?.trim();
+    if (busy || submitted[item.id] || !reason || item.status !== "exhausted")
+      return;
+    if (
+      !confirm(
+        `Requeue event ${item.event_id} at exactly ${item.attempts} attempts? This does not confirm delivery or replay payment processing.`,
+      )
+    )
+      return;
+    busy = true;
+    error = "";
+    notice = "";
+    submitted[item.id] = true;
+    try {
+      const result = await supabase.rpc("redrive_outbox_event", {
+        event_id: item.event_id,
+        expected_attempt: item.attempts,
+        reason,
+      });
+      if (result.error) throw result.error;
+      if (typeof result.data !== "boolean")
+        throw Error("Unconfirmed redrive response.");
+      notice = result.data
+        ? "Event requeued. Refresh Outbox to check delivery state."
+        : "Event state or attempts changed. Nothing was requeued; refresh and review before another action.";
+    } catch (cause) {
+      error = `${message(cause)} Outcome may be unknown. Refresh Outbox and inspect this original event before another action.`;
+    } finally {
+      busy = false;
+    }
+  }
   async function load() {
     busy = true;
     error = "";
@@ -60,6 +95,7 @@
 
 {#if error}<p role="alert" class="notice error">{error}</p>
   <button disabled={busy} onclick={load}>Retry Outbox read</button>{/if}
+{#if notice}<p role="status" class="notice">{notice}</p>{/if}
 <div class="table-wrap">
   <table>
     <thead
@@ -81,7 +117,19 @@
             ><span class="badge">{item.status}</span>
             <p>Cumulative attempts: {item.attempts}</p>
             <p>Retry window starts at: {item.retry_start}</p>
-            <p>Error flag: {item.has_error ? "Yes" : "No"}</p></td
+            <p>Error flag: {item.has_error ? "Yes" : "No"}</p>
+            {#if item.status === "exhausted"}<label
+                >Redrive reason<input
+                  maxlength="4000"
+                  bind:value={reasons[item.id]}
+                  disabled={busy || submitted[item.id]}
+                /></label
+              ><button
+                disabled={busy ||
+                  submitted[item.id] ||
+                  !reasons[item.id]?.trim()}
+                onclick={() => redrive(item)}>Requeue exhausted event</button
+              >{/if}</td
           >
           <td
             ><p>{item.aggregate_type}</p>

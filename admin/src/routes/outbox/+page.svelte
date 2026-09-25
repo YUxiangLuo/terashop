@@ -23,7 +23,9 @@
   <div>
     <p class="eyebrow">Delivery operations</p>
     <h1>Outbox events</h1>
-    <p class="muted">Read-only delivery metadata and latest redrive audit.</p>
+    <p class="muted">
+      Delivery metadata, explicit exhausted-event redrive and latest audit.
+    </p>
   </div>
   <button onclick={() => refresh++}>Refresh Outbox</button>
 </div>
@@ -47,8 +49,9 @@
   </form>
   <p class="notice">
     An aggregate identifies the owning resource, not the event UUID or numeric
-    record ID. Delivery status does not prove payment or customer receipt.
-    Read-only: no claim, acknowledgement or redrive controls.
+    record ID. Delivery status does not prove payment or customer receipt. Only
+    exhausted events can be explicitly requeued at their observed attempt count.
+    No worker claim or acknowledgement controls.
   </p>
   <p class="small muted">
     Attempt counts are cumulative across retry windows. Use the returned status,

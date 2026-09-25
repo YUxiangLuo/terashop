@@ -10,11 +10,13 @@
     variants = $bindable(),
     savedIds,
     onremove,
+    productId,
   }: {
     options: ProductOption[];
     variants: ProductVariant[];
     savedIds: string[];
     onremove: (id: string) => void;
+    productId?: string;
   } = $props();
   let price = $state<number | undefined>(undefined);
   let feedback = $state("");
@@ -155,6 +157,12 @@
     <div class="variant-row">
       <div class="section-heading">
         <p class="small"><strong>{variantLabel(variant, options)}</strong></p>
+        {#if productId && savedIds.includes(variant.id)}
+          <a
+            href={`/metadata/values?owner_type=variant&owner_id=${variant.id}&product=${productId}`}
+            >Variant metafields</a
+          >
+        {/if}
         {#if !savedIds.includes(variant.id)}<button
             type="button"
             onclick={() => onremove(variant.id)}>Remove new variant</button
@@ -189,6 +197,16 @@
             aria-label={`Variant ${index + 1} barcode`}
             bind:value={variant.barcode}
             maxlength="200"
+          /></label
+        >
+        <label
+          >Display position<input
+            aria-label={`Variant ${index + 1} position`}
+            type="number"
+            min="-2147483648"
+            max="2147483647"
+            step="1"
+            bind:value={variant.position}
           /></label
         >
         <label

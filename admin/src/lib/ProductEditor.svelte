@@ -168,7 +168,7 @@
         },
         ...optionChanges(options, product?.options ?? []),
         category_ids: categories.map((category) => category.id),
-        // Omitted position and metafields are extension data and remain untouched.
+        // Metafields have their own revision-checked editor and remain untouched here.
         variants: variants.map(
           ({
             id,
@@ -177,6 +177,7 @@
             price,
             compare_at_price,
             cost,
+            position,
             is_active,
             track_inventory,
           }) => ({
@@ -186,6 +187,7 @@
             price,
             compare_at_price,
             cost,
+            ...(position === undefined ? {} : { position }),
             is_active,
             track_inventory,
           }),
@@ -250,6 +252,12 @@
     </p>
   </div>
   <div class="actions">
+    {#if product}<a
+        class="button"
+        href={`/metadata/values?owner_type=product&owner_id=${id}`}
+        >Metafields</a
+      ><a class="button" href={`/media/public?product=${id}`}>Public media</a
+      >{/if}
     <button onclick={reload} disabled={busy || mediaBusy || inventoryUnsettled}
       >Reload saved version</button
     >{#if editable}<button
@@ -359,6 +367,7 @@
           <VariantEditor
             bind:options
             bind:variants
+            productId={product?.id}
             savedIds={product?.variants.map((variant) => variant.id) ?? []}
             onremove={(id) => {
               variants = variants.filter((variant) => variant.id !== id);

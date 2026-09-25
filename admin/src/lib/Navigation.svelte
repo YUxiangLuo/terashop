@@ -20,6 +20,8 @@
         ["Products", "/"],
         ["Categories", "/categories"],
         ["Managed media", "/media"],
+        ["Reviews", "/reviews"],
+        ["Metadata", "/metadata"],
       ],
     },
     {
@@ -28,12 +30,16 @@
       links: [
         ["Stock", "/inventory"],
         ["Warehouses", "/locations"],
+        ["Transfer lookup", "/inventory/transfers"],
       ],
     },
     {
       name: "Customers",
       href: "/customers",
-      links: [["Customers", "/customers"]],
+      links: [
+        ["Customers", "/customers"],
+        ["Users & roles", "/users"],
+      ],
     },
     {
       name: "Promotions",
@@ -48,6 +54,7 @@
         ["Payment events", "/payment-events"],
         ["Event delivery (Outbox)", "/outbox"],
         ["Agent approvals", "/approvals"],
+        ["Reports & export", "/reports"],
       ],
     },
     {
@@ -56,6 +63,7 @@
       links: [
         ["Shipping & rates", "/shipping"],
         ["Tax rates", "/taxes"],
+        ["Shop settings", "/settings"],
       ],
     },
   ];
@@ -125,8 +133,14 @@
           {#if group.links.length > 1 && expanded === group.name}
             <div class="subnav">
               {#each group.links as [label, href]}
-                <a {href} aria-current={matches(href) ? "page" : undefined}
-                  >{label}</a
+                <a
+                  {href}
+                  aria-current={matches(href) &&
+                  !group.links.some(
+                    ([, other]) => other.length > href.length && matches(other),
+                  )
+                    ? "page"
+                    : undefined}>{label}</a
                 >
               {/each}
             </div>

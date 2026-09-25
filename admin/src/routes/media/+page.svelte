@@ -12,5 +12,6 @@
       clean up eligible private settled media.
     </p>
   </div>
+  <a class="button" href="/media/public">Public upload compatibility tools</a>
 </div>
 <ManagedMediaList />

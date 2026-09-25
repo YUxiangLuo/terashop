@@ -35,6 +35,7 @@
   let addressEditor = $state.raw<CustomerAddress | "new" | null>(null);
   let addressUnsettled = $state(false);
   let addressBusy = $state(false);
+  let anonymizeConfirmation = $state("");
   let alive = true;
   let request = 0;
   let dirty = $derived(!!customer && JSON.stringify(fields) !== baseline);
@@ -222,6 +223,50 @@
       if (alive) addressBusy = false;
     }
   }
+  async function anonymize() {
+    if (
+      !customer ||
+      loading ||
+      uncertain ||
+      dirty ||
+      addressBusy ||
+      addressUnsettled ||
+      readOnly ||
+      anonymizeConfirmation !== `ANONYMIZE ${customer.id}`
+    )
+      return;
+    if (
+      !window.confirm(
+        "Irreversibly anonymize this customer's contact data, addresses, carts, and metafields? Historical order snapshots and Auth credentials remain.",
+      )
+    )
+      return;
+    loading = true;
+    error = "";
+    notice = "";
+    try {
+      const { data, error: rpcError } = await supabase.rpc(
+        "anonymize_customer",
+        { customer_id: customer.id },
+      );
+      if (rpcError) throw rpcError;
+      const receipt = data as { id?: string; anonymized_at?: unknown };
+      if (
+        !receipt ||
+        receipt.id?.toLowerCase() !== customer.id.toLowerCase() ||
+        typeof receipt.anonymized_at !== "string"
+      )
+        throw Error("Invalid anonymization receipt.");
+      uncertain = true;
+      notice =
+        "Customer anonymization submitted. Auth credentials were not deleted. Reload the original customer before another mutation.";
+    } catch (cause) {
+      uncertain = true;
+      error = `${message(cause)} The outcome may be unknown. Reload the original customer ID; do not retry automatically.`;
+    } finally {
+      loading = false;
+    }
+  }
 </script>
 
 <svelte:head
@@ -229,7 +274,8 @@
 >
 <svelte:window
   onbeforeunload={(event) => {
-    if (loading || dirty || addressUnsettled || addressBusy) event.preventDefault();
+    if (loading || dirty || addressUnsettled || addressBusy)
+      event.preventDefault();
   }}
 />
 <div class="page-heading">
@@ -417,7 +463,10 @@
       {#if addressEditor}<CustomerAddressEditor
           {customer}
           address={addressEditor === "new" ? undefined : addressEditor}
-          onstate={(value, busy) => { addressUnsettled = value; addressBusy = busy; }}
+          onstate={(value, busy) => {
+            addressUnsettled = value;
+            addressBusy = busy;
+          }}
           oncancel={() => {
             addressEditor = null;
             addressUnsettled = false;
@@ -428,6 +477,35 @@
               addressEditor === "new" ? "Address added." : "Address saved.",
             )}
         />{/if}
+      {#if !readOnly}<section class="card fields">
+          <h2>Privacy</h2>
+          <p>
+            Irreversibly removes current contact data, addresses, carts, and
+            metafields. Historical order snapshots remain. This does not delete
+            or revoke Auth credentials.
+          </p>
+          <label
+            >Type <code>ANONYMIZE {customer.id}</code><input
+              autocomplete="off"
+              bind:value={anonymizeConfirmation}
+              disabled={loading ||
+                uncertain ||
+                dirty ||
+                addressBusy ||
+                addressUnsettled}
+            /></label
+          >
+          <button
+            onclick={anonymize}
+            disabled={loading ||
+              uncertain ||
+              dirty ||
+              addressBusy ||
+              addressUnsettled ||
+              anonymizeConfirmation !== `ANONYMIZE ${customer.id}`}
+            >Anonymize customer</button
+          >
+        </section>{/if}
     </aside>
   </div>
 {/if}
