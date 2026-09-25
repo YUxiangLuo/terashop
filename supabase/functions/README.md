@@ -4,7 +4,7 @@
 
 ## 私有媒体通路
 
-`managed-media` 使用运行时 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY`，无需支付渠道配置。`verify_jwt=false` 仅关闭网关旧式校验；handler 经 Auth 验证用户 JWT，service-only `managed_media_command` 再校验非匿名管理员 actor。MCP 不持有 service key。生产部署须包含此函数及 SQL/Storage 基线；禁止客户端直调该 RPC 或写入 `media-staging`、`catalog-media/managed/` 命名空间。
+`managed-media` 使用运行时 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_ROLE_KEY`，无需支付渠道配置。`verify_jwt=false` 仅关闭网关旧式校验；handler 经 Auth 验证用户 JWT，service-only `managed_media_command` 再校验非匿名管理员 actor。Admin/MCP 媒体调用使用用户 JWT，不向客户端提供 service key。生产部署须包含此函数及配套 SQL/Storage 结构；禁止客户端直调该 RPC 或写入 `media-staging`、`catalog-media/managed/` 命名空间。
 
 接受 POST JSON（最大 1,400,000 bytes）：`action=upload` 带 `request_id,content_type,data_base64`；`get/recover/publish/discard/delete/recover_delete` 仅带 `media_id`。无 Origin 的 MCP 调用保持兼容；浏览器必须匹配独立的服务端 `MEDIA_ALLOWED_ORIGINS` 精确列表（逗号分隔，默认空，生产 HTTPS），不继承支付来源。允许来源的 OPTIONS 预检不需要登录，POST 始终校验身份与 admin 角色。未知字段拒绝，不接收 URL、文件路径、actor 或客户端摘要。上传仅允许 1 byte–1 MiB JPEG/PNG/WebP；MIME/摘要核验不等于图片解码或内容安全扫描。输出仅含 `id,request_id,state,content_type,byte_size,sha256,published,upload_status`，无私有读取 URL。MCP/Admin 在 `published=true` 时从配置 origin 构造公开 URL；Admin 接入及标签页恢复边界见 [图片权限与失败处理](../../admin/README.md#图片权限与失败处理)。
 
@@ -115,8 +115,8 @@ PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard
 
 ## 开发与发布验证
 
-项目尚未部署，数据库改动通过修改基线并重建本地环境验证，见 [数据库开发](../../docs/database.md)。不维护旧 schema 或旧 handler 的升级兼容。
-首次发布按以下清单验收，之后固定迁移并设计前向升级：
+项目尚未部署。数据库由初始基线与后续增量迁移共同组成，完整重建和共享环境升级边界见 [数据库开发](../../docs/database.md)。部署时配套核对 SQL、handler 和客户端版本，不假定旧 schema/handler 兼容。
+首次发布按以下清单验收，之后采用只追加的前向迁移：
 
 1. 配置真实商品、配送范围和税务规则；当前仅支持国家级比例税，无匹配规则时零税额不代表免税。
 2. 初始化完整数据库，再部署匹配的函数和静态客户端；核对 HTTPS、精确 CORS Origin、实际回调路径和密钥隔离。

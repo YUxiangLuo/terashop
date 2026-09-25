@@ -7,6 +7,7 @@
 ```bash
 bun run typecheck
 bun run storefront:check
+bun run admin:check
 bun run test:unit
 bun run docs:check
 ```
@@ -34,6 +35,24 @@ bun run test:current tests/admin.test.ts --rerun-each=2 --randomize --seed=6149
 
 `tests/admin-operations.test.ts` 覆盖运维摘要分页、同时间戳游标、敏感字段排除、Inbox 自动重试次数边界，以及 Outbox 管理员身份绑定、并发重投审计和 Worker 状态保护；同时验证 Worker 命令不对管理员开放。
 
+## MCP 分层验证
+
+| 层次 | 命令 | 环境与边界 |
+| --- | --- | --- |
+| Node 协议兼容 | `bun scripts/mcp-oidc-compat.ts` | 固定 Node LTS Docker；合成身份，不验证真实登录 |
+| 持久化/TLS/生命周期 | `bun scripts/mcp-oidc-compat.ts --with-storage` | 一次性 Docker PostgreSQL，不连接店铺库；包含故障注入，不是公网验收 |
+| 真实授权与 MCP | `bun run test:current tests/mcp-oidc-interaction.test.ts` | 本地 Supabase/Auth/SMTP、Docker、OpenSSL；真实 HTTPS 子场景及代表性写入/刷新/撤销恢复 |
+| 浏览器登录与同意 | `MCP_BROWSER=1 bun run test:current tests/mcp-oidc-interaction.test.ts -t 'node:'` | 另需 agent-browser、Chromium、certutil；邮件跨标签页、明确批准/拒绝、重启/断网失效及回执丢失 |
+| 五分钟自然过期 | 上述浏览器命令增加 `MCP_BROWSER_EXPIRY=1` | 不修改 TTL/时钟，约六分钟；覆盖期限两侧及重新授权 |
+| 离线维护 | `bun run test:current tests/mcp-oidc-maintenance.test.ts` | 可丢弃本地数据库；保留撤销标记和待恢复记录 |
+| 备份恢复演练 | `bun scripts/mcp-recovery-drill.ts` | 独立 Docker 内真实 pg_dump/pg_restore，仅 issuer 数据，不代表完整 Supabase 恢复 |
+
+浏览器显式信任一次性证书，不关闭 TLS 校验、不注入身份或 Cookie；从真实本地 SMTP 获取验证链接。测试客户端并非目标 Agent 产品，不把代表性读写扩张为全部工具或渠道资金验收。具体故障场景见 [浏览器夹具](../tests/support/oidc-browser.ts) 与 [联合测试](../tests/mcp-oidc-interaction.test.ts)。
+
+可用绝对路径环境变量 `MCP_BROWSER_SCREENSHOT`、`MCP_BROWSER_FAILURE_SCREENSHOT`、`MCP_BROWSER_OFFLINE_SCREENSHOT`、`MCP_BROWSER_LOST_RESPONSE_SCREENSHOT`、`MCP_BROWSER_DISCARDED_RECEIPT_SCREENSHOT` 保存相应状态；自然过期模式另用 `MCP_BROWSER_EXPIRY_SCREENSHOT`。查看截图前后都不得泄漏 token、邮件验证链接或个人资料。
+
+媒体 Edge 网关测试需在独立终端运行 `bunx --no-install supabase functions serve --network-id tera-headless-loopback`，新增函数后重载，再执行 `bun run test:current tests/managed-media.test.ts`。直接调用 handler 的浏览器烟测不能替代网关验收。
+
 ## Admin / MCP 本地融合验收
 
 先运行本地 Supabase 和 `bun run admin:dev`，确认 Admin 的实际端口；另一个终端运行：
@@ -43,7 +62,7 @@ MCP_BROWSER=1 MCP_ADMIN_URL=http://127.0.0.1:5174 \
   bun run test:current tests/mcp-oidc-interaction.test.ts -t 'node: durable'
 ```
 
-需要 Docker、OpenSSL 和 `agent-browser`。沿用已有 Node LTS OAuth 宿主、Bun HTTPS MCP、真实本地 Auth/SMTP 和独立临时 issuer 数据库；临时证书由浏览器信任，不关闭 TLS 校验，无需公网域名。`MCP_ADMIN_URL` 只接受精确回环 origin，并要求 `MCP_BROWSER=1`；仅此模式开启测试 MCP 的调用审计和浏览器授权的 `store:write`，不更改部署默认值。
+需要上述浏览器环境。沿用 Node LTS OAuth 宿主、Bun HTTPS MCP、真实本地 Auth/SMTP 和独立临时 issuer 数据库，无需公网域名。`MCP_ADMIN_URL` 只接受精确回环 origin，并要求 `MCP_BROWSER=1`；仅此模式开启测试 MCP 的调用审计和浏览器授权的 `store:write`，不更改部署默认值。
 
 在原 OAuth 故障回归之后，同一真实授权继续创建停用分类，再独立登录 Admin 核对名称、负排序值与停用状态。Admin 修改后，MCP 能读取新事实，携带原始 `updated_at` 的旧请求被拒绝。连接页必须显示真正由 MCP 产生的成功／拒绝审计，不包含参数；页面明确撤销后，用同一 bearer 直接发送读写均须返回 401，商品目录事实不被修改。没有注入 Admin session、手工造授权／审计或自动换 token。夹具结束清理本轮分类、账户、审计、授权、临时数据库和进程；失败仍会尝试清理。
 

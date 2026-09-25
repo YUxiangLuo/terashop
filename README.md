@@ -1,6 +1,6 @@
 # tera-headless
 
-基于 Supabase 的 Headless 电商项目。PostgreSQL 承担通用交易逻辑与权限控制，TypeScript Edge Functions 适配 PayPal；`storefront/` 提供女装 SvelteKit SSG 示例，`admin/` 提供独立 CSR 管理端。
+基于 Supabase 的单店 Headless 电商项目：PostgreSQL 负责交易与权限，Edge Functions 适配 PayPal，SvelteKit 提供 Storefront / Admin，MCP 提供 Agent 管理入口。
 
 一个 Supabase 项目承载一个店铺，统一使用 **USD**，结账使用默认仓。后端支持游客线上交易；前台目前只实现目录、实时库存、购物袋和库存预占报价，**没有下单或支付 UI，尚未完成真实 PayPal Sandbox 验收**。
 
@@ -9,10 +9,10 @@
 需要 Docker 和 Bun（版本见 `package.json`）。以下命令仅用于可重置的本地开发数据库：
 
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run start             # API :54321 / Studio :54323 / DB :54322
 bun run setup             # 重放迁移 + 演示数据 + 上传 Storage 图片，会清空本地数据库
-bun run storefront:dev   # 打开终端显示的前台地址
+bun run storefront:dev    # 打开终端显示的前台地址
 ```
 
 使用 `bun run start` 而非直接调用 Supabase CLI：项目网络将发布端口限制到 `127.0.0.1`，包括含验证邮件的 Mailpit。已有全网卡监听容器须先 `bun run stop` 再启动；不更改系统防火墙。
@@ -32,27 +32,31 @@ bun run storefront:dev   # 打开终端显示的前台地址
 
 ```text
 storefront/             SvelteKit 静态女装站
-admin/                  SvelteKit CSR MVP：规格/变体/分类/图片、库存工作台与流水、订单/备注/发货
-mcp/                    Admin MCP：独立 stdio 客户端层，领域覆盖持续补齐
-supabase/migrations/   六个初始化基线文件；开发期可直接修改并重建
-supabase/functions/    支付入口与共享适配代码
-supabase/seed.sql      本地演示数据
-tests/                 API、handler、金额和数据库并发回归
-types/database.ts      自动生成的数据库类型，不手改
+admin/                  CSR 管理端：目录、客户、库存、订单、配置与 Agent 人工接管
+mcp/                    stdio / HTTPS 管理工具、独立 OAuth 授权服务
+shared/                 Admin / MCP 共用的纯业务输入合同
+supabase/migrations/     六个初始基线及后续增量迁移，按文件顺序完整应用
+supabase/functions/      支付、媒体与共享适配代码
+supabase/seed.sql        本地演示数据
+tests/                  单元、API、handler、身份与数据库并发回归
+types/database.ts       自动生成的数据库类型，不手改
 ```
 
 ## 文档入口
 
 - [Storefront](storefront/README.md)：运行、静态部署、当前能力与限制。
 - [Admin](admin/README.md)：管理员初始化、SPA 运行与部署、图片上传及权限。
-- [Admin MCP](mcp/README.md)：本地 agent 接入、管理员权限、工具合同与完整覆盖计划。
+- [Admin MCP](mcp/README.md)：stdio / 远程接入、工具边界与逐笔人工审批。
+- [MCP 运维](mcp/OPERATIONS.md)：直接 TLS 部署、连接撤销、密钥轮换与恢复。
 - [API 使用参考](docs/api.md)：参数、权限、返回值与调用重试。
 - [架构决策](docs/architecture-decisions.md)：金额、库存、权限、支付与退款不变量及演进边界。
-- [数据库开发](docs/database.md)：基线文件职责、SQL 检查和历史审阅证据。
+- [数据库开发](docs/database.md)：基线与增量迁移、SQL 检查和生成类型。
 - [测试指南](docs/testing.md)：运行/筛选/重跑、夹具清理与覆盖边界。
 - [PayPal 前台接入](docs/storefront-paypal.md)：SDK、返回页、支付状态与浏览器恢复。
 - [支付与部署](supabase/functions/README.md)：渠道配置、Webhook、必需 Worker 和发布验证。
 - [.env.example](.env.example)：环境变量模板，不包含有效凭据。
+
+README 维护当前能力与运行入口；参数只在 API 文档维护，不变量在架构决策维护，执行命令和验收边界在测试/运维文档维护。历史计划与测试计数不是当前检出的验证结果。
 
 ## 开发检查
 
