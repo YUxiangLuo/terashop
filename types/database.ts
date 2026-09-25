@@ -1929,6 +1929,10 @@ export type Database = {
         Returns: Json
       }
       get_checkout_quote: { Args: { quote_id: string }; Returns: Json }
+      get_customer_creation_result: {
+        Args: { idempotency_key: string }
+        Returns: string
+      }
       get_customer_order: { Args: { order_id: string }; Returns: Json }
       get_inventory_availability: {
         Args: { location_id?: string; variant_id: string }

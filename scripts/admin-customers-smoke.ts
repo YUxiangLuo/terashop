@@ -8,6 +8,7 @@ const email = `${session}@example.test`,
   password = crypto.randomUUID() + 'Aa1!';
 let user = '',
   customer = '',
+  pendingCustomer = '',
   recoveredCustomer = '';
 async function api(path: string, method: string, body?: unknown) {
   const response = await fetch(`${config.API_URL}${path}`, {
@@ -119,9 +120,28 @@ try {
   await browser('wait', '--text', 'New customer');
   await browser('fill', 'form.card label:first-of-type input', 'Smoke Customer');
   await browser('fill', 'form.card input[type=email]', 'customer@example.test');
+  const nonblankRequest = (await browserUrl()).searchParams.get('request');
+  await browser('eval', `(() => {
+    const original = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const response = await original(...args);
+      if(String(args[0]?.url ?? args[0]).includes('/rpc/create_customer') && response.ok) {
+        window.reviewCreatedId = (await response.clone().json()).id;
+        throw Error('Lost nonblank create receipt');
+      }
+      return response;
+    };
+  })()`);
   await click('Create customer');
+  await browser('wait', '--text', 'Retry customer creation');
+  customer = JSON.parse(await browser('eval', 'window.reviewCreatedId'));
+  // A new document has the URL key, but none of the original in-memory PII.
+  await browser('tab', 'new', `${origin.origin}/customers/new?request=${nonblankRequest}`);
+  await browser('wait', '--url', `**/customers/${customer}`);
   await browser('wait', '--text', 'Smoke Customer');
-  customer = (await browserUrl()).pathname.split('/').pop()!;
+  const recovered = await api('/rest/v1/rpc/get_admin_customer', 'POST', { customer_id: customer });
+  if (recovered.email !== 'customer@example.test' || recovered.full_name !== 'Smoke Customer')
+    throw Error('Nonblank reload recovery changed the original customer');
   await click('Add address');
   await browser('fill', 'form[aria-label="New address"] label:nth-of-type(2) input', 'Smoke Recipient');
   await browser('fill', 'form[aria-label="New address"] label:nth-of-type(4) input', 'US');
@@ -156,14 +176,45 @@ try {
   });
   if (saved.full_name !== 'Smoke Customer' || saved.addresses.length)
     throw Error('Customer lifecycle state mismatch');
+  const pendingKey = crypto.randomUUID();
+  await browser('open', `${origin.origin}/customers/new?request=${pendingKey}`);
+  await browser('wait', '--text', 'No committed customer was found yet.');
+  await browser('eval', `(() => {
+    if(document.querySelector('form.card') || document.querySelector('input')) throw Error('Recovery must not accept new contact details');
+    window.reviewWrites = 0;
+    const original = window.fetch.bind(window);
+    window.reviewFetch = original;
+    window.fetch = async (...args) => {
+      const url = String(args[0]?.url ?? args[0]);
+      if(url.includes('/rpc/create_customer')) window.reviewWrites++;
+      if(url.includes('/rpc/get_customer_creation_result')) throw Error('Recovery offline');
+      return original(...args);
+    };
+  })()`);
+  await browser('screenshot', '/tmp/admin-customer-recovery-mobile.png', '--full');
+  await click('Check creation result');
+  await browser('wait', '--text', 'The original creation result could not be checked.');
+  await browser('set', 'viewport', '1280', '900');
+  await browser('screenshot', '/tmp/admin-customer-recovery-error.png', '--full');
+  if ((await browserUrl()).searchParams.get('request') !== pendingKey)
+    throw Error('Recovery changed the pending request key');
+  if (JSON.parse(await browser('eval', 'window.reviewWrites')) !== 0)
+    throw Error('Recovery dispatched a creation');
+  pendingCustomer = (await api('/rest/v1/rpc/create_customer', 'POST', {
+    idempotency_key: pendingKey, full_name: 'Late committed customer',
+  })).id;
+  await browser('eval', 'window.fetch = window.reviewFetch');
+  await click('Check creation result');
+  await browser('wait', '--url', `**/customers/${pendingCustomer}`);
+  await browser('wait', '--text', 'Late committed customer');
   console.log(
-    'Customer smoke passed: blank lost-receipt navigation protection, exact-key recovery and address lifecycle.',
+    'Customer smoke passed: exact retry, nonblank lost-receipt reopen, missing/offline/late-commit recovery and address lifecycle.',
   );
 } finally {
   try {
     await browser('close');
   } catch {}
-  for (const customerId of [customer, recoveredCustomer].filter(Boolean)) {
+  for (const customerId of [customer, recoveredCustomer, pendingCustomer].filter(Boolean)) {
     const sessionData = await api('/auth/v1/token?grant_type=password', 'POST', { email, password });
     const response = await fetch(`${config.API_URL}/rest/v1/rpc/anonymize_customer`, {
       method: 'POST',

@@ -59,6 +59,25 @@ export async function getCustomer(id: string): Promise<CustomerDetail | null> {
   return result.data === null ? null : detail(result.data, id, null);
 }
 
+export async function getCustomerCreationResult(
+  idempotencyKey: string,
+): Promise<string | null> {
+  const result = await supabase.rpc("get_customer_creation_result", {
+    idempotency_key: idempotencyKey,
+  });
+  if (result.error) throw result.error;
+  if (
+    result.data !== null &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      result.data,
+    )
+  )
+    throw Error(
+      "Invalid customer recovery response. Check the creation result again.",
+    );
+  return result.data;
+}
+
 export async function createCustomer(
   idempotencyKey: string,
   fields: { email?: string; full_name?: string; phone?: string },

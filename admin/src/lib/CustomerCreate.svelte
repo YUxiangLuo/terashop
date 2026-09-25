@@ -4,7 +4,7 @@
   import { beforeNavigate } from "$app/navigation";
   import { onMount } from "svelte";
   import { message } from "./api";
-  import { createCustomer } from "./customers";
+  import { createCustomer, getCustomerCreationResult } from "./customers";
   import { customerCreateArguments } from "./customer-draft";
   let fields = $state({ full_name: "", email: "", phone: "" });
   let busy = $state(false);
@@ -12,6 +12,9 @@
   let uncertain = $state(false);
   let error = $state("");
   let key = $state(page.url.searchParams.get("request") ?? "");
+  // A reopened URL retains identity, not the original private request body.
+  const recovering = Boolean(page.url.searchParams.get("request"));
+  let recoveryMessage = $state("Checking the original creation result…");
   let submitted = $state.raw<{
     email?: string;
     full_name?: string;
@@ -22,7 +25,10 @@
       (busy || submitted !== null || Object.values(fields).some(Boolean)),
   );
   onMount(() => {
-    if (key) return;
+    if (recovering) {
+      void recover();
+      return;
+    }
     key = crypto.randomUUID();
     const url = new URL(page.url);
     url.searchParams.set("request", key);
@@ -44,7 +50,7 @@
   });
   async function save(event: SubmitEvent) {
     event.preventDefault();
-    if (busy || !key) return;
+    if (recovering || busy || !key) return;
     busy = true;
     error = "";
     try {
@@ -59,6 +65,28 @@
     } catch (cause) {
       uncertain = true;
       error = `${message(cause)} Retry will use the original submitted details and request ID; do not start another customer.`;
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function recover() {
+    if (busy) return;
+    busy = true;
+    error = "";
+    try {
+      const id = await getCustomerCreationResult(key);
+      if (id) {
+        completed = true;
+        await goto(`/customers/${id}`, { replaceState: true });
+      } else {
+        recoveryMessage =
+          "No committed customer was found yet. The original request may still be running. Check again before starting another customer.";
+      }
+    } catch (cause) {
+      error = message(cause);
+      recoveryMessage =
+        "The original creation result could not be checked. Check again; do not submit another customer.";
     } finally {
       busy = false;
     }
@@ -81,31 +109,45 @@
   </div>
 </div>
 {#if error}<p class="notice error" role="alert">{error}</p>{/if}
-<form class="card" onsubmit={save}>
-  <h2>Contact</h2>
-  <label
-    >Full name<input
-      bind:value={fields.full_name}
-      disabled={busy || uncertain}
-    /></label
-  >
-  <label
-    >Email<input
-      type="email"
-      bind:value={fields.email}
-      disabled={busy || uncertain}
-    /></label
-  >
-  <label
-    >Phone<input
-      type="tel"
-      bind:value={fields.phone}
-      disabled={busy || uncertain}
-    /></label
-  >
-  <div class="actions form-action">
-    <button class="primary" disabled={busy || !key}
-      >{uncertain ? "Retry customer creation" : "Create customer"}</button
+{#if recovering}
+  <section class="card" aria-label="Customer creation recovery">
+    <h2>Recover customer creation</h2>
+    <p>
+      Contact details were kept only in memory and are no longer available. This
+      request cannot be resubmitted with different details.
+    </p>
+    <p role="status">{recoveryMessage}</p>
+    <button class="primary" disabled={busy} onclick={recover}
+      >Check creation result</button
     >
-  </div>
-</form>
+  </section>
+{:else}
+  <form class="card" onsubmit={save}>
+    <h2>Contact</h2>
+    <label
+      >Full name<input
+        bind:value={fields.full_name}
+        disabled={busy || uncertain}
+      /></label
+    >
+    <label
+      >Email<input
+        type="email"
+        bind:value={fields.email}
+        disabled={busy || uncertain}
+      /></label
+    >
+    <label
+      >Phone<input
+        type="tel"
+        bind:value={fields.phone}
+        disabled={busy || uncertain}
+      /></label
+    >
+    <div class="actions form-action">
+      <button class="primary" disabled={busy || !key}
+        >{uncertain ? "Retry customer creation" : "Create customer"}</button
+      >
+    </div>
+  </form>
+{/if}
