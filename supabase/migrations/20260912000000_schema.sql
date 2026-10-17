@@ -126,12 +126,6 @@ INSERT INTO private.category_tree_guard DEFAULT VALUES;
 ALTER TABLE private.category_tree_guard ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.category_tree_guard FROM PUBLIC, anon, authenticated, service_role;
 
--- Role commands need a row-version conflict, not just an advisory lock.
-CREATE TABLE private.role_management_guard (singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton), revision bigint NOT NULL DEFAULT 0);
-INSERT INTO private.role_management_guard DEFAULT VALUES;
-ALTER TABLE private.role_management_guard ENABLE ROW LEVEL SECURITY;
-REVOKE ALL ON private.role_management_guard FROM PUBLIC, anon, authenticated, service_role;
-
 -- A key may exist before its optional public definition. Keep a real row
 -- version for both writers so REPEATABLE READ cannot validate stale metadata.
 CREATE TABLE private.metafield_key_guards (
@@ -383,7 +377,6 @@ CREATE TABLE commerce.payment_intents (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     order_id uuid NOT NULL,
     provider text NOT NULL,
-    payment_method text DEFAULT 'paypal'::text NOT NULL,
     status text DEFAULT 'requires_action'::text NOT NULL,
     amount numeric(12,2) NOT NULL CONSTRAINT payment_intents_amount_finite CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
     currency text NOT NULL,
@@ -401,8 +394,6 @@ CREATE TABLE commerce.payment_intents (
     CONSTRAINT payment_intents_currency_check CHECK (currency = 'USD'),
     CONSTRAINT payment_intents_idempotency_key_check CHECK ((length(btrim(idempotency_key)) > 0)),
     CONSTRAINT payment_intents_metadata_check CHECK ((jsonb_typeof(metadata) = 'object'::text)),
-    CONSTRAINT payment_intents_payment_method_check CHECK ((payment_method = ANY (ARRAY['paypal'::text, 'card'::text]))),
-    CONSTRAINT payment_intents_payment_method_provider_check CHECK (((payment_method <> 'card'::text) OR (provider = 'paypal'::text))),
     CONSTRAINT payment_intents_provider_check CHECK (provider = 'paypal'),
     CONSTRAINT payment_intents_status_check CHECK ((status = ANY (ARRAY['requires_action'::text, 'processing'::text, 'succeeded'::text, 'failed'::text, 'cancelled'::text])))
 );
@@ -1806,23 +1797,6 @@ CREATE UNIQUE INDEX promotion_targets_unique ON public.promotion_targets USING b
 CREATE INDEX promotion_targets_variant_idx ON public.promotion_targets USING btree (variant_id);
 CREATE UNIQUE INDEX tax_rates_one_active_country_idx ON public.tax_rates USING btree (country) WHERE is_active;
 CREATE INDEX variant_option_values_value_idx ON public.variant_option_values USING btree (option_value_id);
-
--- Zero consideration still has a quantity lifecycle; it is not a money refund.
-CREATE TABLE commerce.zero_value_cancellations (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  order_id uuid NOT NULL REFERENCES public.orders(id) ON DELETE RESTRICT,
-  order_item_id uuid NOT NULL,
-  quantity integer NOT NULL CHECK (quantity > 0),
-  restocked_quantity integer NOT NULL DEFAULT 0 CHECK (restocked_quantity BETWEEN 0 AND quantity),
-  idempotency_key text NOT NULL CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 200),
-  reason text CHECK (length(reason) <= 2000),
-  actor_id uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE (order_id, idempotency_key),
-  FOREIGN KEY (order_item_id, order_id) REFERENCES public.order_items(id, order_id) ON DELETE RESTRICT
-);
-CREATE INDEX zero_value_cancellations_item_idx ON commerce.zero_value_cancellations(order_item_id);
-ALTER TABLE commerce.zero_value_cancellations ENABLE ROW LEVEL SECURITY;
 
 -- Exact URL edges only: do not infer Storage ownership from a URL hostname or
 -- pathname. Absence here is NOT deletion authorization (rich text/JSON remain).

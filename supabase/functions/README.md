@@ -22,7 +22,6 @@ Edge Runtime 需提供 `SUPABASE_URL`、`SUPABASE_ANON_KEY`、`SUPABASE_SERVICE_
 
 | 入口 | 认证 |
 | --- | --- |
-| `paypal-client-token` | handler 验证用户 JWT；卡开关控制，域名由服务器配置 |
 | PayPal 创建 / 捕获 / 退款 | handler 验证用户 JWT，数据库校验归属/管理员 |
 | `paypal-webhook` | 不验证 JWT；通过官方 postback API 验证 transmission headers |
 | `paypal-reconcile-refunds` | handler 校验 service-role token |
@@ -43,7 +42,7 @@ Cart 的创建/读取/编辑/预览可由游客调用；上线前在覆盖直接
 生产显式设置 `PAYPAL_LIVEMODE=true`；`PAYPAL_BRAND_NAME` 可选。`PAYPAL_API_BASE` 生产留空，由模式选择官方地址。结账统一使用 USD，商户账户须具备对应收款能力。
 回调 URL 必须对应实际部署的页面；当前示例 storefront 尚无这些路由，模板中的 URL 仅为占位。地址字段见 [地址合同](../../docs/api.md#地址合同)，并须满足渠道的额外地区要求。
 
-站内卡支付默认关闭。商户获批 Expanded Checkout 并通过 Sandbox 验收后，设置 `PAYPAL_CARDS_ENABLED=true`、`PAYPAL_STOREFRONT_DOMAIN` 为实际 Storefront hostname（不带协议、端口或路径），部署 `paypal-client-token` 与匹配的 create/capture handler。浏览器仅获得域绑定的 SDK v6 client token；服务端 OAuth token 不下发。网关须对这些接口按 IP/用户限流；仓库没有分布式限流实现。关闭卡开关停止签发 token、新建卡 Order 和新卡 Capture，但不阻断已发生资金的入账与对账。3DS 策略见 [ADR](../../docs/architecture-decisions.md#服务端卡认证策略)。
+只支持 PayPal 钱包付款，不提供站内卡支付。Order 固定使用 `payment_source.paypal`；Capture 前拒绝付款来源不是 PayPal 钱包的 Order。网关须对支付接口按 IP/用户限流；仓库没有分布式限流实现。
 
 Webhook 指向 `/functions/v1/paypal-webhook`，订阅：
 
@@ -122,4 +121,4 @@ PayPal disputes、chargebacks 及 payout/balance reconciliation 仍需 Dashboard
 2. 初始化完整数据库，再部署匹配的函数和静态客户端；核对 HTTPS、精确 CORS Origin、实际回调路径和密钥隔离。
 3. 完成本页身份安全、SMTP、限流及数据保留配置，轮换历史 OAuth 凭据。
 4. 部署 Worker、幂等 Outbox 消费器和告警，演练重试耗尽、未知资金及人工恢复。
-5. 完成 [钱包与卡支付 Sandbox 清单](../../docs/storefront-paypal.md#sandbox--上线验收仍待完成)；本地 mock 边界见 [测试指南](../../docs/testing.md)。
+5. 完成 [钱包支付 Sandbox 清单](../../docs/storefront-paypal.md#sandbox--上线验收仍待完成)；本地 mock 边界见 [测试指南](../../docs/testing.md)。

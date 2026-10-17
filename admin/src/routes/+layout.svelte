@@ -3,9 +3,7 @@
   import { page } from "$app/state";
   import type { Session } from "@supabase/supabase-js";
   import { supabase, message } from "$lib/api";
-  import PageChanges from "$lib/PageChanges.svelte";
   import Navigation from "$lib/Navigation.svelte";
-  import { pageChangeScopes } from "$lib/page-changes";
   import "../app.css";
 
   let { children }: { children: Snippet } = $props();
@@ -121,11 +119,6 @@
       </header>
       {#if error}<p class="notice error" role="alert">{error}</p>{/if}
       <main id="main">
-        {#if phase === "admin" && pageChangeScopes(page.url.pathname).length}
-          {#key `${userId}:${page.url.pathname}`}<PageChanges
-              scopes={pageChangeScopes(page.url.pathname)}
-            />{/key}
-        {/if}
         {#key userId}{@render children()}{/key}
       </main>
     </div>

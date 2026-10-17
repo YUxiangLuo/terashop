@@ -18,7 +18,7 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 
 ## 本人 MCP 授权管理
 
-远程五类高风险调用另有逐笔人工审批，详见 [MCP 审批流程](../mcp/README.md#远程逐笔人工审批)。`list_my_mcp_action_approvals(p_id?)` 仅当前管理员可查询本人最新 100 条或指定原 UUID；返回 ID、工具、原参数、客户端、resource、状态、创建／过期时间，不返回内部指纹。`decide_my_mcp_action_approval(p_id,p_decision)` 只接受本人尚未过期的 pending 请求，决定为 approved/rejected；不直接执行业务。两者不注册为 MCP 工具。service-only 的 `mcp_action_approval_command` 不允许浏览器直接创建或消费批准。
+远程三类高风险调用另有逐笔人工审批，详见 [MCP 审批流程](../mcp/README.md#远程逐笔人工审批)。`list_my_mcp_action_approvals(p_id?)` 仅当前管理员可查询本人最新 100 条或指定原 UUID；返回 ID、工具、原参数、客户端、resource、状态、创建／过期时间，不返回内部指纹。`decide_my_mcp_action_approval(p_id,p_decision)` 只接受本人尚未过期的 pending 请求，决定为 approved/rejected；不直接执行业务。两者不注册为 MCP 工具。service-only 的 `mcp_action_approval_command` 不允许浏览器直接创建或消费批准。
 
 以下三个 RPC 仅允许当前非匿名 `authenticated` 用户管理本人授权，使用 `auth.uid()`，无用户 ID 入参；降级为 customer 后仍可撤销本人授权，不赋予任何业务或新授权创建权限。匿名、service-role 及他人授权不能通过这些个人入口操作；完整 binding 和凭据始终不返回浏览器。
 
@@ -169,10 +169,10 @@ GET /rest/v1/products?slug=eq.xxx&select=id,name,description,product_variants(id
 `customers.id` 是独立商业 UUID，**不等于 Auth user ID**。`auth_user_id` 是唯一、可空的登录关联；联系邮箱非唯一，不用邮箱或客户端 metadata 自动认领/合并客户。注册创建新 Customer，后台 `create_customer` 可创建无账号客户；目前没有客户合并、账号重关联或为无账号客户代下单的 RPC。
 
 - `current_customer_id()` 返回当前活跃客户 UUID；无关联或已匿名化返回 null，授权失败关闭。
-- `orders` / Quote / 地址 / 评价 / 优惠用量 / 客户 metafield 使用 Customer ID；角色、`set_user_role.user_id` 和审计 `actor_id` 仍使用 Auth ID。
+- `orders` / Quote / 地址 / 评价 / 优惠用量 / 客户 metafield 使用 Customer ID；管理员 profile 和审计 `actor_id` 仍使用 Auth ID。
 - `/rest/v1/customers` 仅本人/admin/service 可读；可 PATCH `email`、`full_name`、`phone`，不可写身份、Auth 关联、匿名化状态。`profiles` 仅保存账户邮箱/角色等，不再保存姓名/电话，也不提供自助 PATCH。
 - Auth 邮箱变化不覆盖客户联系邮箱。删除 Auth 只解除关联，不删除 Customer 或订单；新同邮箱账号不会接管旧记录。
-- `anonymize_customer` 清客户联系信息、地址、客户 metafield 与全部 Cart，禁止恢复这些客户自有内容；`anonymize_user` 另清 profile 和审计 actor。两者都不等于删除 Auth、撤销登录凭据或擦除订单地址/属性、评价正文等历史数据。
+- `anonymize_customer` 清客户联系信息、地址、客户 metafield 与全部 Cart，禁止恢复这些客户自有内容；不等于删除 Auth、撤销登录凭据或擦除订单地址/属性、评价正文等历史数据。需要删除账号时由运维删除 Auth 用户：profile 级联删除、审计 actor 置空、Customer 解除关联。
 
 ### 游客自行结账
 
@@ -275,7 +275,7 @@ PATCH 省略保留，只允许显式字段，JSONB 文本最多 256 KiB。客户
 
 `list_admin_payment_operations(order_id, kind, page_size=20, after_id?)` 仅 admin/service 可调用，是同名只读 MCP 工具。kind 必须为 `payment_intent/refund_request/money_movement`，每次只读一类。返回 `{order_id,kind,items,next_cursor}`，UUID 升序，页大小 1–100，末页游标 null。更换订单或类别须清空游标；没有总数、跨页快照或时间顺序承诺。未知订单返回空页，不证明订单存在。非法筛选 `22023`，无权限 `42501`。
 
-- 支付意图：ID、订单、provider/payment_method/status、amount/currency、expires_at、捕获请求时间、最后轮询时间/次数和创建/更新时间。
+- 支付意图：ID、订单、provider/status、amount/currency、expires_at、捕获请求时间、最后轮询时间/次数和创建/更新时间。
 - 退款请求：ID、订单、父交易、provider/status/source、amount/currency、restock_requested、result_refund_id、has_error、提交/完成/渠道退款请求/最后轮询时间、轮询次数和创建/更新时间。
 - 渠道资金变动：ID、订单、内部 provider_event_id UUID、provider/kind、amount/currency、关联意图/退款请求/交易 ID、reconciliation_status、has_error、matched_at/created_at。仅返回已关联此订单的记录，不包含尚无订单归属的资金变动。
 
@@ -319,7 +319,7 @@ POST /rest/v1/rpc/update_cart
 ```
 
 - 每次编辑/认领/终结版本 +1；版本冲突为 HTTP 409，不静默覆盖。最近一次完全相同的规范化命令重试返回当前结果；更早的重试需 `get_cart` 恢复，不无限保留全部 mutation 历史。创建幂等也只在 Cart 保留期内有效。
-- 每客户最多 5 个未过期 active Cart，创建与认领共用配额；这与 5 个活跃 checkout 是两套不同资源上限。转 Quote 仍需满足原 checkout 配额/库存/价格规则，任何失败都不改变 Cart。
+- 每客户最多 5 个未过期 active Cart，创建与认领共用配额。转 Quote 仍需满足库存/价格规则，任何失败都不改变 Cart。
 - Cart 的期限固定，读取、编辑、认领均不续期。converted / abandoned 不可重新编辑；再次购买创建新 Cart。转 Quote 会清 Cart 地址/备注，但保留商业行；Quote 行重新分配 UUID、沿用 `line_key`，再将 Quote UUID 沿用到订单行。
 - 游客凭据是 256 位随机 bearer capability，只授权一个 Cart，不授权 Customer、订单、Quote 或支付。数据库只保存 SHA-256；只有创建响应带明文，丢失后不能取回。放弃后的空 Cart 仍可凭原凭据读取直到到期，认领/到期后旧凭据不可用。
 - 始终用 HTTPS/POST；不要把 token 放 URL、日志、埋点或公开存储。BFF 推荐 Secure/HttpOnly/SameSite cookie 并防 CSRF；直接浏览器接入须管理 XSS/凭据存储风险。共享游客凭据就等于共享编辑和认领权。
@@ -349,7 +349,7 @@ POST /rest/v1/rpc/create_order_from_quote
 Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会静默重定价。
 同一业务重试复用幂等键，不同参数必须使用新键。
 价格预览（包括匿名）、Cart 编辑、建单与报价均限制 50 条规范化商业行/100 件。原始 `items` 数组最多 100 项，PostgreSQL JSONB 文本表示最多 1 MiB UTF-8 字节，在逐行规范化前拒绝超限；100 条相同输入仍可合并成一行，总件数不能因拆行绕过。预算错误返回 400；该字节限制不替代网关 HTTP 请求体上限、超时和限流。
-每客户最多 5 个活跃 checkout（未转单 Quote + 未过期未付款订单）；转单及幂等重试不重复占名额。订单 DTO 的 `payment_expires_at` 是固定付款期限，不可延长。
+不限制每客户活跃 Quote 或未付款订单数量；转单及幂等重试不重复预占。订单 DTO 的 `payment_expires_at` 是固定付款期限，不可延长。
 
 | RPC | 参数 / 用途 |
 | --- | --- |
@@ -357,7 +357,6 @@ Quote 还支持 `address_id`、`note`；价格变化时需新建 Quote，不会�
 | `get_order_checkout_quote` | `order_id` |
 | `cancel_checkout_quote` | `quote_id`、可选 `reason` |
 | `cancel_order` | `order_id`、可选 `reason`；仅未支付未发货且无捕获保护的订单 |
-| `cancel_zero_value_order_item` | `order_id`、`order_item_id`、正整数 `quantity`、`idempotency_key`、可选 `reason`；已结算订单的零对价未发货行取消 |
 | `get_order_ledger` | `order_id`；安全交易账本 DTO，退款含金额组成 |
 | `get_order_pricing` | `order_id`；客户本人/admin/service 可读的价格、优惠、税与配送快照 |
 | `get_order_fulfillment_balance` | `order_id`；每行订购/履约/取消/退款预留/可履约数量，及订单级 `payment_hold` |
@@ -382,8 +381,6 @@ open 报价取消后释放预占，不增加 on_hand；converted 报价会连带
 调用前读取管理员详情并取得明确批准。此命令没有 expected revision 或幂等键，读取后可能并发转单，批准须覆盖连带取消订单的后果。返回标准 Quote DTO，不含管理员详情额外的 customer_id/stored_status；不存在时报错。终态可重复读取，但未知写入结果不得自动重试，应先查询同一报价及关联订单/支付操作，不生成新 UUID 或替换为退款命令。
 
 查询限制订单/Quote 归属，部分接口另允许管理员。所有客户订单自建单起冻结商业快照，不可原地改价或改地址，支付失败也不解除快照保护。
-
-零对价取消允许订单本人/admin/service 调用，只接受 open、已结算订单中 `line_total=0` 且税额为零的商品行；数量不能占用已履约或退款请求预留部分。订单范围内同键同参数返回原取消事实 DTO（`id/order_id/order_item_id/quantity/restocked_quantity/created_at`），异参拒绝；reason 最多 2000 字符。依据原始扣库事实回库，不创建零金额 capture/refund。零总额订单全部商品取消后状态为 cancelled，financial_status 保持 paid；混合履约/取消覆盖全部商品时正常完成。
 
 关联订单的渠道资金存在 `action_required` 时，`payment_hold=true`，可履约数量显示为零；新增履约和 pending → shipped 都被拒绝。暂停由资金对账状态推导，没有面向客户的解除开关。
 
@@ -433,8 +430,7 @@ SSG 页面、游客会话、PayPal 返回页及错误重试见 [Storefront PayPa
 
 | Edge Function | 调用方 | 请求 |
 | --- | --- | --- |
-| `paypal-client-token` | 客户 | `{}`；卡支付启用时返回 SDK v6 `client_token` 与 `expires_in`，不得静态缓存 |
-| `paypal-create-order` | 客户 | `order_id`、`idempotency_key`、可选 `payment_method`（默认 `paypal` 或 `card`）；钱包返回 `approve_url`，卡由 SDK 提交 `provider_reference` |
+| `paypal-create-order` | 客户 | `order_id`、`idempotency_key`；只创建 PayPal 钱包 Order，返回 `approve_url` |
 | `paypal-capture-order` | 客户 | 买家批准后传 `payment_intent_id` |
 | `paypal-create-refund` | 管理员 | `order_id`、`idempotency_key`、可选 `items`、`shipping_amount` 或互斥的 `amount`，以及 `restock`、`reason` |
 
@@ -550,11 +546,9 @@ POST /rest/v1/rpc/receive_return
 | `adjust_inventory` | admin | 必填 `variant_id`、`delta`、`idempotency_key`；可选 `reason`（默认 adjust）、`note`、`location_id`（默认仓） |
 | `transfer_inventory` | admin | 必填 `variant_id`、`from_location_id`、`to_location_id`、`quantity`、`idempotency_key`；可选 `note`；即时原子调拨，见下文 |
 | `moderate_review` | admin | `review_id`、`status`、可选 `expected_revision`；MCP 强制携带版本，见下文 |
-| `set_user_role` | admin | `user_id`、`role`；最后一名 admin 不可降级 |
-| `anonymize_user` | admin | `p_user_id` 为 Auth ID；匿名化关联客户，另清 profile PII 与审计 actor；不是完整账号删除 |
 
 地址内容可直接 PATCH，身份/归属/时间戳不可改；既有地址的默认值必须走 RPC。新建地址仍可传 `is_default=true`。
-普通客户创建评价只能为 pending，作者修改内容后重新待审。首次管理员由可信 SQL 引导，后续走角色 RPC。
+普通客户创建评价只能为 pending，作者修改内容后重新待审。管理员由受信运维直接设置 `profiles.role`（本地 `bun run admin:create <email>`），不提供角色管理 RPC。
 管理员与客户同属数据库 `authenticated` 角色；订单状态、支付、履约、库存等交易写入必须走受控命令，不能绕过流程直写表。
 
 `create_customer`、`adjust_inventory`、`mark_order_paid` 分别使用独立的店铺级幂等范围，不按管理员隔离。键去除首尾空白后必须为 1–200 字符；同一操作的网络重试必须复用原键及参数，不能每次生成新键。同键并发只提交一次副作用；业务写入与幂等记录同事务提交，失败不占用键。重放仍校验当前权限，并读取资源当前状态，而非返回历史响应快照。
@@ -598,16 +592,6 @@ DTO 为 `{name,timezone,currency,revision,updated_at}`，初始 name=`Tera`、ti
 更新先锁单例并核对正整数 expected_revision，实际改变时 revision 加一并更新 updated_at；空补丁或同值保留二者，旧版本即使目标值相同也拒绝。非法输入 `22023`，无权限 `42501`，版本冲突 `PT409`，锁竞争 `55P03`，旧 REPEATABLE READ 快照可能 `40001`。结果不明先重读，不自动替换版本重试。
 
 这是管理配置存储合同，当前前台尚未消费名称/时区，也没有公开读取接口。时区只用于未来展示/统计，不改变数据库会话时区、订单时间戳、历史交易或促销有效期；不改变 USD 结算约束。
-
-### 管理员账户身份查询与角色流程
-
-`list_admin_users(page_size=20, after_id?, role_filter?, search?)` 与 `get_admin_user(user_id)` 仅 admin/service 可调用，同名 MCP 工具只读。数据源是应用 profiles，不是 Auth 管理 API；不返回密码、会话、身份提供商 metadata、封禁/验证/登录状态。不能根据 profile 存在、角色或邮箱推断可登录性，邮箱也不是已验证归属的证明。
-
-DTO 为 `user_id/email/role/created_at/updated_at/customer_id/customer_anonymized_at`。user_id 是 Auth UUID，用于 set_user_role/anonymize_user；customer_id 是关联商业客户 UUID，用于客户与订单工具，可能为 null。匿名化保留身份关联时返回匿名化时间；空邮箱不等同于删除 Auth。未绑定 Auth 的纯商业客户不在列表中；本接口不创建或邀请账号。
-
-列表返回 `{items,next_cursor}`，按 user_id UUID 升序，页大小 1–100，末页游标 null。role_filter 精确 admin/customer；search 去首尾普通空格，按 profile 邮箱不区分大小写字面子串匹配，最多 200 字符，`%/_` 不作为通配符，空白等同无筛选。筛选 AND 组合、更换筛选清空游标，不提供总数或跨页快照。详情不存在返回 null；非法输入 `22023`、无权限 `42501`。
-
-角色变更先读取具体 Auth 用户，确认目标及当前角色，再取得明确批准调用现有 `set_user_role`；不以 Customer ID 代替。此命令继续使用既有串行化与最后管理员保护，不新增预期版本；结果不明先重读，不能自动重放覆盖另一位管理员的变更。自我降级会失去后续 MCP 管理权限；每次 MCP 调用及目标 RPC 均复核权限。匿名化不是撤销角色或删除 Auth 凭据。
 
 ### 管理员评价查询、审核与删除
 

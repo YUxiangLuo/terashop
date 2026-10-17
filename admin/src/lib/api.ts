@@ -5,7 +5,6 @@ import {
 } from "$env/static/public";
 import type { Database, Json } from "../../../types/database";
 import type { ProductOption, ProductVariant } from "./catalog";
-import { productReceipt } from "./write-receipts";
 export type { ProductOption, ProductVariant } from "./catalog";
 
 export const supabase = createClient<Database>(
@@ -137,9 +136,7 @@ export async function getProduct(id: string): Promise<ProductDetail | null> {
     product_id: id,
   });
   if (error) throw error;
-  return data === null
-    ? null
-    : (productReceipt(data, id, null) as unknown as ProductDetail);
+  return data as unknown as ProductDetail | null;
 }
 export async function saveProduct(
   id: string,
@@ -155,7 +152,7 @@ export async function saveProduct(
           changes,
         });
   if (result.error) throw result.error;
-  return productReceipt(result.data, id, revision) as unknown as ProductDetail;
+  return result.data as unknown as ProductDetail;
 }
 export function message(error: unknown): string {
   if (

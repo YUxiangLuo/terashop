@@ -1,6 +1,6 @@
 # Admin MCP
 
-管理员的 Agent 接口，使用官方 TypeScript MCP SDK v2。已实现 **stdio 和直接 HTTPS 的无状态 Streamable HTTP**，共 113 个显式工具（54 个只读、59 个写入）。本地代表性链路已验收；**公网、目标 Agent 客户端和真实 PayPal Sandbox 尚未验收**。
+管理员的 Agent 接口，使用官方 TypeScript MCP SDK v2。已实现 **stdio 和直接 HTTPS 的无状态 Streamable HTTP**，共 108 个显式工具（52 个只读、56 个写入）。本地代表性链路已验收；**公网、目标 Agent 客户端和真实 PayPal Sandbox 尚未验收**。
 
 普通业务使用当前管理员 JWT 调用 Supabase 受控 RPC，数据库负责授权、事务、幂等、库存与资金规则。远程宿主另持 service-role 用于受限授权、凭据、审计及审批 RPC；不提供任意 SQL、表名、RPC 或业务失败后的提权回退。
 
@@ -68,7 +68,7 @@ MCP 客户端配置示意（占位符需由宿主安全配置替换，不自动�
 | 领域 | 能力与边界 |
 | --- | --- |
 | 商品、分类 | 聚合原子编辑、发布、规格/变体/图片/分类关联；版本冲突须重读 |
-| 客户、地址、账户 | 商业客户与 Auth 用户分离；资料、地址、角色及匿名化，不创建登录账号 |
+| 客户、地址 | 商业客户与 Auth 用户分离；资料、地址及匿名化，不创建登录账号或管理角色 |
 | 库存、仓库 | 可用量、调整、流水、即时原子调拨、仓库启停与默认切换；不搬预占、不跟踪在途 |
 | 促销、配送、税率 | 版本化规则与目标管理；不改历史订单、不提供承运商或复杂税务服务 |
 | 扩展内容、评价 | Metafields、Metaobjects、审核及受限删除；不代写客户评价 |
@@ -92,13 +92,13 @@ MCP 客户端配置示意（占位符需由宿主安全配置替换，不自动�
 
 ## 远程逐笔人工审批
 
-远程 `refund_paypal`、`commit_manual_refund`、`set_user_role`、`anonymize_customer`、`anonymize_user` 必须经过服务端逐笔审批：
+远程 `refund_paypal`、`commit_manual_refund`、`anonymize_customer` 必须经过服务端逐笔审批：
 
 1. 首次调用返回 `HUMAN_APPROVAL_REQUIRED` 与 `approval_id`，不执行业务。
 2. 用户在 Admin `/approvals` 独立登录，核对本人请求的客户端、资源、金额及完整参数，批准或拒绝。Agent 不能提交批准决定。
 3. 批准后，显式以**相同参数和原 `approval_id`**重放。审批绑定用户、grant、client、resource、project、工具及参数，15 分钟有效，只消费一次。
 
-角色和匿名化操作在持有业务锁时检查原状态指纹并原子执行；匿名化指纹包含购物车 ID/版本，期间修改会使批准失效。手工退款还绑定原 preview token；PayPal 仍执行既有资金检查，审批不冻结余额，也不证明结算。
+匿名化在持有客户锁时检查原状态指纹并原子执行；匿名化指纹包含购物车 ID/版本，期间修改会使批准失效。手工退款还绑定原 preview token；PayPal 仍执行既有资金检查，审批不冻结余额，也不证明结算。
 
 `consuming` 或未知结果必须先核对业务事实，不能自动重放、换键或重新批准来绕过。`consumed` 只表示执行已返回，不证明渠道退款成功。页面显示最新 100 条，并支持按原 ID 查询旧记录；不保存原 PII 快照或结果 payload。stdio 不具备这一远程服务端审批保证。
 
@@ -107,7 +107,7 @@ MCP 客户端配置示意（占位符需由宿主安全配置替换，不自动�
 - `/connections` 管理本人的授权；降级后仍可撤销。店铺库原子停止新准入、删除凭据密文并登记上游清理任务，授权服务异步撤销 token 家族。撤销不取消已派发业务，Admin 退出不等于撤销 MCP。
 - 可选 `authorization.auditTools:true` 保存宿主调用观察和固定映射的资源 UUID，不保存完整参数、结果或 token。准入失败不派发；完成回执丢失不重放业务。`pending/returned/rejected/unknown` 不是结算或送达证明。启用前审批保留策略，见 [运维审计](OPERATIONS.md#logs-incidents-and-public-acceptance)。
 - 可选 `authorization.adminOrigin`（stdio 为 `TERA_ADMIN_ORIGIN`）给支持的非空读取结果附加 `resource_link`。只链接固定详情路由，不带 token、不自动执行、不改变 `structuredContent.data`；仍须独立 Admin 登录。
-- Admin 的 `PUBLIC_MCP_CONNECTION` 只展示受信部署配置，不发起 OAuth 或证明健康。实时通知只提示重读，不能覆盖草稿或解除未知写锁定。配置和页面行为见 [Admin](../admin/README.md)。
+- Admin 的 `PUBLIC_MCP_CONNECTION` 只展示受信部署配置，不发起 OAuth 或证明健康。Agent 先保存后，Admin 的旧版本保存返回 PT409，须重读再编辑。配置和页面行为见 [Admin](../admin/README.md)。
 
 ## 媒体
 

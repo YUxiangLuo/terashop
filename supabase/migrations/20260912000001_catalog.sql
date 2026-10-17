@@ -603,39 +603,6 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.set_user_role(user_id uuid, role text) RETURNS public.profiles
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_profile public.profiles;
-begin
-  update private.role_management_guard set revision = revision + 1 where singleton;
-  if not public.is_admin() then
-    raise exception 'admin only';
-  end if;
-  if role not in ('customer', 'admin') then
-    raise exception 'invalid role';
-  end if;
-  -- 防止把最后一个 admin 降级（否则后台永久失管）
-  if role <> 'admin'
-     and exists (select 1 from public.profiles p where p.id = set_user_role.user_id and p.role = 'admin')
-     and (select count(*) from public.profiles p where p.role = 'admin') <= 1 then
-    raise exception 'cannot demote the last admin';
-  end if;
-
-  update public.profiles p
-  set role = set_user_role.role
-  where p.id = set_user_role.user_id
-  returning * into v_profile;
-
-  if not found then
-    raise exception 'user not found';
-  end if;
-  return v_profile;
-end;
-$$;
-
 CREATE FUNCTION public.adjust_inventory(variant_id uuid, delta integer, idempotency_key text, reason text DEFAULT 'adjust'::text, note text DEFAULT NULL::text, location_id uuid DEFAULT NULL::uuid) RETURNS public.inventory_levels
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -706,35 +673,6 @@ begin
   insert into commerce.command_idempotency(scope,subject_id,idempotency_key,request_hash,resource_type,resource_id,resource_location_id)
     values ('inventory.adjust',v_subject_id,v_key,v_hash,'inventory_level',variant_id,v_location_id);
   return v_level;
-end;
-$$;
-
-CREATE FUNCTION public.anonymize_user(p_user_id uuid) RETURNS public.profiles
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-declare
-  v_profile public.profiles;
-  v_customer_id uuid;
-begin
-  if not public.is_admin() then raise exception 'admin only'; end if;
-  select id into v_customer_id from public.customers where auth_user_id = p_user_id;
-  if v_customer_id is not null then perform private.anonymize_customer(v_customer_id); end if;
-  update public.profiles p
-  set email = ''
-  where p.id = p_user_id
-  returning * into v_profile;
-  if not found then raise exception 'user not found'; end if;
-
-  update public.inventory_movements set actor_id = null where actor_id = p_user_id;
-  update public.order_events set actor_id = null where actor_id = p_user_id;
-  update commerce.order_adjustments set actor_id = null where actor_id = p_user_id;
-  update commerce.refunds set actor_id = null where actor_id = p_user_id;
-  update commerce.refund_requests set actor_id = null where actor_id = p_user_id;
-  update commerce.returns set actor_id = null where actor_id = p_user_id;
-  update commerce.return_receipts set actor_id = null where actor_id = p_user_id;
-  update commerce.return_dispositions set actor_id = null where actor_id = p_user_id;
-  return v_profile;
 end;
 $$;
 
@@ -885,18 +823,6 @@ CREATE FUNCTION public.set_updated_at() RETURNS trigger
 begin
   new.updated_at = now();
   return new;
-end;
-$$;
-
-CREATE FUNCTION public.set_user_role(user_id uuid, role text) RETURNS public.profiles
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO ''
-    AS $$
-begin
-  perform pg_catalog.pg_advisory_xact_lock(
-    pg_catalog.hashtextextended('tera-headless:set-user-role', 0)
-  );
-  return private.set_user_role(set_user_role.user_id, set_user_role.role);
 end;
 $$;
 
@@ -2986,46 +2912,6 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.list_admin_users(page_size integer DEFAULT 20, after_id uuid DEFAULT NULL,
-    role_filter text DEFAULT NULL, search text DEFAULT NULL) RETURNS jsonb
-    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-declare v_items jsonb; v_next uuid; v_search text:=nullif(btrim(search),'');
-begin
-  if not public.is_admin() and auth.role() is distinct from 'service_role' then
-    raise exception using errcode='42501', message='admin only';
-  end if;
-  if page_size is null or page_size not between 1 and 100 or char_length(search)>200
-    or (role_filter is not null and role_filter not in ('admin','customer')) then
-    raise exception using errcode='22023', message='invalid user filters';
-  end if;
-  with candidates as materialized (
-    select p.id as user_id,p.email,p.role,p.created_at,p.updated_at,c.id as customer_id,
-      c.anonymized_at as customer_anonymized_at
-    from public.profiles p left join public.customers c on c.auth_user_id=p.id
-    where (after_id is null or p.id>after_id) and (role_filter is null or p.role=role_filter)
-      and (v_search is null or strpos(lower(p.email),lower(v_search))>0)
-    order by p.id limit page_size+1
-  ), page as materialized (select * from candidates order by user_id limit page_size)
-  select coalesce(jsonb_agg(to_jsonb(p) order by p.user_id),'[]'::jsonb),
-    case when (select count(*) from candidates)>page_size then (select user_id from page order by user_id desc limit 1) end
-  into v_items,v_next from page p;
-  return jsonb_build_object('items',v_items,'next_cursor',v_next);
-end;
-$$;
-
-CREATE FUNCTION public.get_admin_user(user_id uuid) RETURNS jsonb
-    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-begin
-  if not public.is_admin() and auth.role() is distinct from 'service_role' then
-    raise exception using errcode='42501', message='admin only';
-  end if;
-  if user_id is null then raise exception using errcode='22023', message='user id required'; end if;
-  return (select jsonb_build_object('user_id',p.id,'email',p.email,'role',p.role,
-    'created_at',p.created_at,'updated_at',p.updated_at,'customer_id',c.id,'customer_anonymized_at',c.anonymized_at)
-    from public.profiles p left join public.customers c on c.auth_user_id=p.id where p.id=user_id);
-end;
-$$;
-
 CREATE FUNCTION public.get_admin_shop_settings() RETURNS jsonb
     LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
 begin
@@ -3266,8 +3152,8 @@ begin
   end if;
   if p_action='create' then
     if p_user_id is null or p_grant_id is not null or p_scopes is null
-        or cardinality(p_scopes)>5 or array_position(p_scopes,null) is not null
-        or not (p_scopes <@ array['store:read','store:write','store:payments','store:access','store:privacy']) then
+        or cardinality(p_scopes)>4 or array_position(p_scopes,null) is not null
+        or not (p_scopes <@ array['store:read','store:write','store:payments','store:privacy']) then
       raise exception using errcode='22023', message='invalid grant approval';
     end if;
     if not exists (select 1 from public.profiles p join auth.users u on u.id=p.id

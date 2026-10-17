@@ -9,13 +9,13 @@
 | 文件后缀 | 内容 |
 | --- | --- |
 | `00_schema.sql` | schema、表、约束、索引、RLS 开关与默认权限；Auth 基础对象由 Supabase 提供 |
-| `01_catalog.sql` | 目录/发布、扩展、客户、地址、评价、角色、库存调整 |
+| `01_catalog.sql` | 目录/发布、扩展、客户、地址、评价、管理员判定、库存调整 |
 | `02_checkout.sql` | Cart、计价/税分摊、价格快照、订单、Quote 与预占 |
 | `03_transactions.sql` | 账本、履约、退款、Return/Receipt/处置、快照保护、Outbox |
 | `04_payments.sql` | 支付意图、渠道 Inbox、外部资金与对账 |
 | `05_security.sql` | 视图、业务/Auth 触发器、RLS policy、显式 API 权限 |
 
-后续文件补充手工退款预览、MCP 连接/审计/审批、Admin Realtime、金额精度和停用仓库保护；部分函数会被后续 `create or replace` 覆盖。定位行为时同时搜索整个迁移目录，当前签名以完整重建后的数据库和生成类型为准。
+后续文件补充手工退款预览、MCP 连接/审计/审批、金额精度和停用仓库保护；部分函数会被后续 `create or replace` 覆盖。定位行为时同时搜索整个迁移目录，当前签名以完整重建后的数据库和生成类型为准。
 
 表先于依赖它的函数创建，API 权限显式开放。跨域引用仅在创建阶段通过事务局部 `check_function_bodies=false` 延后校验，不能靠删掉 RLS、约束或状态机保护解决依赖顺序。
 

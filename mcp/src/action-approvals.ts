@@ -6,9 +6,7 @@ import { readBackendJson } from './backend-response';
 const HIGH_RISK = new Set([
   'refund_paypal',
   'commit_manual_refund',
-  'set_user_role',
   'anonymize_customer',
-  'anonymize_user',
 ]);
 
 export class ApprovalRequired extends Error {
@@ -67,7 +65,7 @@ export function createActionApprovalHost(
         body.p_action === 'stage'
           ? 'pending'
           : body.p_action === 'finish' ||
-              ['set_user_role', 'anonymize_customer', 'anonymize_user'].includes(String(body.p_tool_name))
+              body.p_tool_name === 'anonymize_customer'
             ? 'consumed'
             : 'consuming';
       if (receipt.id !== body.p_approval_id || receipt.state !== expected) throw Error('Invalid receipt');
@@ -94,7 +92,7 @@ export function createActionApprovalHost(
       p_tool_name: tool,
       p_arguments: args,
     });
-    const executed = ['set_user_role', 'anonymize_customer', 'anonymize_user'].includes(tool);
+    const executed = tool === 'anonymize_customer';
     return {
       args,
       result: consumed.result,

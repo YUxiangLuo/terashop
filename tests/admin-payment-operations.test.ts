@@ -54,7 +54,6 @@ test('真实收款与退款请求按订单隔离；白名单 DTO 隐去渠道引
       'id',
       'order_id',
       'provider',
-      'payment_method',
       'status',
       'amount',
       'currency',

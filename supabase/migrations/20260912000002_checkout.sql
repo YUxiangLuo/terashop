@@ -290,19 +290,6 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.assert_checkout_capacity(p_customer_id uuid) RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-begin
-  perform private.lock_customer_content(p_customer_id);
-  if (select count(*) from commerce.checkout_quotes q where q.customer_id = p_customer_id
-      and q.status = 'open' and q.expires_at > clock_timestamp())
-     + (select count(*) from public.orders o where o.customer_id = p_customer_id
-        and o.status = 'open' and o.financial_status = 'pending' and o.payment_expires_at > clock_timestamp()) >= 5 then
-    raise exception 'too many active checkouts (quotes and unpaid orders)';
-  end if;
-end;
-$$;
-
 CREATE FUNCTION private.protect_order_payment_window() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 begin
@@ -1781,9 +1768,6 @@ begin
 
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
     'checkout.quote:' || v_uid || ':' || v_key, 0));
-  -- 不同幂等键也串行执行客户级配额检查。
-  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
-    'checkout.customer:' || v_uid, 0));
   select * into v_quote from commerce.checkout_quotes q
   where q.customer_id = v_uid and q.idempotency_key = v_key;
   if found then
@@ -1793,7 +1777,8 @@ begin
     return private.checkout_quote_json(v_quote);
   end if;
 
-  perform private.assert_checkout_capacity(v_uid);
+  -- 与匿名化串行，之后读取联系邮箱和地址快照。
+  perform private.lock_customer_content(v_uid);
 
   perform private.checkout_contact_email(v_uid);
   v_address := private.resolve_checkout_address(v_uid, v_address_input, address_id);

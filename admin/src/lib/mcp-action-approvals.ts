@@ -21,13 +21,9 @@ export function actionApprovals(value: Json | null): McpActionApproval[] {
       if (!row || typeof row !== "object" || Array.isArray(row)) return true;
       return (
         !uuid(row.id) ||
-        ![
-          "refund_paypal",
-          "commit_manual_refund",
-          "set_user_role",
-          "anonymize_customer",
-          "anonymize_user",
-        ].includes(String(row.tool_name)) ||
+        !["refund_paypal", "commit_manual_refund", "anonymize_customer"].includes(
+          String(row.tool_name),
+        ) ||
         !row.arguments ||
         typeof row.arguments !== "object" ||
         Array.isArray(row.arguments) ||

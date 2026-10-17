@@ -1,6 +1,5 @@
 import { supabase } from "./api";
 import type { Json } from "../../../types/database";
-import { customerReceipt } from "./write-receipts";
 
 export interface CustomerSummary {
   id: string;
@@ -49,33 +48,10 @@ export type CustomerAddressChanges = {
   postal_code?: string | null;
 };
 
-function detail(value: unknown, id: string, expected: string | null) {
-  return customerReceipt(value, id, expected) as unknown as CustomerDetail;
-}
-
 export async function getCustomer(id: string): Promise<CustomerDetail | null> {
   const result = await supabase.rpc("get_admin_customer", { customer_id: id });
   if (result.error) throw result.error;
-  return result.data === null ? null : detail(result.data, id, null);
-}
-
-export async function getCustomerCreationResult(
-  idempotencyKey: string,
-): Promise<string | null> {
-  const result = await supabase.rpc("get_customer_creation_result", {
-    idempotency_key: idempotencyKey,
-  });
-  if (result.error) throw result.error;
-  if (
-    result.data !== null &&
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      result.data,
-    )
-  )
-    throw Error(
-      "Invalid customer recovery response. Check the creation result again.",
-    );
-  return result.data;
+  return result.data as unknown as CustomerDetail | null;
 }
 
 export async function createCustomer(
@@ -87,12 +63,7 @@ export async function createCustomer(
     ...fields,
   });
   if (result.error) throw result.error;
-  const id = (result.data as { id?: unknown } | null)?.id;
-  if (typeof id !== "string")
-    throw Error(
-      "Invalid customer response. Retry the same request before creating another customer.",
-    );
-  const created = await getCustomer(id);
+  const created = await getCustomer((result.data as { id: string }).id);
   if (!created)
     throw Error("Created customer could not be read. Retry the same request.");
   return created;
@@ -108,7 +79,7 @@ export async function updateCustomer(
     changes,
   });
   if (result.error) throw result.error;
-  return detail(result.data, customer.id, customer.updated_at);
+  return result.data as unknown as CustomerDetail;
 }
 
 export async function createCustomerAddress(
@@ -126,7 +97,7 @@ export async function createCustomerAddress(
     changes,
   });
   if (result.error) throw result.error;
-  return detail(result.data, customerId, null);
+  return result.data as unknown as CustomerDetail;
 }
 
 export async function updateCustomerAddress(
@@ -141,7 +112,7 @@ export async function updateCustomerAddress(
     changes,
   });
   if (result.error) throw result.error;
-  return detail(result.data, customerId, null);
+  return result.data as unknown as CustomerDetail;
 }
 
 export async function deleteCustomerAddress(
@@ -154,7 +125,7 @@ export async function deleteCustomerAddress(
     expected_updated_at: address.updated_at,
   });
   if (result.error) throw result.error;
-  return detail(result.data, customerId, null);
+  return result.data as unknown as CustomerDetail;
 }
 
 export async function setDefaultCustomerAddress(

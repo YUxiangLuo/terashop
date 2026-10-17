@@ -1571,22 +1571,6 @@ export type Database = {
           isSetofReturn: false
         }
       }
-      anonymize_user: {
-        Args: { p_user_id: string }
-        Returns: {
-          created_at: string
-          email: string
-          id: string
-          role: string
-          updated_at: string
-        }
-        SetofOptions: {
-          from: "*"
-          to: "profiles"
-          isOneToOne: true
-          isSetofReturn: false
-        }
-      }
       assert_metaobject_exists: { Args: { p_ref: string }; Returns: undefined }
       bind_payment_intent_provider: {
         Args: {
@@ -1622,16 +1606,6 @@ export type Database = {
           provider_confirmed?: boolean
           reason?: string
           refund_request_id: string
-        }
-        Returns: Json
-      }
-      cancel_zero_value_order_item: {
-        Args: {
-          idempotency_key: string
-          order_id: string
-          order_item_id: string
-          quantity: number
-          reason?: string
         }
         Returns: Json
       }
@@ -1780,7 +1754,6 @@ export type Database = {
           idempotency_key: string
           metadata?: Json
           order_id: string
-          payment_method?: string
           provider: string
         }
         Returns: Json
@@ -1791,7 +1764,6 @@ export type Database = {
           idempotency_key: string
           metadata?: Json
           order_id: string
-          payment_method?: string
           provider: string
         }
         Returns: Json
@@ -1923,16 +1895,11 @@ export type Database = {
       }
       get_admin_shop_settings: { Args: never; Returns: Json }
       get_admin_tax_rate: { Args: { tax_rate_id: string }; Returns: Json }
-      get_admin_user: { Args: { user_id: string }; Returns: Json }
       get_cart: {
         Args: { cart_id: string; guest_token?: string }
         Returns: Json
       }
       get_checkout_quote: { Args: { quote_id: string }; Returns: Json }
-      get_customer_creation_result: {
-        Args: { idempotency_key: string }
-        Returns: string
-      }
       get_customer_order: { Args: { order_id: string }; Returns: Json }
       get_inventory_availability: {
         Args: { location_id?: string; variant_id: string }
@@ -2201,15 +2168,6 @@ export type Database = {
         }
         Returns: Json
       }
-      list_admin_users: {
-        Args: {
-          after_id?: string
-          page_size?: number
-          role_filter?: string
-          search?: string
-        }
-        Returns: Json
-      }
       list_carts: { Args: never; Returns: Json }
       list_customer_orders: {
         Args: {
@@ -2464,22 +2422,6 @@ export type Database = {
           location_id: string
         }
         Returns: Json
-      }
-      set_user_role: {
-        Args: { role: string; user_id: string }
-        Returns: {
-          created_at: string
-          email: string
-          id: string
-          role: string
-          updated_at: string
-        }
-        SetofOptions: {
-          from: "*"
-          to: "profiles"
-          isOneToOne: true
-          isSetofReturn: false
-        }
       }
       transfer_inventory: {
         Args: {

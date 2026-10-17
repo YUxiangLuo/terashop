@@ -4,7 +4,6 @@ const scopeLabels: Record<string, string> = {
   'store:read': '读取店铺管理数据',
   'store:write': '修改店铺业务数据',
   'store:payments': '执行支付相关操作',
-  'store:access': '管理访问权限',
   'store:privacy': '执行隐私相关操作',
 };
 const escape = (value: string) =>

@@ -1,14 +1,9 @@
-import type {
-  orderLedger,
-  orderPricing,
-  fulfillmentBalance,
-} from "../../../mcp/src/schemas";
+import type { orderLedger, orderPricing } from "../../../mcp/src/schemas";
 import { paypalRefund } from "../../../mcp/src/schemas";
 
 export type OrderActionsLedger = typeof orderLedger._output;
 export type OrderActionsPricing = typeof orderPricing._output;
-export type ActionKind =
-  "cancel-order" | "cancel-line" | "mark-paid" | "paypal-refund";
+export type ActionKind = "cancel-order" | "mark-paid" | "paypal-refund";
 export interface SavedOrderAction {
   kind: ActionKind;
   arguments: Record<string, unknown>;
@@ -33,7 +28,7 @@ export function readOrderAction(
   const value: unknown = JSON.parse(raw);
   if (
     !object(value) ||
-    !["cancel-order", "cancel-line", "mark-paid", "paypal-refund"].includes(
+    !["cancel-order", "mark-paid", "paypal-refund"].includes(
       String(value.kind),
     ) ||
     !object(value.arguments) ||
@@ -47,27 +42,21 @@ export function readOrderAction(
   const allowed =
     value.kind === "cancel-order"
       ? ["order_id", "reason"]
-      : value.kind === "cancel-line"
-        ? ["order_id", "order_item_id", "quantity", "idempotency_key", "reason"]
-        : value.kind === "mark-paid"
-          ? ["order_id", "idempotency_key", "provider", "provider_ref"]
-          : [
-              "order_id",
-              "idempotency_key",
-              "amount",
-              "items",
-              "shipping_amount",
-              "reason",
-              "restock",
-            ];
+      : value.kind === "mark-paid"
+        ? ["order_id", "idempotency_key", "provider", "provider_ref"]
+        : [
+            "order_id",
+            "idempotency_key",
+            "amount",
+            "items",
+            "shipping_amount",
+            "reason",
+            "restock",
+          ];
   if (
     Object.keys(args).some((k) => !allowed.includes(k)) ||
     (value.kind !== "cancel-order" && !uuid(args.idempotency_key)) ||
     (args.reason !== undefined && typeof args.reason !== "string") ||
-    (value.kind === "cancel-line" &&
-      (!uuid(args.order_item_id) ||
-        !Number.isInteger(args.quantity) ||
-        Number(args.quantity) <= 0)) ||
     (value.kind === "mark-paid" &&
       [args.provider, args.provider_ref].some(
         (v) => v !== undefined && typeof v !== "string",
@@ -102,14 +91,4 @@ export function paypalAmount(value: string): string {
   )
     throw Error("Enter a positive USD amount with at most two decimal places.");
   return normalized;
-}
-
-export function lineAvailable(
-  balance: typeof fulfillmentBalance._output,
-  itemId: string,
-) {
-  return (
-    balance.lines.find((line) => line.order_item_id === itemId)
-      ?.available_quantity ?? 0
-  );
 }

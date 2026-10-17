@@ -183,20 +183,14 @@ export async function verifyLocalAuthorization(
     assert.equal(bindings[2].session_id, bindings[3].session_id);
     assert.notEqual(bindings[0].subject, bindings[2].subject);
     async function read(index: number) {
-      const id = users[Math.floor(index / 2)].id;
-      const profile = await toolData<{ user_id: string; role: string }>(
-        sessions[index].client,
-        'get_admin_user',
-        { user_id: id },
-      );
-      assert.equal(profile.user_id, id);
-      assert.equal(profile.role, 'admin');
+      const settings = await toolData<{ currency: string }>(sessions[index].client, 'get_admin_shop_settings', {});
+      assert.equal(settings.currency, 'USD');
     }
     async function denied(index: number) {
       calls[index].length = 0;
       const result = await sessions[index].client.callTool({
-        name: 'get_admin_user',
-        arguments: { user_id: users[0].id },
+        name: 'get_admin_shop_settings',
+        arguments: {},
       });
       assert.equal(result.isError, true);
       const error = JSON.parse((result.content as { text: string }[])[0].text);
@@ -206,7 +200,7 @@ export async function verifyLocalAuthorization(
     }
     for (let i = 0; i < 4; i++) {
       await read(i);
-      assert.deepEqual(calls[i], ['/auth/v1/user', '/rest/v1/rpc/is_admin', '/rest/v1/rpc/get_admin_user']);
+      assert.deepEqual(calls[i], ['/auth/v1/user', '/rest/v1/rpc/is_admin', '/rest/v1/rpc/get_admin_shop_settings']);
       const tools = await sessions[i].client.listTools();
       assert.equal(
         tools.tools.some((t) => t.name === 'create_customer'),
@@ -243,8 +237,8 @@ export async function verifyLocalAuthorization(
     );
     sessions.push(wrong);
     const mismatch = await wrong.client.callTool({
-      name: 'get_admin_user',
-      arguments: { user_id: users[0].id },
+      name: 'get_admin_shop_settings',
+      arguments: {},
     });
     assert.equal(mismatch.isError, true);
     const mismatchError = JSON.parse((mismatch.content as { text: string }[])[0].text);

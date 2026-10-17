@@ -36,10 +36,7 @@
     {
       name: "Customers",
       href: "/customers",
-      links: [
-        ["Customers", "/customers"],
-        ["Users & roles", "/users"],
-      ],
+      links: [["Customers", "/customers"]],
     },
     {
       name: "Promotions",

@@ -120,20 +120,20 @@ try {
   }
   await click("Show children of Smoke parent");
   await wait("Smoke child");
-  await wait("Live category updates connected.");
-  // A visible expanded branch must discover new rows without a page remount.
+  // Refreshing an expanded branch must discover new rows without a page remount.
   await api(
     "/rest/v1/categories",
     "POST",
     extras.map((id, i) => ({
       id,
       parent_id: parent,
-      name: `Live child ${i}`,
+      name: `Extra child ${i}`,
       slug: `${prefix}-${i}`,
       is_active: false,
     })),
   );
-  await wait("Live child 0");
+  await click("Refresh tree");
+  await wait("Extra child 0");
   const parentRow = `document.querySelector('a[href="/categories/${parent}"]').closest('li')`;
   await browser(
     "wait",
@@ -144,7 +144,7 @@ try {
     "eval",
     `[...${parentRow}.querySelectorAll('button')].find(b=>b.textContent.includes('Load more categories')).click()`,
   );
-  await wait("Live child 20");
+  await wait("Extra child 20");
   await browser(
     "wait",
     "--fn",
@@ -165,44 +165,47 @@ try {
   })()`,
   );
   await api(`/rest/v1/categories?id=in.(${extras[0]},${extras[20]})`, "PATCH", {
-    name: "Live renamed child",
+    name: "Renamed child",
   });
+  await click("Refresh tree");
   await wait("Displayed categories may be stale.");
   await browser(
     "eval",
     `(() => {
     const row=${parentRow};
-    if(!row.textContent.includes('Live child 0') || !row.textContent.includes('Live child 20') || row.textContent.includes('Live renamed child') || !row.querySelector('[aria-expanded=true]'))throw Error('Refresh discarded pages or expansion');
+    if(!row.textContent.includes('Extra child 0') || !row.textContent.includes('Extra child 20') || row.textContent.includes('Renamed child') || !row.querySelector('[aria-expanded=true]'))throw Error('Refresh discarded pages or expansion');
   })()`,
   );
-  await browser("screenshot", "/tmp/admin-category-live-error.png", "--full");
+  await browser("screenshot", "/tmp/admin-category-refresh-error.png", "--full");
   await click("Retry categories");
   await browser(
     "wait",
     "--fn",
-    `[...${parentRow}.querySelectorAll('a.record-link')].filter(a=>a.textContent==='Live renamed child').length===2 && !document.body.innerText.includes('Loading categories…')`,
+    `[...${parentRow}.querySelectorAll('a.record-link')].filter(a=>a.textContent==='Renamed child').length===2 && !document.body.innerText.includes('Loading categories…')`,
   );
   await browser("set", "viewport", "390", "844");
   await browser(
     "eval",
-    `if(document.documentElement.scrollWidth>innerWidth)throw Error('Live tree overflow')`,
+    `if(document.documentElement.scrollWidth>innerWidth)throw Error('Tree overflow')`,
   );
-  await browser("screenshot", "/tmp/admin-category-live-mobile.png", "--full");
+  await browser("screenshot", "/tmp/admin-category-refresh-mobile.png", "--full");
   await browser("set", "viewport", "1440", "1000");
   // Moving a row out must remove it from the expanded branch on the next reread.
   await api(`/rest/v1/categories?id=eq.${extras[20]}`, "PATCH", {
     parent_id: null,
   });
+  await click("Refresh tree");
   await browser(
     "wait",
     "--fn",
     `!${parentRow}.querySelector('a[href="/categories/${extras[20]}"]')`,
   );
   await api(`/rest/v1/categories?id=in.(${extras.join(",")})`, "DELETE");
+  await click("Refresh tree");
   await browser(
     "wait",
     "--fn",
-    `!document.body.innerText.includes('Live child') && !document.body.innerText.includes('Live renamed child') && !document.body.innerText.includes('Loading categories…')`,
+    `!document.body.innerText.includes('Extra child') && !document.body.innerText.includes('Renamed child') && !document.body.innerText.includes('Loading categories…')`,
   );
   await browser("screenshot", "/tmp/admin-category-tree.png");
   await browser(
@@ -221,20 +224,21 @@ try {
     'location.search.includes("active=yes") && document.body.innerText.includes("Smoke child") && !document.body.innerText.includes("Smoke parent")',
   );
   await browser("screenshot", "/tmp/admin-category-filter.png");
-  // Live results use applied URL filters, without discarding an unsubmitted search.
-  await wait("Live category updates connected.");
+  // Refreshed results use applied URL filters, without discarding an unsubmitted search.
   await browser("fill", "input[type=search]", "Unsubmitted search");
   await api(`/rest/v1/categories?id=eq.${parent}`, "PATCH", {
     is_active: true,
   });
+  await click("Refresh tree");
   await wait("Smoke parent");
   await browser(
     "eval",
-    `if(document.querySelector('input[type=search]').value!=='Unsubmitted search' || !location.search.includes('active=yes'))throw Error('Live refresh replaced filter draft or URL')`,
+    `if(document.querySelector('input[type=search]').value!=='Unsubmitted search' || !location.search.includes('active=yes'))throw Error('Refresh replaced filter draft or URL')`,
   );
   await api(`/rest/v1/categories?id=eq.${parent}`, "PATCH", {
     is_active: false,
   });
+  await click("Refresh tree");
   await browser(
     "wait",
     "--fn",
@@ -299,7 +303,7 @@ try {
   await wait("Smoke parent · Inactive");
   await browser("wait", 'button[aria-label="Unassign Smoke child"]');
   console.log(
-    "Category browser smoke passed: live expanded tree, multi-page atomic refresh/retry, live move/removal, filter draft retention, create, parent/status/position, stale-write lock, explicit reload, root move, product picker selection retention.",
+    "Category browser smoke passed: expanded tree refresh, multi-page atomic refresh/retry, move/removal, filter draft retention, create, parent/status/position, stale-write lock, explicit reload, root move, product picker selection retention.",
   );
 } catch (cause) {
   try {

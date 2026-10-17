@@ -15,7 +15,7 @@ SSG 只生成公开目录和页面外壳；购物车、地址、报价、订单�
 1. 在地址、配送和优惠选择完成后创建 Quote，展示数据库金额和 `expires_at`。不要在打开商品页时预占库存。
 2. 用户确认后调用 `create_order_from_quote`。报价过期或价格 hash 变化时重新报价并要求确认，不能静默接受新价格。无须单独确认报价的流程可用幂等 `create_order`。
 3. 保存本地订单 ID；若订单已是 `paid`（包括零元订单），直接展示订单，不创建 PayPal 支付。
-4. 为本次支付尝试生成并持久化 `idempotency_key`，调用 `paypal-create-order`，请求为 `order_id`、该键和可选的 `payment_method`（默认 `paypal`；站内卡支付为 `card`，见下文）。金额、币种、地址、跳转 URL 由后端决定。
+4. 为本次支付尝试生成并持久化 `idempotency_key`，调用 `paypal-create-order`，请求为 `order_id` 和该键。只支持 PayPal 钱包付款；金额、币种、地址、跳转 URL 由后端决定。
 5. 保存 `{order_id,payment_intent_id,provider_reference,idempotency_key,expires_at}`。`provider_reference` 是 PayPal Order ID，不是本地订单或 Capture ID。按订单/PayPal Order 分别存储，不用一个全局“当前支付”覆盖多标签页。
 6. 跳转到响应的 `approve_url`；`null` 不表示成功，先查询本地订单，必要时恢复原意图。若采用官方 Buttons，`createOrder` 返回 PayPal Order ID，`onApprove` 调用下面的 Capture Edge，不能把本地 UUID 交给 SDK。
 7. 买家批准后，以原会话调用 `paypal-capture-order`，仅传 `payment_intent_id`。不要从浏览器调用 service-only RPC，不自行 POST PayPal REST Capture。
@@ -23,44 +23,16 @@ SSG 只生成公开目录和页面外壳；购物车、地址、报价、订单�
 
 Quote、订单创建、支付尝试是不同幂等范围。每次网络重试复用对应操作的原键/原参数；不要每次点击生成新支付键。一个订单最多一个活跃 PaymentIntent。创建响应丢失先以原键重试；已终态可能返回 `payment_intent_terminal`，此时重读订单和意图，不自动发起新付款。
 
-配送地址在本地订单中固定，钱包流程使用 `SET_PROVIDED_ADDRESS`，卡流程也从同一本地快照构建 purchase unit shipping。卡 SDK 收集的 billing address 不是配送地址。需要改址时取消可取消的未付款订单并重新结账；捕获结果不明时不能绕过保护取消。当前不支持在 PayPal 内改址再原地重算订单。
+配送地址在本地订单中固定，钱包流程使用 `SET_PROVIDED_ADDRESS`。需要改址时取消可取消的未付款订单并重新结账；捕获结果不明时不能绕过保护取消。当前不支持在 PayPal 内改址再原地重算订单。
 
-## 站内一次性信用卡 / 借记卡支付（SDK v6）
+当前未提供同订单自动更换付款尝试：保持原尝试；明确放弃且订单允许取消时可取消订单并重新结账，否则等待恢复/对账。SDK 取消、失败或 HTTP 超时均不授权另发扣款。
 
-后端已提供接入合同；现有 Storefront 未接入卡支付，尚无真实 Sandbox 卡和浏览器支付验收结果。卡支付默认关闭，不包含保存卡、订阅或平台商户 onboarding。Visa/Mastercard 等卡种是否可用取决于商户 Expanded Checkout 审批、所在国家、币种和 PayPal SDK eligibility；配置一个 client ID 不等于获得卡收单资格。
+## Sandbox / 上线验收仍待完成
 
-服务端开关、商户域名和 CORS 配置见 [支付与部署](../supabase/functions/README.md#paypal-orders-v2--payments-v2)。domain binding 不替代 CORS 或认证；正式开启前完成下方 Sandbox 清单。
-
-1. 在运行时加载 PayPal JS SDK v6，恢复 Supabase 用户会话（含匿名 Auth），不要在 SSG 构建时获取 token。
-2. `POST /functions/v1/paypal-client-token`，带用户 Bearer JWT，body 可为 `{}`。响应仅含 `{client_token, expires_in}`，带 `Cache-Control: no-store`。这个 token 来自 OAuth `response_type=client_token&intent=sdk_init`，不是支付 REST API 的服务器 access token。仅在内存中保留，过期重新获取，不写静态文件、日志或共享 CDN 缓存。页面初始化合并并发请求；部署网关必须对 token 和支付接口按 IP/用户限流，当前 handler 不提供分布式限流。
-3. 用 `paypal.createInstance({clientToken, components: ['card-fields']})` 初始化 SDK，并按官方 eligibility 指引只对符合条件的用户展示卡表单；不可用时在创建支付意图前提供钱包选择。
-4. 创建 `createCardFieldsOneTimePaymentSession()`，挂载 SDK 的 `number` / `cvv` / `expiry` hosted components。PAN/CVV 直接进入 PayPal iframe，不经过 Supabase、Edge、应用日志或埋点。不要创建自己的卡号输入框或向本接口发送卡字段。
-5. 用户点击付款时，以固定幂等键调用 `paypal-create-order`：
-
-   ```json
-   {"order_id":"本地订单 UUID","idempotency_key":"本次尝试的固定键","payment_method":"card"}
-   ```
-
-   保存响应中的本地 `payment_intent_id` 和 PayPal `provider_reference`；卡响应的 `approve_url=null` 是预期行为。后端设定 `SCA_WHEN_REQUIRED`，客户端不能改变 SCA 策略。
-6. 调用 `session.submit(provider_reference, {billingAddress})`。处理全部状态：`succeeded` 才进入 Capture；`canceled` 不扣款、不自动取消本地订单；`failed` 展示可恢复错误并查询状态。禁用重复提交，刷新后恢复原意图，页面退出时按 SDK 生命周期清理卡组件。
-7. `succeeded` 不是本地支付完成。以原会话调用 `paypal-capture-order`，仅传 `{payment_intent_id}`；后端从 PayPal GET 绑定 Order，不接受浏览器的卡来源、金额或 `liabilityShift` 作为证据。最后仍查询本地 `financial_status=paid`。
-
-### 服务端卡认证策略
-
-后端使用真实 PayPal Order 校验 `SCA_WHEN_REQUIRED`，不信任浏览器的认证结果；拒绝时可能返回 `paypal_card_authentication_required`，不能通过客户端跳过验证。完整允许／拒绝规则及已发生资金的处理见 [ADR-011 卡认证策略](architecture-decisions.md#服务端卡认证策略)。
-
-当前未提供同订单自动换钱包/卡的操作：选定方式后保持原尝试；明确放弃且订单允许取消时可取消订单并重新结账，否则等待恢复/对账。SDK 取消、失败或 HTTP 超时均不授权另发扣款。
-
-### Sandbox / 上线验收仍待完成
-
-- 确认商户 Expanded Checkout 资格；验证 token 的域绑定、实际 SDK v6 加载及 eligibility。
-- Visa/Mastercard 成功、免挑战、豁免、未参与 3DS，以及 3DS 成功/失败/取消/超时；确认实际认证字段与 ADR 策略相符。
 - 钱包真实批准跳转、JS SDK 参数兼容性、资金来源失败恢复、Pending 到终态与商户资金记录。
 - 测试移动端/App Switch、返回页恢复、双击、多标签页、会话刷新/过期/丢失及浏览器 CSP。
 - 真实 Webhook postback、Capture 响应丢失、Webhook 先到、重复通知、后台对账、退款及拒付运营流程。
-- 部署网关限流、监控、日志脱敏和 PCI 合规检查；hosted fields 不等于无需商户合规责任。
-
-参考：[PayPal v6 3DS](https://developer.paypal.com/expanded/3d-secure)、[商户资格](https://developer.paypal.com/expanded/eligibility)、[WooCommerce v6 token](https://github.com/woocommerce/woocommerce-paypal-payments/blob/trunk/modules/ppcp-api-client/src/Authentication/SdkClientToken.php)、[WooCommerce Capture 验证](https://github.com/woocommerce/woocommerce-paypal-payments/blob/trunk/modules/ppcp-card-fields/src/Service/CardCaptureValidator.php)。
+- 部署网关限流、监控和日志脱敏。
 
 ## 返回页与取消页
 
@@ -93,7 +65,7 @@ Quote、订单创建、支付尝试是不同幂等范围。每次网络重试复
 
 浏览器订单查询可用有上限的退避（例如 2、4、8 秒，之后间隔 10 秒），页面不可见时暂停，等待超限展示“仍在确认，可稍后查看订单”；不要每次查询都调用 Capture，也不要永远锁住页面等待。后续由 Worker/Webhook 收尾。
 
-当前 Capture POST 的 `INSTRUMENT_DECLINED` 只返回归一化错误码，不会单凭该 HTTP 响应伪造失败 Capture 事件或清除发送标记。官方 SDK 的 restart、原 Order 再批准/再 Capture 与本地意图终态的组合尚需真实 Sandbox 验证；未完成前不要提供会自动生成新意图的“换卡重试”。后台 GET 没发现 Capture 也不是可信失败终态。
+当前 Capture POST 的 `INSTRUMENT_DECLINED` 只返回归一化错误码，不会单凭该 HTTP 响应伪造失败 Capture 事件或清除发送标记。官方 SDK 的 restart、原 Order 再批准/再 Capture 与本地意图终态的组合尚需真实 Sandbox 验证；未完成前不要提供会自动生成新意图的“换资金来源重试”。后台 GET 没发现 Capture 也不是可信失败终态。
 
 ## 后台恢复与上线验收
 

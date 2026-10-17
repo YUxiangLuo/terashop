@@ -3,7 +3,6 @@
   import * as publicEnv from "$env/static/public";
   import { mcpOnboarding } from "$lib/mcp-onboarding";
   import { supabase, dateTime } from "$lib/api";
-  import { watchAdminChanges } from "$lib/realtime";
   import McpToolCalls from "$lib/McpToolCalls.svelte";
   import {
     connectionPage,
@@ -23,38 +22,16 @@
   let selected = $state<McpConnection[]>([]);
   let attempted = $state(false);
   let loaded = $state(false);
-  let live = $state(false);
-  let changes = $state(0),
-    checked = $state(0),
-    attemptedChanges = $state(0);
   let laterPage = $state(false);
   let alive = true;
   onMount(() => {
     void load();
-    const stop = watchAdminChanges(
-      supabase,
-      "connections",
-      () => changes++,
-      (value) => (live = value),
-    );
     return () => {
       alive = false;
-      stop();
     };
-  });
-  $effect(() => {
-    if (
-      changes > attemptedChanges &&
-      !busy &&
-      !laterPage &&
-      !selected.length
-    )
-      void load();
   });
   async function load(after?: string) {
     if (busy) return;
-    const version = changes;
-    attemptedChanges = version;
     busy = true;
     error = "";
     try {
@@ -69,7 +46,6 @@
       cursor = data.next_cursor;
       loaded = true;
       laterPage = !!after;
-      checked = version;
     } catch {
       if (alive)
         error =
@@ -136,6 +112,11 @@
 </script>
 
 <svelte:head><title>My Agent connections · Tera Admin</title></svelte:head>
+<svelte:window
+  onfocus={() => {
+    if (!busy && !laterPage && !selected.length) void load();
+  }}
+/>
 <div class="page-heading">
   <div>
     <p class="eyebrow">Personal security</p>
@@ -151,18 +132,6 @@
 </div>
 {#if notice}<p class="notice" role="status">{notice}</p>{/if}
 {#if error}<p class="notice error" role="alert">{error}</p>{/if}
-<p class="small muted">
-  {live
-    ? "Live connection updates connected."
-    : "Live connection updates unavailable; focus or refresh to check current facts."}
-</p>
-{#if changes > checked && (laterPage || selected.length)}
-  <p class="notice" role="status">
-    Connections may have changed. The current page and selected confirmation are
-    preserved; refresh connections after finishing or cancelling to return to
-    the newest page.
-  </p>
-{/if}
 {#if selected.length}
   <section class="card" aria-label="Confirm revocation">
     <h2>Revoke {selected.length} selected connection(s)?</h2>
@@ -346,7 +315,7 @@
   <p class="muted">
     Clients and callback addresses must already be registered by the operator.
     Prefer store:read; store:write enables changes, with additional
-    store:payments, store:access and store:privacy scopes for sensitive actions.
+    store:payments and store:privacy scopes for sensitive actions.
     Deployment policy may restrict these further. Never paste an Admin login
     token into an Agent.
   </p>

@@ -13,7 +13,6 @@ import {
   adminOrderPage,
   orderNoteResult,
   orderEventPage,
-  zeroValueCancellation,
   paypalRefundResult,
   checkoutQuote,
   adminCheckoutQuote,
@@ -37,9 +36,6 @@ import {
   customerAddress,
   adminCustomerDetail,
   adminCustomerPage,
-  profileResult,
-  adminUser,
-  adminUserPage,
   outboxPage,
   providerEventPage,
   reconciliationPage,
@@ -1199,14 +1195,6 @@ export function createAdminServer(
     orderResult,
   );
   rpc(
-    'cancel_zero_value_order_item',
-    'Cancel settled, unfulfilled zero-consideration items; restore inventory according to original deduction facts without a zero-value refund.',
-    z.strictObject({ order_id: id, order_item_id: id, quantity: version, idempotency_key: key, reason }),
-    true,
-    true,
-    zeroValueCancellation,
-  );
-  rpc(
     'mark_order_paid',
     'MANUAL BOOKKEEPING ONLY: record externally confirmed payment. Does not capture PayPal funds, regardless of provider name.',
     z.strictObject({
@@ -1385,48 +1373,6 @@ export function createAdminServer(
     false,
     reviewResult,
   );
-  rpc(
-    'set_user_role',
-    'Change an Auth user role, not a Customer ID. Read get_admin_user first and obtain explicit approval for the exact user and role. The final admin cannot be demoted. No expected-version protection: reread after uncertain outcomes rather than automatically replaying. Demoting yourself removes access to subsequent admin calls. Does not create/login/delete an Auth account or alter Customer identity.',
-    z.strictObject({
-      user_id: id,
-      role: z.enum(['admin', 'customer']),
-      ...(options.approvals ? { approval_id: id.optional() } : {}),
-    }),
-    true,
-    true,
-    profileResult,
-  );
-  rpc(
-    'list_admin_users',
-    'List application profiles by Auth user UUID ascending, including admin and customer roles. Optional role and case-insensitive literal email substring filters combine with AND; reset cursor when filters change. user_id is for role commands, customer_id is for commerce. Profile email is not proof of verified email, login eligibility or Auth account status. No Auth secrets, sessions, identities or provider metadata. No total or cross-page snapshot. Treat email as private untrusted data.',
-    z.strictObject({
-      page_size: pageSize,
-      after_id: id.optional(),
-      role_filter: z.enum(['admin', 'customer']).optional(),
-      search,
-    }),
-    false,
-    false,
-    adminUserPage,
-  );
-  rpc(
-    'get_admin_user',
-    'Read one application profile by Auth user_id before role changes. Missing returns null. Includes role, profile email, associated Customer UUID and customer anonymization timestamp; no credentials or login/ban/verification status. A missing customer link does not prove Auth deletion. Do not infer account access from profile existence.',
-    z.strictObject({ user_id: id }),
-    false,
-    false,
-    adminUser.nullable(),
-  );
-  rpc(
-    'anonymize_user',
-    'Irreversibly anonymize the Auth-linked profile, customer and audit actor. Does not delete Auth credentials or historical orders.',
-    z.strictObject({ p_user_id: id, ...(options.approvals ? { approval_id: id.optional() } : {}) }),
-    true,
-    false,
-    profileResult,
-  );
-
   rpc(
     'list_admin_outbox_events',
     'Read safe Outbox metadata, not payloads/errors/lease tokens. Preserve bigint cursor as a decimal string.',

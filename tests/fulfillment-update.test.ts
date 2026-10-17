@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { api, checked, makeAdmin, rpc, signup, stockOf, type TestUser } from './helpers';
+import { api, checked, makeAdmin, rpc, setRole, signup, stockOf, type TestUser } from './helpers';
 import { fixtureOrder } from './payment-fixtures';
 import { stockedProduct, type CatalogFixture } from './support/catalog';
 import { Cleanup } from './support/cleanup';
@@ -98,7 +98,7 @@ test('拒绝非法字段、越权、缺失资源；降级后不能重放', async
   expect((await rpc('update_fulfillment', body)).status).toBe(401);
   expect((await rpc('update_fulfillment', { ...body, fulfillment_id: crypto.randomUUID() }, admin.token)).data).toMatchObject({ code: 'PT404' });
   await checked(rpc('update_fulfillment', body, other.token));
-  await checked(rpc('set_user_role', { user_id: other.userId, role: 'customer' }, admin.token));
+  await setRole(other.userId, 'customer');
   try { expect((await rpc('update_fulfillment', body, other.token)).data).toMatchObject({ code: '42501' }); }
   finally { await makeAdmin(other.userId); }
 });

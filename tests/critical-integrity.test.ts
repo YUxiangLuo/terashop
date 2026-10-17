@@ -406,46 +406,4 @@ describe('关键完整性：并发、库存和审计', () => {
     const defaults = (data as { is_default: boolean }[]).filter((row) => row.is_default);
     expect(defaults.length).toBe(1);
   });
-
-  test('两个 admin 并发降级不能把管理员数量降为 0', async () => {
-    const first = await signup();
-    const second = await signup();
-    await makeAdmin(first.userId);
-    await makeAdmin(second.userId);
-
-    const { data: originalAdmins } = await api('/rest/v1/profiles?role=eq.admin&select=id', {
-      service: true,
-    });
-    const originalIds = (originalAdmins as { id: string }[])
-      .map((row) => row.id)
-      .filter((id) => id !== first.userId && id !== second.userId);
-
-    try {
-      for (const id of originalIds) {
-        await api(`/rest/v1/profiles?id=eq.${id}`, {
-          service: true, method: 'PATCH', body: { role: 'customer' },
-        });
-      }
-
-      const [a, b] = await Promise.all([
-        rpc('set_user_role', { user_id: first.userId, role: 'customer' }, first.token),
-        rpc('set_user_role', { user_id: second.userId, role: 'customer' }, second.token),
-      ]);
-      expect([a.status, b.status].filter((status) => status < 300).length).toBe(1);
-
-      const { data: remaining } = await api('/rest/v1/profiles?role=eq.admin&select=id', {
-        service: true,
-      });
-      expect((remaining as unknown[]).length).toBe(1);
-    } finally {
-      for (const id of originalIds) {
-        await api(`/rest/v1/profiles?id=eq.${id}`, {
-          service: true, method: 'PATCH', body: { role: 'admin' },
-        });
-      }
-      await api(`/rest/v1/profiles?id=in.(${first.userId},${second.userId})`, {
-        service: true, method: 'PATCH', body: { role: 'customer' },
-      });
-    }
-  }, 30000); // Includes demoting/restoring all pre-existing local fixture admins.
 });

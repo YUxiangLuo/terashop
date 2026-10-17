@@ -7,16 +7,13 @@
   import {
     orderLedger,
     orderPricing,
-    fulfillmentBalance,
     adminOrderResult,
     orderResult,
-    zeroValueCancellation,
     paypalRefundResult,
     checkoutQuote,
   } from "../../../mcp/src/schemas";
   import {
     actionStorageKey,
-    lineAvailable,
     paypalAmount,
     readOrderAction,
     saveOrderAction,
@@ -30,7 +27,6 @@
     pricing = $state.raw<OrderActionsPricing | null>(null);
   let quoteId = $state<string | null>(null),
     pending = $state<SavedOrderAction | null>(null);
-  let balance = $state<typeof fulfillmentBalance._output | null>(null);
   let activityVersion = $state(0);
   let busy = $state(true),
     ready = $state(false),
@@ -39,9 +35,6 @@
   let cancelReason = $state(""),
     manualProvider = $state("manual"),
     manualReference = $state("");
-  let lineId = $state(""),
-    lineQuantity = $state("1"),
-    lineReason = $state("");
   let refundMode = $state<"amount" | "items" | "shipping">("amount"),
     refundAmount = $state("");
   let refundShipping = $state(""),
@@ -54,7 +47,6 @@
   let dirty = $derived(
     !!cancelReason ||
       !!manualReference ||
-      !!lineReason ||
       !!refundAmount ||
       !!refundShipping ||
       !!refundReason ||
@@ -91,21 +83,16 @@
       pending = readOrderAction(sessionStorage, key);
       if (pending && pending.arguments.order_id !== id)
         throw Error("The retained action belongs to another order.");
-      const [l, p, q, b] = await Promise.all([
+      const [l, p, q] = await Promise.all([
         supabase.rpc("get_order_ledger", { order_id: id }),
         supabase.rpc("get_order_pricing", { order_id: id }),
         supabase.rpc("get_order_checkout_quote", { order_id: id }),
-        supabase.rpc("get_order_fulfillment_balance", { order_id: id }),
       ]);
       if (!alive) return;
       if (l.error) throw l.error;
       if (p.error) throw p.error;
-      if (b.error) throw b.error;
       ledger = orderLedger.parse(l.data);
       pricing = orderPricing.parse(p.data);
-      balance = fulfillmentBalance.parse(b.data);
-      if (balance.order_id !== id)
-        throw Error("Fulfillment balance identity mismatch.");
       if (
         !ledger ||
         ledger.order.id !== id ||
@@ -134,7 +121,7 @@
   }
   async function rpcWrite(
     action: SavedOrderAction,
-    rpc: "cancel_order" | "cancel_zero_value_order_item" | "mark_order_paid",
+    rpc: "cancel_order" | "mark_order_paid",
   ) {
     await dispatchCommand(
       sessionStorage,
@@ -143,22 +130,11 @@
       () => supabase.rpc(rpc, action.arguments as never),
       (data) => {
         const receipt =
-          rpc === "cancel_zero_value_order_item"
-            ? zeroValueCancellation.parse(data)
-            : rpc === "mark_order_paid"
-              ? adminOrderResult.parse(data)
-              : orderResult.parse(data);
-        if ("order_id" in receipt ? receipt.order_id !== id : receipt.id !== id)
+          rpc === "mark_order_paid"
+            ? adminOrderResult.parse(data)
+            : orderResult.parse(data);
+        if (receipt.id !== id)
           throw Error("The server receipt could not be bound to this order.");
-        if (
-          rpc === "cancel_zero_value_order_item" &&
-          (!("order_item_id" in receipt) ||
-            receipt.order_item_id !== action.arguments.order_item_id ||
-            receipt.quantity !== action.arguments.quantity)
-        )
-          throw Error(
-            "The cancellation receipt did not match the retained line and quantity.",
-          );
         return true;
       },
     );
@@ -170,7 +146,6 @@
       !ready ||
       !ledger ||
       !pricing ||
-      !balance ||
       pending ||
       !confirmed[kind]
     )
@@ -195,28 +170,6 @@
           ...(manualReference.trim()
             ? { provider_ref: manualReference.trim() }
             : {}),
-        });
-      } else if (kind === "cancel-line") {
-        const quantity = Number(lineQuantity),
-          line = pricing.lines.find((x) => x.id === lineId);
-        if (
-          !line ||
-          line.line_total !== 0 ||
-          !Number.isInteger(quantity) ||
-          quantity < 1 ||
-          quantity > lineAvailable(balance, line.id)
-        )
-          throw Error(
-            "Choose an eligible zero-value line and valid available quantity.",
-          );
-        if (!lineReason.trim() || lineReason.length > 2000)
-          throw Error("Enter a reason of at most 2000 characters.");
-        action = prepare(kind, {
-          order_id: id,
-          order_item_id: line.id,
-          quantity,
-          idempotency_key: crypto.randomUUID(),
-          reason: lineReason.trim(),
         });
       } else {
         const args: Record<string, unknown> = {
@@ -299,11 +252,7 @@
       } else
         await rpcWrite(
           action,
-          kind === "cancel-order"
-            ? "cancel_order"
-            : kind === "cancel-line"
-              ? "cancel_zero_value_order_item"
-              : "mark_order_paid",
+          kind === "cancel-order" ? "cancel_order" : "mark_order_paid",
         );
       confirmed = {};
       await load();
@@ -387,11 +336,7 @@
       } else
         await rpcWrite(
           action,
-          action.kind === "cancel-order"
-            ? "cancel_order"
-            : action.kind === "cancel-line"
-              ? "cancel_zero_value_order_item"
-              : "mark_order_paid",
+          action.kind === "cancel-order" ? "cancel_order" : "mark_order_paid",
         );
       await load();
     } catch (cause) {
@@ -441,7 +386,7 @@
       >Retry retained request</button
     >
   </section>{/if}
-{#if ledger && pricing && balance}
+{#if ledger && pricing}
   <section class="card">
     <h2>Current facts</h2>
     <p>
@@ -475,33 +420,6 @@
         this cancellation and its reservation release.</label
       ><button onclick={() => submit("cancel-order")}
         >Cancel eligible order</button
-      >
-    </section>
-    <section class="card">
-      <h2>Cancel settled zero-value line</h2>
-      <label
-        >Line<select bind:value={lineId}
-          ><option value="">Choose line</option
-          >{#each pricing.lines.filter((x) => x.line_total === 0 && lineAvailable(balance!, x.id) > 0) as line}<option
-              value={line.id}
-              >{line.name} · {lineAvailable(balance!, line.id)} available</option
-            >{/each}</select
-        ></label
-      ><label
-        >Quantity<input
-          type="number"
-          min="1"
-          step="1"
-          bind:value={lineQuantity}
-        /></label
-      ><label
-        >Reason<textarea bind:value={lineReason} maxlength="2000"
-        ></textarea></label
-      ><label class="check-label"
-        ><input type="checkbox" bind:checked={confirmed["cancel-line"]} /> I confirm
-        this is a settled, unfulfilled zero-consideration cancellation.</label
-      ><button onclick={() => submit("cancel-line")}
-        >Cancel zero-value units</button
       >
     </section>
     <section class="card">

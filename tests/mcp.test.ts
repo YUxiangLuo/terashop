@@ -221,7 +221,7 @@ test('MCP 创建和修改保留四类子资源的负数排序位置', async () =
   expect(created).toMatchObject({ variants: [{ position: -2147483648 }] });
 });
 
-test('MCP 零对价订单报价与取消回执保留独立事实和幂等结果', async () => {
+test('MCP 零对价订单报价保留独立事实并链接 Admin 报价', async () => {
   const product = await stockedProduct(admin, { onHand: 9, price: 0, cleanup });
   const order = await fixtureOrder(product, buyer, 2);
   const quote = await toolData<{ id: string }>(session.client, 'get_order_checkout_quote', {
@@ -253,20 +253,6 @@ test('MCP 零对价订单报价与取消回执保留独立事实和幂等结果'
     });
     expect(JSON.stringify(result.content.filter((x) => x.type === 'resource_link'))).not.toContain(order.id);
   }
-  const args = {
-    order_id: order.id,
-    order_item_id: order.itemId,
-    quantity: 1,
-    idempotency_key: crypto.randomUUID(),
-  };
-  const first = await toolData<{ id: string; quantity: number; restocked_quantity: number }>(
-    session.client,
-    'cancel_zero_value_order_item',
-    args,
-  );
-  expect(first).toMatchObject({ quantity: 1, restocked_quantity: 1 });
-  expect(await toolData<typeof first>(session.client, 'cancel_zero_value_order_item', args)).toEqual(first);
-  expect(await stockOf(product.sku)).toBe(8);
 });
 
 test('MCP 订单手工记账→履约→版本化物流→账本读取', async () => {

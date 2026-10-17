@@ -105,7 +105,7 @@ try {
         next_cursor = !args.type_filter && !args.after_id ? '9007199254740995' : null;
       } else {
         const common = {...base, id:'00000000-0000-4000-8000-000000000001', provider:'paypal', amount:'19.49', currency:'USD', status:'processing', metadata:{secret:'DO-NOT-EXPOSE'}, failure_message:'DO-NOT-EXPOSE'};
-        if (args.kind === 'payment_intent') items = [{...common, payment_method:'card', provider_poll_attempts:0}];
+        if (args.kind === 'payment_intent') items = [{...common, provider_poll_attempts:0}];
         if (args.kind === 'refund_request') items = [{...common, status:'requested', source:'custom_amount', restock_requested:true, has_error:true, provider_poll_attempts:3}];
         if (args.kind === 'money_movement') items = [{...common, kind:'refund', amount:'1234567890.12345678', currency:'EUR', reconciliation_status:'action_required', has_error:true}];
       }

@@ -401,7 +401,7 @@ test('数量/类型/空输入有界，拒绝无效处置方式和不能认证的
 test('新增事实仅允许 actor 单向匿名化，客户匿名化保留交易/收货处置历史', async () => {
   const staff=await signup(); await makeAdmin(staff.userId); const s=await shipped(1);
   const r=await authorize(s,1,crypto.randomUUID(),staff.token); const receipt=await receive(r,1,location,crypto.randomUUID(),staff.token); const d=await disposition(receipt,1,'restock',crypto.randomUUID(),staff.token);
-  await checked(rpc('anonymize_user',{p_user_id:staff.userId},admin.token));
+  await checked(api(`/auth/v1/admin/users/${staff.userId}`,{service:true,method:'DELETE'}));
   for (const [table,id] of [['returns',r.id],['return_receipts',receipt.id],['return_dispositions',d.id]]) {
     const [row]=await database.unsafe(`select actor_id from commerce.${table} where id=$1::uuid`,[id]); expect(row.actor_id).toBeNull();
     await expect(database.unsafe(`update commerce.${table} set actor_id=$1::uuid where id=$2::uuid`,[staff.userId,id]).execute()).rejects.toThrow();

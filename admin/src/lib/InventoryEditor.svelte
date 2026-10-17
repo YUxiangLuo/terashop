@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import { beforeNavigate } from "$app/navigation";
   import InventoryHistory from "./InventoryHistory.svelte";
-  import { watchAdminChanges } from "./realtime";
   import { variantLabel } from "./catalog";
   import {
     allowsNewInventoryOperation,
@@ -46,9 +45,6 @@
   let notice = $state("");
   let pending = $state<StockCommand | null>(null);
   let historyVersion = $state(0);
-  let live = $state(false);
-  let changes = $state(0),
-    checked = $state(0);
   let dirty = $derived(!pending && (delta !== undefined || note.length > 0));
   let operationAllowed = $derived(
     allowsNewInventoryOperation(locations, location),
@@ -62,16 +58,9 @@
 
   onMount(() => {
     void init();
-    const stop = watchAdminChanges(
-      supabase,
-      "inventory",
-      () => changes++,
-      (value) => (live = value),
-    );
     return () => {
       alive = false;
       generation++;
-      stop();
     };
   });
   beforeNavigate(({ cancel }) => {
@@ -154,7 +143,6 @@
   }
   async function refresh() {
     const current = ++generation;
-    const version = changes;
     inventory = null;
     if (!variant || !location) return;
     busy = true;
@@ -167,7 +155,6 @@
       if (!alive || current !== generation) return;
       if (result.error) throw result.error;
       inventory = result.data as unknown as Inventory;
-      checked = version;
       historyVersion++;
     } catch (cause) {
       if (alive && current === generation) error = message(cause);
@@ -266,17 +253,6 @@
   </p>
   {#if disabled}<p class="notice">
       Save or discard product edits before adjusting stock.
-    </p>{/if}
-  <p class="small muted">
-    {live
-      ? "Live stock notifications connected."
-      : "Live stock notifications unavailable; refresh to check current facts."}
-    Reservation expiry alone may not send a notification.
-  </p>
-  {#if changes > checked}<p class="notice" role="status">
-      Inventory may have changed. Refresh stock to check current balances and
-      movements. Inputs and saved operations are preserved; a balance does not
-      prove an operation succeeded.
     </p>{/if}
   {#if error}<p class="notice error" role="alert">{error}</p>{/if}
   {#if notice}<p class="notice" role="status">{notice}</p>{/if}

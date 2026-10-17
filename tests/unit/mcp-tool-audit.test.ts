@@ -25,7 +25,6 @@ test('resource references use only exact tool/key mappings and UUIDs', () => {
   });
   expect(auditResourceRef('get_admin_product', { product_id: 'bad', order_id: id })).toBeUndefined();
   expect(auditResourceRef('unknown_tool', { product_id: id })).toBeUndefined();
-  expect(auditResourceRef('get_admin_user', { user_id: id })).toBeUndefined();
   expect(auditResourceRef('get_admin_customer', { user_id: id })).toBeUndefined();
 });
 

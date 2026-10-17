@@ -67,7 +67,7 @@ const adjust = (delta: number) =>
       variant_id: variant,
       location_id: from,
       delta,
-      note: "Realtime smoke",
+      note: "Concurrent stock smoke",
       idempotency_key: crypto.randomUUID(),
     },
     true,
@@ -123,7 +123,6 @@ try {
   await browser("fill", "input[type=email]", email);
   await browser("fill", "input[type=password]", password);
   await click("Sign in");
-  await browser("wait", "--text", "Live stock notifications connected.");
   await browser(
     "wait",
     "--fn",
@@ -160,7 +159,6 @@ try {
     `window.savedStock=sessionStorage.getItem(${JSON.stringify(stockKey)})`,
   );
   await adjust(-2);
-  await browser("wait", "--text", "Inventory may have changed.");
   await click("Refresh stock");
   await browser(
     "wait",
@@ -169,9 +167,9 @@ try {
   );
   await browser(
     "eval",
-    `if(sessionStorage.getItem(${JSON.stringify(stockKey)})!==window.savedStock || !document.querySelector('[aria-label="Inventory"] fieldset').disabled)throw Error('Notification resolved or changed pending adjustment')`,
+    `if(sessionStorage.getItem(${JSON.stringify(stockKey)})!==window.savedStock || !document.querySelector('[aria-label="Inventory"] fieldset').disabled)throw Error('Refresh resolved or changed pending adjustment')`,
   );
-  await browser("screenshot", "/tmp/admin-stock-live-pending.png");
+  await browser("screenshot", "/tmp/admin-stock-pending.png");
   await click("Retry saved adjustment");
   await browser("dialog", "accept");
   await browser("wait", "--text", "Stock adjustment confirmed.");
@@ -204,14 +202,12 @@ try {
     throw Error("Invalid transfer moved stock");
   await browser("fill", "input[type=number]", "4");
   await browser("fill", "textarea", "Move four units to destination");
-  await browser("wait", "--text", "Live stock notifications connected.");
   await adjust(1);
-  await browser("wait", "--text", "Inventory may have changed.");
   await click("Refresh balances");
   await ready();
   await browser(
     "eval",
-    `if(document.querySelector('input[type=number]').value!=='4' || document.querySelector('textarea').value!=='Move four units to destination' || !document.querySelector('[data-testid="transfer-balances"]').textContent.includes('12 on hand'))throw Error('Live refresh discarded transfer draft')`,
+    `if(document.querySelector('input[type=number]').value!=='4' || document.querySelector('textarea').value!=='Move four units to destination' || !document.querySelector('[data-testid="transfer-balances"]').textContent.includes('12 on hand'))throw Error('Refresh discarded transfer draft')`,
   );
   await adjust(-1);
   await click("Refresh balances");
@@ -249,7 +245,6 @@ try {
     `(() => { const pending = JSON.parse(sessionStorage.getItem(${JSON.stringify(key)})); if (pending.quantity !== 4 || pending.from_location_id !== ${JSON.stringify(from)} || !document.querySelector('#transfer-form fieldset').disabled) throw Error('Pending command not locked'); })()`,
   );
   await browser("screenshot", "/tmp/admin-transfer-pending.png");
-  await browser("wait", "--text", "Inventory may have changed.");
   await browser(
     "eval",
     `window.savedTransfer=sessionStorage.getItem(${JSON.stringify(key)})`,

@@ -59,7 +59,7 @@ test('bound backend rejects a different administrator before any RPC, Edge or St
 test('scope inventory exactly covers all tools and requires every sensitive permission', async () => {
   const { backend } = fakeBackend(() => Response.json(null));
   const session = await mcpSession(backend, true);
-  const all: AdminScope[] = ['store:read', 'store:write', 'store:payments', 'store:access', 'store:privacy'];
+  const all: AdminScope[] = ['store:read', 'store:write', 'store:payments', 'store:privacy'];
   try {
     const { tools } = await session.client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(Object.keys(toolScopes).sort());
@@ -72,9 +72,7 @@ test('scope inventory exactly covers all tools and requires every sensitive perm
       ['mark_order_paid', ['store:write', 'store:payments']],
       ['commit_manual_refund', ['store:write', 'store:payments']],
       ['refund_paypal', ['store:write', 'store:payments']],
-      ['set_user_role', ['store:write', 'store:access']],
       ['anonymize_customer', ['store:write', 'store:privacy']],
-      ['anonymize_user', ['store:write', 'store:access', 'store:privacy']],
     ] as const) {
       expect(requiredToolScopes(name)).toEqual(required);
       expect(permitsTool(name, required)).toBe(true);
@@ -98,18 +96,18 @@ test('scope inventory exactly covers all tools and requires every sensitive perm
 test('scope discovery intersects the write switch; hidden tools cannot be called', async () => {
   const { backend, calls } = fakeBackend(() => Response.json(null));
   for (const [allowWrites, scopes, expectedCount] of [
-    [true, ['store:read'], 54],
-    [true, ['store:write'], 53],
-    [true, ['store:payments', 'store:access', 'store:privacy'], 0],
-    [false, ['store:write', 'store:access'], 0],
+    [true, ['store:read'], 52],
+    [true, ['store:write'], 52],
+    [true, ['store:payments', 'store:privacy'], 0],
+    [false, ['store:write', 'store:privacy'], 0],
   ] as [boolean, AdminScope[], number][]) {
     const session = await mcpSession(backend, allowWrites, { scopes, currentScopes: async () => scopes });
     try {
       expect((await session.client.listTools()).tools).toHaveLength(expectedCount);
       await expect(
         session.client.callTool({
-          name: 'set_user_role',
-          arguments: { user_id: user.id, role: 'admin' },
+          name: 'anonymize_customer',
+          arguments: { customer_id: user.id },
         }),
       ).rejects.toMatchObject({ code: expectedCount === 0 ? -32601 : -32602 });
       expect(calls).toEqual([]);
@@ -120,19 +118,22 @@ test('scope discovery intersects the write switch; hidden tools cannot be called
 });
 
 test('each call rechecks scopes, fails closed before backend access, and isolates sessions', async () => {
-  const profile = {
+  const customer = {
     id: user.id,
-    email: '',
-    role: 'admin',
+    auth_user_id: null,
+    email: null,
+    full_name: '',
+    phone: null,
+    anonymized_at: '2026-09-21T00:00:00Z',
     created_at: '2026-09-21T00:00:00Z',
     updated_at: '2026-09-21T00:00:00Z',
   };
   const { backend, calls } = fakeBackend((request) =>
     Response.json(
-      new URL(request.url).pathname.endsWith('/set_user_role') ? profile : { items: [], next_cursor: null },
+      new URL(request.url).pathname.endsWith('/anonymize_customer') ? customer : { items: [], next_cursor: null },
     ),
   );
-  let scopes: AdminScope[] = ['store:read', 'store:write', 'store:access'];
+  let scopes: AdminScope[] = ['store:read', 'store:write', 'store:privacy'];
   let unavailable = false;
   const session = await mcpSession(backend, true, {
     scopes,
@@ -149,14 +150,14 @@ test('each call rechecks scopes, fails closed before backend access, and isolate
     await toolData(session.client, 'list_admin_products');
     expect(calls.length).toBeGreaterThan(0);
     expect(
-      await toolData<unknown>(session.client, 'set_user_role', { user_id: user.id, role: 'admin' }),
-    ).toEqual(profile);
-    for (const current of [['store:read', 'store:write'], ['store:access'], []] as AdminScope[][]) {
+      await toolData<unknown>(session.client, 'anonymize_customer', { customer_id: user.id }),
+    ).toEqual(customer);
+    for (const current of [['store:read', 'store:write'], ['store:privacy'], []] as AdminScope[][]) {
       scopes = current;
       calls.length = 0;
       const result = await session.client.callTool({
-        name: 'set_user_role',
-        arguments: { user_id: user.id, role: 'admin' },
+        name: 'anonymize_customer',
+        arguments: { customer_id: user.id },
       });
       expect(result.isError).toBe(true);
       expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
@@ -174,8 +175,8 @@ test('each call rechecks scopes, fails closed before backend access, and isolate
     expect(calls).toEqual([]);
     unavailable = true;
     const result = await session.client.callTool({
-      name: 'set_user_role',
-      arguments: { user_id: user.id, role: 'admin' },
+      name: 'anonymize_customer',
+      arguments: { customer_id: user.id },
     });
     expect(result.isError).toBe(true);
     expect(JSON.parse((result.content as { text: string }[])[0].text)).toMatchObject({
@@ -525,14 +526,6 @@ test('订单辅助工具输出保持精确事件 ID、报价快照和独立取�
     type: 'future_event',
     created_at: at,
   };
-  const cancellation = {
-    id,
-    order_id: id,
-    order_item_id: id,
-    quantity: 2,
-    restocked_quantity: 0,
-    created_at: at,
-  };
   const cases = [
     [
       'update_order_admin_note',
@@ -542,12 +535,6 @@ test('订单辅助工具输出保持精确事件 ID、报价快照和独立取�
     ],
     ['list_admin_order_events', { order_id: id }, { items: [event], next_cursor: event.id }, false],
     ['get_order_checkout_quote', { order_id: id }, quote, false],
-    [
-      'cancel_zero_value_order_item',
-      { order_id: id, order_item_id: id, quantity: 2, idempotency_key: 'retained' },
-      cancellation,
-      true,
-    ],
     ['cancel_checkout_quote', { quote_id: id, reason: 'Customer requested cancellation' }, quote, true],
   ] as const;
   let response: unknown;
@@ -612,7 +599,6 @@ test('订单辅助工具输出保持精确事件 ID、报价快照和独立取�
       ],
       ['get_order_checkout_quote', { order_id: id }, { ...quote, is_reserved: 'false' }],
       ['get_order_checkout_quote', { order_id: id }, null],
-      ['cancel_zero_value_order_item', cases[3][1], { ...cancellation, restocked_quantity: -1 }],
     ] as const) {
       response = invalid;
       const failed = await session.client.callTool({ name, arguments: args });
@@ -1542,68 +1528,6 @@ test('运维输出保留精确诊断数据，拒绝嵌套秘密、错误组件�
   }
 });
 
-test('用户输出区分 profile 和商业客户身份，拒绝 Auth 秘密且异常写入不重试', async () => {
-  const id = crypto.randomUUID(),
-    customer = crypto.randomUUID(),
-    at = '2026-09-20T11:12:13.123456+00:00';
-  const profile = { id, email: '', role: 'admin', created_at: at, updated_at: at };
-  const detail = {
-    user_id: id,
-    customer_id: customer,
-    customer_anonymized_at: at,
-    email: '',
-    role: 'admin',
-    created_at: at,
-    updated_at: at,
-  };
-  const cases = [
-    ['get_admin_user', { user_id: id }, detail, false],
-    ['list_admin_users', {}, { items: [detail], next_cursor: id }, false],
-    ['set_user_role', { user_id: id, role: 'admin' }, profile, true],
-    ['anonymize_user', { p_user_id: id }, profile, true],
-  ] as const;
-  let response: unknown;
-  const { backend, calls } = fakeBackend(() => Response.json(response));
-  const session = await mcpSession(backend, true);
-  try {
-    for (const [name, args, expected, mutation] of cases) {
-      response = expected;
-      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
-      for (const invalid of [{ ...expected, encrypted_password: 'SECRET' }, {}]) {
-        response = invalid;
-        const before = calls.length;
-        const failed = await session.client.callTool({ name, arguments: args });
-        expect(failed.isError).toBe(true);
-        expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
-          code: 'INVALID_BACKEND_RESPONSE',
-          outcome_unknown: mutation,
-        });
-        expect(JSON.stringify(failed)).not.toContain('SECRET');
-        expect(calls.length - before).toBe(3);
-      }
-    }
-    for (const valid of [null, { ...detail, customer_id: null, customer_anonymized_at: null }]) {
-      response = valid;
-      expect(await toolData<typeof valid>(session.client, 'get_admin_user', { user_id: id })).toEqual(valid);
-    }
-    for (const invalid of [
-      { ...detail, role: 'service_role' },
-      { ...detail, email: null },
-      { ...detail, updated_at: 123456 },
-      { ...detail, identities: ['SECRET'] },
-      profile,
-    ]) {
-      response = { items: [invalid], next_cursor: null };
-      const failed = await session.client.callTool({ name: 'list_admin_users', arguments: {} });
-      expect(failed.isError).toBe(true);
-      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
-      expect(JSON.stringify(failed)).not.toContain('SECRET');
-    }
-  } finally {
-    await session.close();
-  }
-});
-
 test('客户与地址合同保留微秒令牌及合法 Metafield，拒绝身份字段泄漏和畸形写响应', async () => {
   const id = crypto.randomUUID(),
     other = crypto.randomUUID(),
@@ -2206,8 +2130,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(54);
-    expect(writeTools.length).toBe(113);
+    expect(readTools.length).toBe(52);
+    expect(writeTools.length).toBe(108);
     expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,

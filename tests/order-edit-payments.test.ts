@@ -14,7 +14,7 @@ beforeAll(async () => {
   admin = await signup(); await makeAdmin(admin.userId);
   fixture = await paymentFixture(admin);
 });
-// Tests are independent; do not accumulate active orders against one customer's quota.
+// Tests are independent; each uses a fresh customer.
 beforeEach(async () => { buyer = await signup(); });
 afterAll(async () => {
   await removeTax?.();

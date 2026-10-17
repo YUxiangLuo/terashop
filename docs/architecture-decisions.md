@@ -72,7 +72,7 @@
 表启用 RLS，新对象默认不授予客户端权限；已有对象也按表/列列举 SELECT / INSERT / UPDATE / DELETE 授权，anon/authenticated 不得拥有 TRUNCATE / TRIGGER / REFERENCES / MAINTAIN 或序列权限。显式 DTO 选择字段，内部表不是长期 Storefront 合同。`api` / `admin_api` 分层仍是演进目标。
 管理员与客户同属 `authenticated` 角色；订单状态、支付、履约和库存写入必须走受控命令，不能依靠客户端区分管理员。
 
-角色管理命令更新独立 guard 后再验证管理员身份与最后管理员数量；原 advisory lock 不能独自保证旧 RR 快照安全。此保证针对 `set_user_role`，受信初始化的直接 profiles 写入不属于该命令合同。
+店铺只有一位人类管理员，其 Agent 经远程 MCP 授权协助，不提供角色管理命令或后台用户管理。受信运维在本地用 `admin:create`、在生产用 SQL 直接设置 `profiles.role`；`user_metadata` 不能声明角色。每次调用仍读取当前 profile 判定管理员，降级立即生效。
 
 ## ADR-007：税务范围
 
@@ -117,7 +117,7 @@ Capture 恢复不能依赖浏览器返回或 Webhook 到达：后台只查询已
 ## ADR-010：Quote 的价格与预占边界
 
 Quote 不提前占用促销 usage；转单时按固定锁顺序锁库存与有限促销，再次计价，只有完整 pricing hash 一致才创建订单，否则重新报价。
-Quote 默认 15 分钟、最长 30 分钟。三个客户建单/报价入口共享每次最多 50 行/100 件、每客户最多 5 个活跃 checkout（未转单 Quote + 未过期未付款订单）的限制；客户行 `NO KEY UPDATE` 锁和真实版本写入串行化配额检查，转单/幂等重试不重复占名额。账号/IP 级滥用防护仍需 Edge 限流。
+Quote 默认 15 分钟、最长 30 分钟。三个客户建单/报价入口共享每次最多 50 行/100 件的限制，不设每客户活跃 checkout 数量配额；同一幂等键由 advisory lock 串行，客户行 `NO KEY UPDATE` 锁使报价与匿名化串行。账号/IP 级滥用防护仍需 Edge 限流。
 支付成功消费预占，Worker 处理超时订单；Quote 进入 completed/cancelled/expired 时清除临时地址和备注，长期地址/备注快照仅保留在订单。商业行属性仍随不可变的报价/订单明细保留，不属于该临时 PII 清理范围。
 
 ## ADR-011：渠道事件、外部资金与异步退款
@@ -141,19 +141,9 @@ REVERSED 记录外部退款方向异常、阻止继续退款并触发对账；�
 
 已观察到退款资金事实的请求不再进入自动 GET 轮询；其本地处理由 Inbox 的累计 25 次预算负责，避免轮询重新入箱绕过耗尽上限。受信人工重投仍保留原事件身份与累计次数。
 
-### 服务端卡认证策略
+### 只接受钱包付款
 
-卡支付默认关闭。新 Capture 必须符合归属、金额、有效期及 `APPROVED` 检查，真实 `payment_source` 只有 `card`；钱包意图不能用直接卡来源绕过开关。采用 `SCA_WHEN_REQUIRED`：
-
-| PayPal 服务端 Order 的认证结果 | 策略 |
-| --- | --- |
-| 已 `APPROVED`、卡来源存在、没有 `authentication_result` | 允许 Capture（未被要求 SCA） |
-| `liability_shift=YES/POSSIBLE`，若有 `authentication_status` 则为 `Y/A` | 允许 Capture |
-| `NO/UNKNOWN`、空认证对象、未知值或显式失败/未完成 | 拒绝新 Capture，返回 `paypal_card_authentication_required` |
-
-这是保守策略：存在认证结果但无法确认责任转移时可能拒绝渠道本可受理的付款，须用实际商户 Sandbox 的免挑战、豁免和未参与 3DS 卡校准，不能全局跳过校验。认证拒绝发生在 Capture 发送标记之前，不伪造失败资金事件；已发现的 Capture 仍优先幂等入账，即使卡开关关闭或认证异常也不能丢弃资金事实。
-
-支付方式是数据库不可变字段，相同幂等键不能变更；新键也不能绕过一个订单一个活跃意图。SDK 取消、失败或超时不授权清标记或重新扣款。浏览器接入与验收见 [卡支付流程](storefront-paypal.md#站内一次性信用卡--借记卡支付sdk-v6)。
+PayPal Order 固定使用 `payment_source.paypal`，不提供站内卡支付、浏览器 client token 或 3DS 策略。新 Capture 必须符合归属、金额、有效期及 `APPROVED` 检查；渠道返回的付款来源不是钱包时拒绝新 Capture。已发现的 Capture 仍优先幂等入账，来源校验不能丢弃资金事实。一个订单一个活跃意图；SDK 取消、失败或超时不授权清标记或重新扣款。
 
 ### 退款与未自动化范围
 
@@ -199,15 +189,15 @@ Quote 保存受校验且参与 pricing hash 的报价 JSON；转单用商业行 
 
 ## ADR-016：商业客户不等于登录账户
 
-Customer 使用独立 UUID；可选唯一 Auth 关联只代表会话归属，联系邮箱非唯一且不参与合并/授权。注册及匿名 Auth 创建总是新建客户，后台可创建无账号客户；当前不提供客户合并或 Auth 重关联，游客自行下单使用 ADR-023 的匿名会话。订单/Quote/地址/评价/促销用量/客户扩展引用 Customer；角色与审计 actor 仍引用 Auth profile。
+Customer 使用独立 UUID；可选唯一 Auth 关联只代表会话归属，联系邮箱非唯一且不参与合并/授权。注册及匿名 Auth 创建总是新建客户，后台可创建无账号客户；当前不提供客户合并或 Auth 重关联，游客自行下单使用 ADR-023 的匿名会话。订单/Quote/地址/评价/促销用量/客户扩展引用 Customer；管理员判定与审计 actor 仍引用 Auth profile。
 
-Auth 删除解除关联而不级联删除商业记录。同邮箱新账号不能自动恢复旧历史，所有可空客户比较必须失败关闭。匿名化清客户联系信息、地址/客户扩展及 Cart，禁止恢复这些自有内容；不删除交易快照/资金、评价正文，也不替代 Auth 删除、会话撤销或法定数据保留流程。
+Auth 删除解除关联而不级联删除商业记录。同邮箱新账号不能自动恢复旧历史，所有可空客户比较必须失败关闭。匿名化清客户联系信息、地址/客户扩展及 Cart，禁止恢复这些自有内容；不删除交易快照/资金、评价正文，也不替代 Auth 删除、会话撤销或法定数据保留流程。删除 Auth 用户会级联删除 profile 并把审计 actor 置空，不另设 Auth 用户匿名化命令。
 
 客户行锁统一 Cart、配额、地址和匿名化的串行顺序；内容写入产生真实行版本以拒绝旧快照。子行 UPDATE 使用 NOWAIT，默认地址命令先锁客户再锁地址，不并存另一套地址 advisory mutex。
 
 ## ADR-017：Cart 意向与 Quote 承诺分离
 
-Cart 可以为空，只保存商业行与收货/配送/优惠选择，不存金额、不预占库存、不延长订单付款期限。完整替换命令有版本检查，最近一次相同规范化请求可重放；冲突返回 409，不隐式合并/覆盖。50 行/100 件和每客户 5 个活跃 Cart 限额独立于既有 checkout 配额。
+Cart 可以为空，只保存商业行与收货/配送/优惠选择，不存金额、不预占库存、不延长订单付款期限。完整替换命令有版本检查，最近一次相同规范化请求可重放；冲突返回 409，不隐式合并/覆盖。50 行/100 件和每客户 5 个活跃 Cart 限额。
 
 游客持 256 位随机、固定期限的单 Cart capability；库内仅存哈希，创建仅返回一次明文。它不是匿名 Auth 账号或支付凭据。登录后必须显式认领，不合并其他 Cart；客户归属与 token 二选一，认领清 token 后旧访客不再有权访问。默认七天、最长三十天，不因访问续期；到期立即拒绝，限量 SKIP LOCKED Worker 物理删除。
 
@@ -293,8 +283,6 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 
 完整转单校验后若 total=0，客户命令在同一事务消费预占并将 financial_status 设为 paid、填写 paid_at，Quote 变为 completed。无需管理员或支付渠道，不创建 PaymentIntent 或虚构 capture；促销用量、库存、事件和幂等身份只落一次。零价格与全额优惠同样适用，过期/改价报价仍拒绝。
 
-已结算零对价行通过 `cancel_zero_value_order_item` 记录独立、不可改写的取消数量；与履约及退款预留共用余额和父订单锁，按原扣减事实回库，不伪造零金额退款。零总额订单全部取消后 status=cancelled、financial_status=paid；部分发货与取消覆盖全部数量则完成订单。付费订单中的免费行使用相同数量合同，不退付费行、运费或税。
-
 所有客户下单统一使用 Quote，过期统一由 `expire_checkout_quotes` 处理。取消或超时仅释放未付款预占，未知 Capture 与迟到资金遵循 ADR-009。唯一支付账本见 ADR-025；履约 JSON/关系表仍有调用与回归，尚未收敛。
 
 ## ADR-025：唯一支付账本
@@ -366,8 +354,7 @@ Metafield 定义默认 access=admin；public 仅用于商品/变体/分类/shop�
 | `store:read` | 当前全部管理只读工具，包含客户联系方式、订单、成本等敏感数据；不是公开 Storefront 权限 |
 | `store:write` | 管理写操作的基础权限，涵盖商品发布、库存和业务配置修改；不隐含 read 或以下附加权限 |
 | `store:payments` | 收退款及直接资金记账，除 write 外还须单独批准；包括手工记账和 PayPal 退款 |
-| `store:access` | 角色/账户访问控制变更，除 write 外单独批准 |
-| `store:privacy` | 客户或账户匿名化等不可逆隐私操作，除 write 外单独批准 |
+| `store:privacy` | 客户匿名化等不可逆隐私操作，除 write 外单独批准 |
 
 默认只申请 read，写权限逐步升级。resource metadata 的最小 scopes_supported 和首次 challenge 不诱导客户端申请所有权限；scope 扩大须重新同意，旧授权记录不得因配置变更自动升级。写 scope 不替代用户对退款、删除、公开发布的具体操作批准。
 

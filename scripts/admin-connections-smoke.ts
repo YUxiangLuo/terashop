@@ -104,9 +104,6 @@ try {
   await browser('screenshot', '/tmp/admin-call-records.png');
   await click('Older call records');
   await wait('get_admin_customer');
-  await db`update private.mcp_tool_audit set outcome='returned',finished_at=now()
-    where project=${session} and user_id=${owner} and outcome='pending'`;
-  await wait('Call records may have changed.');
   await browser(
     'eval',
     `if(document.querySelector('${auditSection}').querySelectorAll('tbody tr').length!==1)throw Error('Wrong older page');
@@ -146,7 +143,7 @@ try {
       const presets = inputs.slice(2).map(i => i.value);
       const expected = ['store:read', 'store:read store:write'].filter(p => p.split(' ').every(s => config.scopes.includes(s)));
       if (JSON.stringify(presets) !== JSON.stringify(expected)) throw Error('Missing or changed presets');
-      if (presets.some(p => p.split(' ').some(s => !config.scopes.includes(s) || ['store:payments','store:access','store:privacy'].includes(s)))) throw Error('Elevated preset');
+      if (presets.some(p => p.split(' ').some(s => !config.scopes.includes(s) || ['store:payments','store:privacy'].includes(s)))) throw Error('Elevated preset');
     } else if (inputs.length || !section.textContent.includes('not published')) throw Error('Invented configuration');
     section.scrollIntoView();
   })()`,
@@ -167,16 +164,7 @@ try {
   await browser('set', 'viewport', '1440', '1000');
   await click('Revoke Read-only Assistant');
   await wait('Revoke 1 selected connection(s)?');
-  const realtimeGrant = await grant(owner, 'Realtime connection');
-  await wait('Connections may have changed.');
-  await browser(
-    'eval',
-    `(() => {const s=document.querySelector('[aria-label="Confirm revocation"]'); if(!s || !s.textContent.includes('Read-only Assistant') || s.textContent.includes('Realtime connection'))throw Error('Realtime changed selected snapshot');})()`,
-  );
   await click('Cancel');
-  await wait('Realtime connection');
-  await db`delete from private.mcp_grants where id=${realtimeGrant.id}`;
-  await browser('wait', '500');
   await click('Revoke Desktop Agent');
   await wait('Revoke 1 selected connection(s)?');
   await browser('screenshot', '/tmp/admin-connections-confirm.png', '--full');
@@ -266,13 +254,6 @@ try {
     'eval',
     `window.connectionPageIds=[...document.querySelector('section.card tbody').querySelectorAll('tr')].map(r=>r.querySelector('td .muted').textContent.trim());`,
   );
-  const pageGrant = await grant(owner, 'Realtime pagination connection');
-  await wait('Connections may have changed.');
-  await browser(
-    'eval',
-    `(() => {const rows=[...document.querySelector('section.card tbody').querySelectorAll('tr')]; const ids=rows.map(r=>r.querySelector('td .muted').textContent.trim()); if(JSON.stringify(ids)!==JSON.stringify(connectionPageIds) || rows.some(r=>r.textContent.includes('Realtime pagination connection')))throw Error('Realtime replaced later page');})()`,
-  );
-  await db`delete from private.mcp_grants where id=${pageGrant.id}`;
   await click('Refresh connections');
   await wait('Snapshot Agent');
   await browser(
@@ -344,7 +325,7 @@ try {
   if (remaining.length !== 1 || remaining[0].id !== afterPreview.id)
     throw Error('Cross-page revocation incomplete');
   console.log(
-    'PASS: login, isolation, realtime refresh/snapshot/page preservation, exact retries, demoted self-revocation, business gate, cross-page snapshot and later grant exclusion',
+    'PASS: login, isolation, explicit refresh, exact retries, demoted self-revocation, business gate, cross-page snapshot and later grant exclusion',
   );
 } finally {
   try {

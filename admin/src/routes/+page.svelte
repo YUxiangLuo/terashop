@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { watchAdminChanges } from "$lib/realtime";
   import {
     supabase,
     message,
@@ -17,33 +16,19 @@
   let applied = { search: "", status: "" as ProductStatus | "" };
   let loading = $state(true);
   let error = $state("");
-  let live = $state(false);
-  let changes = $state(0),
-    attempted = $state(0);
   let retry = $state<"filter" | "refresh" | "more">("filter");
   let pages = 1;
   let request = 0;
   let alive = true;
   onMount(() => {
     void load("filter");
-    const stop = watchAdminChanges(
-      supabase,
-      "products",
-      () => changes++,
-      (value) => (live = value),
-    );
     return () => {
       alive = false;
       request++;
-      stop();
     };
-  });
-  $effect(() => {
-    if (changes > attempted && !loading) void load("refresh");
   });
   async function load(mode: "filter" | "refresh" | "more") {
     const current = ++request;
-    if (mode !== "more") attempted = changes;
     retry = mode;
     loading = true;
     error = "";
@@ -92,6 +77,11 @@
 </script>
 
 <svelte:head><title>Products · Tera Admin</title></svelte:head>
+<svelte:window
+  onfocus={() => {
+    if (!loading) void load("refresh");
+  }}
+/>
 <div class="page-heading">
   <div>
     <p class="eyebrow">Catalog</p>
@@ -106,10 +96,8 @@
 </div>
 <section class="card" aria-label="Product catalog">
   <p class="small muted">
-    {live
-      ? "Live product updates connected."
-      : "Live product updates unavailable; focus or refresh to check current facts."}
-    Updates reread loaded pages; products may move as their update time changes.
+    Returning to this window rereads loaded pages; products may move as their
+    update time changes.
   </p>
   <form class="toolbar" onsubmit={filter}>
     <label

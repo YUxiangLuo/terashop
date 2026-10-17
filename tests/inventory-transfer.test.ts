@@ -360,6 +360,6 @@ test('数据库拒绝不成对和不守恒流水，匿名化 actor 后重放不�
   await makeAdmin(actor.userId);
   const result = await checked<Transfer>(rpc('transfer_inventory', args, actor.token));
   expect(result.actor_id).toBe(actor.userId);
-  await checked(rpc('anonymize_user', { p_user_id: actor.userId }, admin.token));
+  await checked(api(`/auth/v1/admin/users/${actor.userId}`, { service: true, method: 'DELETE' }));
   expect(await transfer(args)).toEqual({ ...result, actor_id: null });
 });

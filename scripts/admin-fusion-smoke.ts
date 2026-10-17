@@ -9,7 +9,7 @@ if (!['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)) throw Error(
 const run = crypto.randomUUID(),
   session = `fusion-${run}`;
 const adminEmail = `${session}-admin@example.test`,
-  targetEmail = `${session}-target@example.test`;
+  targetEmail = `${session}-customer@example.test`;
 const password = `${crypto.randomUUID()}Aa1!`;
 const product = crypto.randomUUID(),
   variant = crypto.randomUUID(),
@@ -18,13 +18,13 @@ const product = crypto.randomUUID(),
 const grant = crypto.randomUUID(),
   auditId = crypto.randomUUID(),
   approveId = crypto.randomUUID(),
-  rejectId = crypto.randomUUID();
+  rejectId = crypto.randomUUID(),
+  target = crypto.randomUUID();
 const issuer = `https://issuer.example.test/${run}`,
   resource = `https://resource.example.test/${run}`,
   project = `project-${run}`,
   client = `client-${run}`;
-let admin = '',
-  target = '';
+let admin = '';
 const sql = postgres(config.DB_URL, { max: 1 });
 
 async function api(path: string, method: string, body?: unknown, token = config.SERVICE_ROLE_KEY) {
@@ -64,14 +64,12 @@ const approvalBody = (action: string, id: string) => ({
   p_issuer: issuer,
   p_resource: resource,
   p_project: project,
-  p_tool_name: 'set_user_role',
-  p_arguments: { user_id: target, role: 'admin' },
+  p_tool_name: 'anonymize_customer',
+  p_arguments: { customer_id: target },
 });
 
 try {
   admin = (await api('/auth/v1/admin/users', 'POST', { email: adminEmail, password, email_confirm: true }))
-    .id;
-  target = (await api('/auth/v1/admin/users', 'POST', { email: targetEmail, password, email_confirm: true }))
     .id;
   await api(`/rest/v1/profiles?id=eq.${admin}`, 'PATCH', { role: 'admin' });
   await sql.begin(async (tx: any) => {
@@ -79,7 +77,8 @@ try {
     await tx`insert into public.product_variants(id,product_id,sku,barcode,price,compare_at_price,cost,position) values (${variant},${product},${`SKU-${run}`},'OLD-BARCODE',10.00,15.00,4.00,37)`;
     await tx`insert into public.metafield_definitions(owner_type,namespace,key,name,type) values ('product','fusion',${`product_${run.replaceAll('-', '_')}`},'Fusion product','text'),('variant','fusion',${`variant_${run.replaceAll('-', '_')}`},'Fusion variant','text')`;
     await tx`insert into public.metafields(id,owner_type,owner_id,namespace,key,type,value) values (${productMeta},'product',${product},'fusion',${`product_${run.replaceAll('-', '_')}`},'text','"keep-product"'),(${variantMeta},'variant',${variant},'fusion',${`variant_${run.replaceAll('-', '_')}`},'text','"keep-variant"')`;
-    await tx`insert into private.mcp_grants(id,binding,user_id,scopes) values (${grant},${tx.json({ issuer, resource, project, client_id: client })},${admin},${tx.array(['store:write', 'store:access'])})`;
+    await tx`insert into public.customers(id,email,full_name) values (${target},${targetEmail},'Fusion customer')`;
+    await tx`insert into private.mcp_grants(id,binding,user_id,scopes) values (${grant},${tx.json({ issuer, resource, project, client_id: client })},${admin},${tx.array(['store:write', 'store:privacy'])})`;
   });
   await api('/rest/v1/rpc/mcp_action_approval_command', 'POST', approvalBody('stage', approveId));
 
@@ -139,7 +138,7 @@ try {
   await browser('open', `${origin.origin}/approvals`);
   await browser('wait', '--text', approveId);
   const page = await browser('get', 'text', 'body');
-  for (const expected of [approveId, target, '"role": "admin"', client, resource])
+  for (const expected of [approveId, target, '"customer_id"', client, resource])
     if (!page.includes(expected)) throw Error(`Approval UI omitted ${expected}`);
   await browser('screenshot', '/tmp/admin-fusion-approvals-desktop.png');
   await click('Approve exact request');
@@ -153,8 +152,8 @@ try {
     approvalBody('consume', approveId),
   );
   if (consumed.state !== 'consumed') throw Error('Trusted consume did not complete');
-  const role = await sql`select role from public.profiles where id=${target}`;
-  if (role[0]?.role !== 'admin') throw Error('Disposable target role was not updated');
+  const anonymized = await sql`select anonymized_at from public.customers where id=${target}`;
+  if (!anonymized[0]?.anonymized_at) throw Error('Disposable customer was not anonymized');
   let replayBlocked = false;
   try {
     await api('/rest/v1/rpc/mcp_action_approval_command', 'POST', approvalBody('consume', approveId));
@@ -163,7 +162,6 @@ try {
   }
   if (!replayBlocked) throw Error('Consumed approval replay was not blocked');
 
-  await api(`/rest/v1/profiles?id=eq.${target}`, 'PATCH', { role: 'customer' });
   await api('/rest/v1/rpc/mcp_action_approval_command', 'POST', approvalBody('stage', rejectId));
   await click('Refresh');
   await browser('wait', '--text', rejectId);
@@ -208,12 +206,11 @@ try {
   } catch (error) {
     console.error('Fixture SQL cleanup failed', error);
   }
-  for (const id of [target, admin])
-    if (id)
-      try {
-        await api(`/auth/v1/admin/users/${id}`, 'DELETE');
-      } catch (error) {
-        console.error('Fixture user cleanup failed', error);
-      }
+  if (admin)
+    try {
+      await api(`/auth/v1/admin/users/${admin}`, 'DELETE');
+    } catch (error) {
+      console.error('Fixture user cleanup failed', error);
+    }
   await sql.end();
 }

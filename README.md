@@ -2,7 +2,7 @@
 
 基于 Supabase 的单店 Headless 电商项目：PostgreSQL 负责交易与权限，Edge Functions 适配 PayPal，SvelteKit 提供 Storefront / Admin，MCP 提供 Agent 管理入口。
 
-一个 Supabase 项目承载一个店铺，统一使用 **USD**，结账使用默认仓。后端支持游客线上交易；前台目前只实现目录、实时库存、购物袋和库存预占报价，**没有下单或支付 UI，尚未完成真实 PayPal Sandbox 验收**。
+一个 Supabase 项目承载一个店铺，统一使用 **USD**，结账使用默认仓。店铺由一位管理员运营，其 Agent 可经远程 MCP 协助；不提供多管理员角色管理。后端支持游客线上交易；前台目前只实现目录、库存状态、购物袋和库存预占报价，**没有下单或支付 UI，尚未完成真实 PayPal Sandbox 验收**。
 
 ## 快速开始
 
@@ -27,7 +27,7 @@ bun run storefront:dev    # 打开终端显示的前台地址
 | 购物车与结账 | 持久 Cart、游客限时凭据/登录认领、独立商业行、价格明细快照、Quote 预占与幂等转单 |
 | 交易 | 支付、含税部分退款/显式运费退款、履约、关系化账本、Inbox / Outbox |
 | 退货 | 发货行退货授权、分批实收、验收回库/报废；与退款独立 |
-| 支付渠道 | PayPal Order / Capture；异步退款与对账入口 |
+| 支付渠道 | PayPal 钱包 Order / Capture（不含站内卡支付）；异步退款与对账入口 |
 | 客户与内容 | 独立 Customer / 可选 Auth 关联、地址簿、匿名化、评价审核、Metafields / Metaobjects |
 
 ```text

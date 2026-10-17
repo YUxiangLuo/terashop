@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { checked, rpc, signup, makeAdmin, type TestUser } from './helpers';
+import { checked, rpc, signup, makeAdmin, setRole, type TestUser } from './helpers';
 import { fixtureOrder } from './payment-fixtures';
 import { stockedProduct } from './support/catalog';
 import { Cleanup } from './support/cleanup';
@@ -81,37 +81,6 @@ test('客户创建同键串行化，不按邮箱合并；匿名化后的重放�
   expect((await rpc('create_customer', input, customer.token)).data).toMatchObject({ code: '42501' });
 });
 
-test('客户恢复只读已提交身份，未知/未提交请求不创建客户，权限与匿名化仍有效', async () => {
-  const key = crypto.randomUUID();
-  const lookup = (token = admin.token) => rpc('get_customer_creation_result', { idempotency_key: key }, token);
-  expect(await checked(lookup())).toBeNull();
-  let id = '';
-  await database.begin(async tx => {
-    await tx`select set_config('request.jwt.claims', ${JSON.stringify({ role: 'authenticated', sub: admin.userId })}, true)`;
-    const [row] = await tx`select (public.create_customer(${key},'recover@example.test','Original','555')).id`;
-    id = row.id;
-    // The HTTP reader has a different transaction: an absent receipt is not proof of failure.
-    expect(await checked(lookup())).toBeNull();
-  });
-  cleanup.defer(() => checked(rpc('anonymize_customer', { customer_id: id }, admin.token)));
-  expect(await checked<string | null>(lookup(otherAdmin.token))).toBe(id);
-  expect(await checked<string | null>(rpc('get_customer_creation_result', { idempotency_key: ` ${key} ` }, undefined, true))).toBe(id);
-  expect((await lookup(customer.token)).data).toMatchObject({ code: '42501' });
-  expect((await rpc('get_customer_creation_result', { idempotency_key: key })).data).toMatchObject({ code: '42501' });
-  for (const invalid of [null, '', ' ', 'x'.repeat(201)]) {
-    expect((await rpc('get_customer_creation_result', { idempotency_key: invalid }, admin.token)).data).toMatchObject({ code: '22023' });
-  }
-  await checked(rpc('anonymize_customer', { customer_id: id }, admin.token));
-  expect(await checked<string | null>(lookup())).toBe(id);
-  expect(await checked(rpc('get_admin_customer', { customer_id: id }, admin.token)))
-    .toMatchObject({ id, email: null, full_name: '', phone: null });
-  const receipts: { resource_id: string }[] = await database`select resource_id from commerce.command_idempotency where scope='customer.create' and idempotency_key=${key}`;
-  expect(receipts).toEqual([{ resource_id: id }]);
-  await checked(rpc('set_user_role', { user_id: otherAdmin.userId, role: 'customer' }, admin.token));
-  try { expect((await lookup(otherAdmin.token)).data).toMatchObject({ code: '42501' }); }
-  finally { await makeAdmin(otherAdmin.userId); }
-});
-
 test('手工收款同键并发只记一次资金和库存，之后重放返回退款后的订单', async () => {
   const product = await stockedProduct(admin, { onHand: 11, price: 17, cleanup });
   const order = await fixtureOrder(product, customer, 2);
@@ -149,7 +118,7 @@ test('三个管理命令拒绝空白、NULL 和过长幂等键，角色降级后
   }
   const input = { variant_id: product.variantId, delta: 3, idempotency_key: crypto.randomUUID().padEnd(200, 'x') };
   await checked(rpc('adjust_inventory', input, otherAdmin.token));
-  await checked(rpc('set_user_role', { user_id: otherAdmin.userId, role: 'customer' }, admin.token));
+  await setRole(otherAdmin.userId, 'customer');
   try {
     expect((await rpc('adjust_inventory', input, otherAdmin.token)).data).toMatchObject({ code: '42501' });
   } finally { await makeAdmin(otherAdmin.userId); }

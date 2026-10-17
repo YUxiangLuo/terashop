@@ -15,7 +15,7 @@
 
 ## 历史验证与未完成项
 
-[本地验收记录提交](https://github.com/vesein/tera-headless/commit/2c99708) 记录了 140 个文件、989 项测试通过，以及类型、构建、SQL lint、类型一致性、文档和受影响浏览器检查。此前曾遇到 Realtime 消息限流；排查方法见测试指南。**该计数只属于当时执行，不能代替当前检出重跑。** 后续购物车审批版本绑定及客户未知创建保护见 [修复提交](https://github.com/vesein/tera-headless/commit/a0bbc8e)。
+[本地验收记录提交](https://github.com/vesein/tera-headless/commit/2c99708) 记录了 140 个文件、989 项测试通过，以及类型、构建、SQL lint、类型一致性、文档和受影响浏览器检查。**该计数只属于当时执行，不能代替当前检出重跑。** 后续购物车审批版本绑定及客户未知创建保护见 [修复提交](https://github.com/vesein/tera-headless/commit/a0bbc8e)。
 
 生产迁移、部署和外部验收未完成：真实域名/TLS、目标 Agent 客户端、配额/容量、备份恢复及密钥轮换仍需目标环境证据和相应授权。应用当前完整店铺迁移后再升级配套服务，不使用旧批次的迁移数量作为部署清单。
 

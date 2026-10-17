@@ -24,6 +24,7 @@
     "admin:build": "bun scripts/frontend.ts admin build",
     "admin:check": "bun scripts/frontend.ts admin check",
     "admin:preview": "bun run --cwd admin preview",
+    "admin:create": "bun scripts/admin-create.ts",
     "setup": "bun scripts/setup.ts",
     "seed:media": "bun scripts/seed-media.ts",
     "start": "bun scripts/start.ts",

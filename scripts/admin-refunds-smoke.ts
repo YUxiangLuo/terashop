@@ -101,7 +101,6 @@ try {
   await browser("fill", "input[type=password]", password);
   await click("Sign in");
   await browser("wait", `a[href="/orders/${order.id}/refunds"]`);
-  await wait("Data used by this page may have changed.");
   // Links render before the order read finishes; its navigation guard blocks
   // leaving while busy, so wait for the actual ready state rather than the link.
   await browser(

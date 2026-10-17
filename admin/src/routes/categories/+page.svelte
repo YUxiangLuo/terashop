@@ -1,22 +1,10 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { page } from "$app/state";
   import { goto } from "$app/navigation";
   import CategoryBranch from "$lib/CategoryBranch.svelte";
-  import { supabase } from "$lib/api";
-  import { watchAdminChanges } from "$lib/realtime";
   let search = $state("");
   let active = $state("");
   let refresh = $state(0);
-  let live = $state(false);
-  onMount(() =>
-    watchAdminChanges(
-      supabase,
-      "categories",
-      () => refresh++,
-      (value) => (live = value),
-    ),
-  );
   $effect(() => {
     search = page.url.searchParams.get("search") ?? "";
     active = page.url.searchParams.get("active") ?? "";
@@ -32,6 +20,7 @@
 </script>
 
 <svelte:head><title>Categories · Tera Admin</title></svelte:head>
+<svelte:window onfocus={() => refresh++} />
 <div class="page-heading">
   <div>
     <p class="eyebrow">Catalog structure</p>
@@ -49,11 +38,6 @@
     >
   </div>
 </div>
-<p class="small muted">
-  {live
-    ? "Live category updates connected."
-    : "Live category updates unavailable; focus or refresh to check current facts."}
-</p>
 <section class="card">
   <form class="toolbar" onsubmit={apply}>
     <label
@@ -75,7 +59,7 @@
     Without filters, expand each category to load its children. Loaded siblings
     sort by position, then ID; loading another page can change their displayed
     order. Filters show a flat matching list, including children of inactive
-    parents. Updates reread the loaded pages and preserve expanded categories
+    parents. Refreshing, or returning to this window, rereads the loaded pages and preserve expanded categories
     that remain in the results. Pages are not a snapshot.
   </p>
   {#key query}<CategoryBranch

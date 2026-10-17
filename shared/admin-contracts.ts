@@ -3,7 +3,6 @@ export const adminScopes = [
   'store:read',
   'store:write',
   'store:payments',
-  'store:access',
   'store:privacy',
 ] as const;
 export type AdminScope = (typeof adminScopes)[number];

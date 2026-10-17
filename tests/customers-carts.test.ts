@@ -272,16 +272,6 @@ test('创建幂等、5 个活跃 Cart 配额与认领共用客户锁，放弃释
   expect(await checked<Cart>(rpc('claim_cart', command, owner.token))).toMatchObject({ customer_id: owner.customerId });
 });
 
-test('Cart 转 Quote 仍受共享 checkout 配额限制，失败不消耗 Cart 或额外预占', async () => {
-  const owner = await signup(); const quotes: Quote[] = [];
-  try {
-    for (let i = 0; i < 5; i++) quotes.push(await checked<Quote>(rpc('create_checkout_quote', { items: items(), address: TEST_ADDRESS, idempotency_key: crypto.randomUUID() }, owner.token)));
-    const cart = await filled(owner, { address: TEST_ADDRESS });
-    expect((await rpc('checkout_cart', { cart_id: cart.id, expected_version: cart.version }, owner.token)).status).toBe(400);
-    expect(await checked<Cart>(get(cart, owner))).toMatchObject({ status: 'active', version: cart.version });
-  } finally { for (const q of quotes) await checked(rpc('cancel_checkout_quote', { quote_id: q.id }, owner.token)); }
-});
-
 test('受控同时编辑返回版本冲突，不静默覆盖；不同参数不能冒充上一请求重放', async () => {
   const owner = await signup(); const cart = await create(owner);
   const result = await heldTransactionRace(database, async tx => {
@@ -376,7 +366,7 @@ test('Cart 表/凭据不向 API 角色开放，受信越界写入也由内容/�
 });
 
 // Retained from the original review; grouped by business domain.
-test('anonymize_user：清 PII、删地址与 customer 域 metafield', async () => {
+test('anonymize_customer：清 PII、删地址与 customer 域 metafield', async () => {
     const u = await signup();
     await checked(api('/rest/v1/addresses', { token: u.token, method: 'POST', body: TEST_ADDRESS }));
     await checked(api('/rest/v1/metafields', {
@@ -385,11 +375,11 @@ test('anonymize_user：清 PII、删地址与 customer 域 metafield', async () 
     }));
 
     // 非 admin 拒绝
-    const deny = await rpc('anonymize_user', { p_user_id: u.userId }, u.token);
+    const deny = await rpc('anonymize_customer', { customer_id: u.customerId }, u.token);
     expect((deny.data as { message: string }).message).toBe('admin only');
 
-    const { data } = await rpc('anonymize_user', { p_user_id: u.userId }, admin.token);
-    expect(data).toMatchObject({ email: '' });
+    const { data } = await rpc('anonymize_customer', { customer_id: u.customerId }, admin.token);
+    expect(data).toMatchObject({ email: null, full_name: '' });
     const customer = await api(`/rest/v1/customers?id=eq.${u.customerId}&select=email,full_name,phone,anonymized_at`, { service: true });
     expect(customer.data).toEqual([{ email: null, full_name: '', phone: null, anonymized_at: expect.any(String) }]);
 

@@ -17,18 +17,13 @@ bun run admin:preview   # 默认 http://127.0.0.1:4175
 
 ## 第一个管理员
 
-不提供默认密码、自动提权或公开管理员注册。仅对可丢弃的本地环境：
+不提供默认密码、自动提权或公开管理员注册。店铺只有一位运营者，不提供后台角色管理。仅对可丢弃的本地环境：
 
 1. 在 Studio `http://127.0.0.1:54323` 创建邮箱/密码用户并确认邮箱。
-2. 复制 Auth UUID，在 Studio SQL 编辑器执行：
+2. 执行 `bun run admin:create <email>`：脚本只连接本地 Supabase（拒绝非回环地址），按邮箱查找已有 Auth 用户并把 profile 设为 `admin`，不创建用户或密码。
+3. 在 Admin 登录。不接受 `user_metadata` 声明的角色。
 
-```sql
-update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
-```
-
-3. 在 Admin 登录。后续角色变更使用受控 `set_user_role`，不接受 `user_metadata` 声明的角色。
-
-生产账号须由受信运维验证身份后授权，并配置 MFA、密码恢复及 Auth 安全策略，不能照搬本地人工确认。重建本地数据库后须重新初始化账号。
+生产账号须由受信运维验证身份后，在 SQL 编辑器执行 `update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;` 授权（撤销时改回 `customer`），并配置 MFA、密码恢复及 Auth 安全策略，不能照搬本地人工确认。重建本地数据库后须重新初始化账号。
 
 ## 导航与能力
 
@@ -36,10 +31,10 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 | 分组 | 当前能力 | 主要边界 |
 | --- | --- | --- |
-| Orders | 订单/报价查询取消、备注/事件、履约、退货、线下收退款记账、零金额行取消、PayPal 退款 | 记账不调用支付捕获；真实退款回执不证明本地账本已结算 |
+| Orders | 订单/报价查询取消、备注/事件、履约、退货、线下收退款记账、PayPal 退款 | 记账不调用支付捕获；真实退款回执不证明本地账本已结算 |
 | Products | 商品、规格/变体及排序、分类、图片、素材恢复、评论审核、元字段与元对象 | 商品/变体元字段走商品聚合；已有变体停用而非删除；发布后需重建 Storefront |
 | Inventory | 商品/SKU 搜索、余额/流水、调整、即时调拨及原 UUID 回查、仓库管理 | 调拨回执余额是历史值；不移动预占，无在途或收货追踪 |
-| Customers | 商业客户与地址管理、关联订单、用户角色、客户/用户匿名化 | 不创建 Auth 账号；匿名化不可逆，但不删除 Auth 凭据或历史订单快照 |
+| Customers | 商业客户与地址管理、关联订单、客户匿名化 | 不创建 Auth 账号；匿名化不可逆，但不删除 Auth 凭据或历史订单快照 |
 | Promotions | 五类促销、规则/用量/目标读取，商品/分类/变体搜索选择或 UUID 输入 | 目标整组替换最多 100 条，超过拒绝，不截断；使用量不是已付款销售 |
 | Operations | 对账异常、支付 Inbox、Outbox 诊断与耗尽事件重投、Agent 审批、汇总报表及订单导出 | 重投绑定原尝试次数，不重放资金；报表/分页不是冻结快照，空列表不证明健康 |
 | Settings | 店铺名称/展示时区、配送范围/费用、税率 | USD 固定；展示设置不改变静态 Storefront、历史时间戳或报表区间 |
@@ -50,10 +45,10 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 ## 编辑结果与草稿保护
 
-编辑器核对读取/写回执的记录身份、版本及必要字段；空值、错 ID、旧版本或不完整回执不会清空草稿，也不证明数据库回滚。冲突或未知结果锁定再次保存，须显式重读核对，不能自动换版本重试。
+编辑器直接使用 RPC 返回的记录。他人或 Agent 先保存时，数据库按 revision / `updated_at` 返回 PT409，页面提示记录已变化并锁定再次保存；未知结果同样锁定。须显式重读核对，不能自动换版本重试。
 
 - 未提交草稿主要在页面内存中；离开有提示，退出或丢失会话清除编辑界面，不是服务端持久草稿。
-- 商品/分类/仓库等创建 UUID 保留在 URL，响应丢失先按原 ID 核对。客户创建保留 URL 请求键及**内存中的原联系方式**，不把 PII 写入恢复存储；刷新或关闭标签页会丢失原参数，不能猜测参数或换键再建。
+- 商品/分类/仓库等创建 UUID 保留在 URL，响应丢失先按原 ID 核对。客户创建的请求键和原联系方式只在页面内存中，未知结果可用原键原参数重试；刷新或关闭标签页后先在客户列表核对，不把 PII 写入浏览器存储。
 - 库存草稿切换仓库/变体前须确认；商品页库存草稿未完成时禁止商品保存/重载，避免重建组件丢失输入。
 - 列表和历史读取失败保留旧数据并标记过时；游标原样传递，不把 bigint/微秒令牌转成 Number/Date。分页不是冻结快照。
 
@@ -61,13 +56,13 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 库存调整、调拨、履约及退货等命令发送前在当前标签页 `sessionStorage` 保存完整原参数和幂等键，按管理员、操作类型和资源隔离；存储失败不发送。未知结果锁定新操作，刷新后仅显式恢复原请求，不能换键或依据余额变化推断成功。
 
-首次明确数据库拒绝可允许修正；未知请求的重试被拒绝不证明第一次失败。仅身份、归属和业务字段匹配的回执才清除待决记录；读取失败或 Realtime 通知不能解除锁定。已经提交的原键重放与新操作资格不同，仓库停用等后续变化不应阻止核对历史。
+首次明确数据库拒绝可允许修正；未知请求的重试被拒绝不证明第一次失败。仅身份、归属和业务字段匹配的回执才清除待决记录；读取失败不能解除锁定。已经提交的原键重放与新操作资格不同，仓库停用等后续变化不应阻止核对历史。
 
 恢复记录不含 Auth token 或客户地址，但可能含备注/物流信息。退出不清除待决记录，供同一管理员恢复；关闭标签页、清浏览器数据或换设备后不保证恢复，也不跨标签页去重。无法确认时先核对后台事实并由受信运维调查，不直接删记录盲重试。
 
 ### 退款、退货与取消
 
-- `/orders/[id]/actions` 提供未付款订单取消、已结算零金额行取消、线下收款记账及真实 PayPal 退款。各操作分别确认；资金请求按管理员/订单保留完整原参数，未知结果只允许核对后原样重试。PayPal 退款需目标环境部署匹配 Edge 函数并配置支付 CORS、凭据和渠道权限。
+- `/orders/[id]/actions` 提供未付款订单取消、线下收款记账及真实 PayPal 退款。各操作分别确认；资金请求按管理员/订单保留完整原参数，未知结果只允许核对后原样重试。PayPal 退款需目标环境部署匹配 Edge 函数并配置支付 CORS、凭据和渠道权限。
 - **线下退款只记账，不向 PayPal 转账。** UI 只对符合条件的手工收款订单开放新登记。先 `preview_manual_refund` 显示含税金额与库存影响，明确确认钱已线下退回，再携原 preview token、原因和幂等键提交；事实变化后须重新试算和确认。
 - 金额退款与商品数量/可选运费退款不混用。金额模式不取消商品或回库；商品模式可取消未发货量，库存释放须明确选择。未知提交保留原请求，不用剩余余额或变化后的资格否定历史成功。
 - 退货按发货行授权，分批登记实收，再选择回库/报废。授权不收货，实收不增加可售库存，两者都不退款。回库固定进入实收仓且需合法原扣减事实；停用仓不可新回库，但可报废。
@@ -78,13 +73,13 @@ update public.profiles set role = 'admin' where id = '<AUTH_USER_UUID>'::uuid;
 
 `/metadata` 管理定义、所属资源的元字段及元对象条目，JSON 按真实 schema 校验。商品/变体字段使用父商品 revision；变体需同时提供变体和父商品 UUID。修改访问范围可能公开现有内容，元对象 values/schema 是整组替换，不执行其中的 HTML 或 URL。
 
-`/users` 和 `/reviews` 要求输入目标 UUID 与操作值；角色变更、匿名化和评论删除后先重读原记录。自身降级会失去业务权限，最后一个管理员受数据库保护。
+`/reviews` 要求输入目标 UUID 与操作值；审核和删除后先重读原记录。
 
 `/reports` 要求带时区的 ISO 起止时间，最大 744 小时及 10,000 条匹配记录。金额保留十进制字符串，订单汇总不是净收入，支付汇总不是银行结算。订单导出只下载已加载页；修改时间输入不改变已加载页的区间，需重新运行。
 
 ## Agent 操作的人工接管
 
-Admin 与 MCP 共用受控业务合同，MCP 返回的资源链接只打开详情，不执行操作。用户在 `/approvals` 独立登录，核对并决定本人 Agent 的退款、角色变更、客户/用户匿名化请求；支持最新记录及原 ID 查询。
+Admin 与 MCP 共用受控业务合同，MCP 返回的资源链接只打开详情，不执行操作。用户在 `/approvals` 独立登录，核对并决定本人 Agent 的退款和客户匿名化请求；支持最新记录及原 ID 查询。
 
 批准绑定原请求且有时限，不是给 Agent 通用写权限。`consuming` 要先核对业务事实，`consumed` 不证明渠道结算。完整流程以 [MCP 逐笔人工审批](../mcp/README.md#远程逐笔人工审批) 为准。
 
@@ -105,28 +100,9 @@ PUBLIC_MCP_CONNECTION='{"resource":"https://mcp.example.com/mcp","issuer":"https
 
 仅允许这三个字段；HTTPS 地址无凭据/query/fragment，resource 须有非根路径。构建拒绝未知字段、未知/重复 scope；不填协议 scopes `openid/offline_access`，不填任何 secret。未配置则不推断地址，更新后须重建。页面不读取远程元数据、不发起 OAuth、不签发 PAT；展示不证明服务可用或实际授权。部署时与真实 issuer/resource/scopes/写开关核对，见 [MCP 运维](../mcp/OPERATIONS.md)。
 
-## 实时失效通知
+## 数据刷新
 
-私有 Supabase Broadcast 只发送“可能变化”，不发送业务行、资源 ID、参数或凭据；浏览器不能发布。业务数据始终从授权 RPC 重读，频道权限缓存不保证降级后立即断开。个人频道只供本人非匿名身份订阅，降级后仍可使用安全页。
-
-通知合并 200ms，隐藏页不自动读取；首次订阅、重连、聚焦/回到前台重新核对或提示。没有持续轮询、可靠送达或精确库存到期推送，不能用于确认写成功。读取失败保留旧数据；草稿、确认集合和未知请求不会被通知覆盖。
-
-### 当前覆盖与上线边界
-
-| 页面 | 处理方式 |
-| --- | --- |
-| 商品列表、分类树 | 按已应用筛选自动重读已加载页数，保留筛选草稿/展开状态；一页失败不混装部分新结果 |
-| 分类编辑 | 干净时自动重读；草稿、保存中、冲突和未知结果保留 |
-| 本人调用记录 | 最新页自动重读，历史页只提示 |
-| 本人连接 | 无确认集合时自动重读第一页；后续页、预览和未知撤销保留 |
-| 库存、调拨 | 只提示，显式刷新余额/流水；不重建表单或解锁未知操作 |
-| 其他业务页 | 按当前路由订阅业务域，只提示，用户显式核对 |
-
-提示可能来自同域其他记录，Dismiss 只收起提示，不表示已读取。自然到期未必发生数据库写入，因此预占到期不保证推送；最终库存限制由数据库检查。SPA 切换清理订阅，同名频道等待旧退订完成再创建，不重挂载业务页面。
-
-发布前应用当前完整店铺迁移；通知相关为 `20260923000005`～`00010`。核对 Realtime 私有 Broadcast / `realtime.send`、WSS 网络路径和 Auth JWT 配置，不需将业务表加入 publication 或给浏览器 service key。这里的 WSS 代理要求不代表远程 MCP 支持反向代理。
-
-目标环境须验证跨用户隔离、降级 RPC 拒绝、断线恢复、草稿/未知写保护，并观察通知量、连接数和 RPC 读取量。限流可导致通知丢失，本地回归不等于生产容量验收。测试入口见 [测试指南](../docs/testing.md#admin--mcp-本地融合验收)。
+Admin 不订阅 Realtime，也不轮询。商品列表、分类树、本人连接和最新调用记录在窗口重新获得焦点时重读已加载页，并保留筛选草稿、展开状态、后续页和撤销确认集合。编辑器、库存和调拨只在显式 Reload/Refresh 时读取，不覆盖草稿或解锁未知操作；其他页面使用各自的刷新按钮。最终库存与版本限制由数据库检查。
 
 ## 图片权限与失败处理
 
@@ -164,11 +140,10 @@ location / {
 | 范围 | 脚本（仓库根目录 `bun scripts/<文件>`） |
 | --- | --- |
 | 导航、连接、逐笔审批 | `admin-navigation-smoke.ts`、`admin-connections-smoke.ts`、`admin-fusion-smoke.ts` |
-| 商品实时列表、分类、客户、素材 | `admin-products-live-smoke.ts`、`admin-categories-smoke.ts`、`admin-customers-smoke.ts`、`admin-media-smoke.ts` |
+| 分类、客户、素材 | `admin-categories-smoke.ts`、`admin-customers-smoke.ts`、`admin-media-smoke.ts` |
 | 库存、调拨、仓库 | `admin-inventory-review-smoke.ts`、`admin-transfer-smoke.ts`、`admin-locations-smoke.ts` |
 | 促销、目标、配送、税率 | `admin-promotions-smoke.ts`、`admin-promotion-targets-smoke.ts`、`admin-shipping-smoke.ts`、`admin-taxes-smoke.ts` |
 | 订单活动、退款、退货、报价、运维 | `admin-order-activity-smoke.ts`、`admin-refunds-smoke.ts`、`admin-returns-smoke.ts`、`admin-quotes-smoke.ts`、`admin-reconciliation-smoke.ts` |
-| 异常回执与页面通知 | `admin-write-receipts-smoke.ts`、`admin-page-changes-smoke.ts` |
 | 全领域补齐与跨页面恢复 | `admin-parity-smoke.ts`（真实本地 RPC/Storage；PayPal 网络边界被截断，不发真实退款） |
 
 多数脚本支持 `ADMIN_URL` 指定实际本地端口，截图位置以脚本为准；须实际查看桌面、移动及失败状态截图。真实 OAuth → MCP → Admin 联动、数据库回归和夹具清理约定统一见 [测试指南](../docs/testing.md)。

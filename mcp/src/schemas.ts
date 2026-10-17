@@ -53,22 +53,6 @@ export const reviewPage = z.strictObject({
   next_cursor: id.nullable(),
 });
 export const reviewDeletion = z.strictObject({ id, deleted: z.literal(true) });
-export const profileResult = z.strictObject({
-  id,
-  email: z.string(),
-  role: z.enum(['admin', 'customer']),
-  created_at: timestamp,
-  updated_at: timestamp,
-});
-export const adminUser = profileResult.omit({ id: true }).extend({
-  user_id: id,
-  customer_id: id.nullable(),
-  customer_anonymized_at: timestamp.nullable(),
-});
-export const adminUserPage = z.strictObject({
-  items: z.array(adminUser).max(100),
-  next_cursor: id.nullable(),
-});
 export const customerResult = z.strictObject({
   id,
   auth_user_id: id.nullable(),
@@ -144,14 +128,6 @@ export const orderEventPage = z.strictObject({
     )
     .max(100),
   next_cursor: bigintString.nullable(),
-});
-export const zeroValueCancellation = z.strictObject({
-  id,
-  order_id: id,
-  order_item_id: id,
-  quantity: version,
-  restocked_quantity: z.number().int().nonnegative(),
-  created_at: timestamp,
 });
 export const paypalRefundResult = z.strictObject({
   refund_request_id: id,
@@ -573,7 +549,6 @@ const polling = {
   updated_at: timestamp,
 };
 const paymentIntent = paymentOperation.extend({
-  payment_method: z.enum(['paypal', 'card']),
   status: z.enum(['requires_action', 'processing', 'succeeded', 'failed', 'cancelled']),
   expires_at: timestamp,
   provider_capture_requested_at: timestamp.nullable(),

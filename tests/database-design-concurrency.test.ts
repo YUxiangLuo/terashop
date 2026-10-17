@@ -43,26 +43,6 @@ test(`直接账本写入不能超退：${mode} / ${isolation}`, async () => {
 });
 
 for (const isolation of ['read committed', 'repeatable read'] as const)
-test(`管理员降级不会清空管理员：${isolation}`, async () => {
-  const first = await signup(), second = await signup();
-  const original = await database`select id from public.profiles where role='admin'`;
-  try {
-    await database`update public.profiles set role='customer' where role='admin'`;
-    await makeAdmin(first.userId); await makeAdmin(second.userId);
-    const result = await staleAfterCommit(async sql => {
-      await actor(sql, second);
-      return sql`select public.set_user_role(${second.userId}::uuid,'customer')`;
-    }, () => checked(rpc('set_user_role', { user_id: first.userId, role: 'customer' }, first.token)), isolation);
-    expect(result.error).toMatchObject(isolation === 'repeatable read'
-      ? { errno: '40001' } : { message: 'cannot demote the last admin' });
-    expect(await database`select id from public.profiles where role='admin'`).toHaveLength(1);
-  } finally {
-    for (const row of original) await database`update public.profiles set role='admin' where id=${row.id}::uuid`;
-    await database`update public.profiles set role='customer' where id in (${first.userId}::uuid,${second.userId}::uuid)`;
-  }
-});
-
-for (const isolation of ['read committed', 'repeatable read'] as const)
 for (const mode of ['change-definition', 'create-definition', 'definition-first'] as const)
 test(`Metafield 类型关系串行化：${mode} / ${isolation}`, async () => {
   const namespace = `race-${crypto.randomUUID()}`, owner = crypto.randomUUID();

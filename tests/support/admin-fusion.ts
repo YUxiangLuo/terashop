@@ -71,38 +71,23 @@ export async function verifyAdminFusion(input: {
       if(form.querySelector('input').value!==${JSON.stringify(name)} || form.querySelector('input[type=checkbox]').checked || form.querySelector('input[type=number]').value!=='-7')throw Error('MCP facts differ in Admin');
     })()`,
     );
-    await wait('Live category updates connected.');
     const nameInput = '#category-form section:first-child > label:first-of-type input';
-    const liveVersion = await update(original.updated_at, 'Live change from MCP');
-    await browser(
-      'wait',
-      '--fn',
-      `document.querySelector('${nameInput}').value==='Live change from MCP' && !document.querySelector('#category-form fieldset').disabled`,
-    );
     await browser('fill', nameInput, 'Unsaved local edit');
-    const dirtyVersion = await update(liveVersion, 'Remote change during editing');
-    await wait('Category data may have changed.');
-    await browser(
-      'eval',
-      `if(document.querySelector('${nameInput}').value!=='Unsaved local edit')throw Error('Local edit overwritten')`,
-    );
+    const remoteVersion = await update(original.updated_at, 'Remote change during editing');
     await browser('set', 'viewport', '390', '844');
-    await browser('screenshot', '/tmp/admin-realtime-dirty.png', '--full');
     await click('Save category');
-    await browser('wait', '[role=alert]');
-    await update(dirtyVersion, 'Remote change after conflict');
-    // Wait beyond the coalescing interval, so a queued read cannot silently unlock a conflict.
-    await browser('wait', '700');
+    await wait('Another edit changed this record.');
     await browser(
       'eval',
-      `if(!document.querySelector('#category-form fieldset').disabled || document.querySelector('${nameInput}').value!=='Unsaved local edit')throw Error('Unconfirmed editor overwritten or unlocked')`,
+      `if(!document.querySelector('#category-form fieldset').disabled || document.querySelector('${nameInput}').value!=='Unsaved local edit')throw Error('Conflicting editor overwritten or unlocked')`,
     );
+    await browser('screenshot', '/tmp/admin-fusion-conflict.png', '--full');
     await click('Reload category');
     await browser('dialog', 'accept');
     await browser(
       'wait',
       '--fn',
-      `document.querySelector('${nameInput}').value==='Remote change after conflict' && !document.querySelector('#category-form fieldset').disabled`,
+      `document.querySelector('${nameInput}').value==='Remote change during editing' && !document.querySelector('#category-form fieldset').disabled`,
     );
     // Prove both clients consume the same revision contract, not parallel state.
     await browser(
@@ -112,23 +97,10 @@ export async function verifyAdminFusion(input: {
     );
     await click('Save category');
     await wait('Category saved');
-    let saved = await read();
+    const saved = await read();
     assert.equal(saved.name, 'Edited independently in Admin');
-    assert.notEqual(saved.updated_at, original.updated_at);
+    assert.notEqual(saved.updated_at, remoteVersion);
     assert.equal(saved.is_active, false);
-    await browser('set', 'offline', 'on');
-    try {
-      await update(saved.updated_at, 'Updated while offline');
-    } finally {
-      await browser('set', 'offline', 'off');
-    }
-    await browser(
-      'wait',
-      '--fn',
-      `document.querySelector('${nameInput}').value==='Updated while offline' && !document.querySelector('#category-form fieldset').disabled`,
-    );
-    saved = await read();
-    await browser('screenshot', '/tmp/admin-realtime-restored.png', '--full');
     const stale = await client.callTool({
       name: 'update_category',
       arguments: {
@@ -142,9 +114,9 @@ export async function verifyAdminFusion(input: {
     await browser('open', `${adminOrigin}/connections`);
     await wait('create_category');
     await wait('update_category');
-    await wait('Live call updates connected.');
     const rowCount = Number(await browser('get', 'count', '[aria-label="My Agent call records"] tbody tr'));
     await read();
+    await click('Refresh call records');
     await browser(
       'wait',
       '--fn',
@@ -152,7 +124,7 @@ export async function verifyAdminFusion(input: {
     );
     await browser('set', 'viewport', '1440', '1000');
     await browser('eval', `document.querySelector('[aria-label="My Agent call records"]').scrollIntoView()`);
-    await browser('screenshot', '/tmp/admin-realtime-calls.png');
+    await browser('screenshot', '/tmp/admin-fusion-calls.png');
     await browser(
       'eval',
       `(() => {

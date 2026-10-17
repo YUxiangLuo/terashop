@@ -17,7 +17,6 @@
     reconciliation_status?: string;
     has_error?: boolean;
     restock_requested?: boolean;
-    payment_method?: string;
     source?: string;
     expires_at?: string;
     provider_capture_requested_at?: string | null;
@@ -38,7 +37,6 @@
   // Only documented, redacted DTO fields are rendered. Never dump arbitrary JSON.
   const detailFields: Record<Exclude<Kind, "events">, (keyof Row)[]> = {
     payment_intent: [
-      "payment_method",
       "expires_at",
       "provider_capture_requested_at",
       "last_provider_poll_at",

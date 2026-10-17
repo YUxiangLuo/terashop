@@ -10,7 +10,6 @@
     type TargetDraft,
     type PromotionTarget,
   } from "./promotion-targets";
-  import { promotionReceipt } from "./write-receipts";
   import PromotionTargetPicker from "./PromotionTargetPicker.svelte";
   let { id }: { id: string } = $props();
   let rule = $state.raw<Promotion | null>(null);
@@ -49,9 +48,7 @@
             promotion_id: id,
           });
           if (result.error) throw result.error;
-          return result.data === null
-            ? null
-            : (promotionReceipt(result.data, id, null) as unknown as Promotion);
+          return result.data as unknown as Promotion | null;
         },
         async (cursor) => {
           const result = await supabase.rpc("list_admin_promotion_targets", {
@@ -109,7 +106,6 @@
       });
       if (result.error) throw result.error;
       if (!alive) return;
-      promotionReceipt(result.data, id, rule.revision);
       baseline = JSON.stringify(draft);
       notice =
         "Targets saved. Reloading the complete saved set; existing order snapshots are unchanged.";

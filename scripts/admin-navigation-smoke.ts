@@ -63,7 +63,6 @@ try {
     ['/locations', 'Inventory'],
     ['/inventory/transfers', 'Inventory'],
     ['/customers', 'Customers'],
-    ['/users', 'Customers'],
     ['/promotions', 'Promotions'],
     ['/reconciliation', 'Operations'],
     ['/payment-events', 'Operations'],

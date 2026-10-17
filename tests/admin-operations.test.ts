@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
-import { API, ANON_KEY, checked, makeAdmin, rpc, signup, type TestUser } from './helpers';
+import { API, ANON_KEY, checked, makeAdmin, rpc, setRole, signup, type TestUser } from './helpers';
 import { AdminBackend } from '../mcp/src/backend';
 import { mcpSession, toolData } from './support/mcp';
 import type { Database } from '../types/database';
@@ -107,7 +107,7 @@ test('管理员重投真实绑定 actor，同键并发一次审计，成功后�
   expect(await checked<boolean>(rpc('complete_outbox_event', { event_id: event, worker_id: 'test', lease_token: token, succeeded: true }, undefined, true))).toBe(true);
   expect(await checked<boolean>(rpc('redrive_outbox_event', body, admin.token))).toBe(true);
   expect((await outbox({ aggregate_id: event })).items[0]).toMatchObject({ status: 'published', attempts: 26 });
-  await checked(rpc('set_user_role', { user_id: admin.userId, role: 'customer' }, other.token));
+  await setRole(admin.userId, 'customer');
   try {
     expect((await rpc('redrive_outbox_event', body, admin.token)).status).toBe(403);
     expect((await rpc('list_admin_outbox_events', {}, admin.token)).status).toBe(403);

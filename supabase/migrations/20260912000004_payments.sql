@@ -170,8 +170,7 @@ CREATE FUNCTION private.payment_intent_json(p_intent commerce.payment_intents) R
     AS $$
   select jsonb_build_object(
     'id', p_intent.id, 'order_id', p_intent.order_id,
-    'provider', p_intent.provider, 'payment_method', p_intent.payment_method,
-    'status', p_intent.status,
+    'provider', p_intent.provider, 'status', p_intent.status,
     'amount', p_intent.amount, 'currency', p_intent.currency,
     'provider_reference', p_intent.provider_reference,
     'expires_at', p_intent.expires_at,
@@ -862,7 +861,6 @@ declare
   v_order public.orders;
 begin
   new.provider := lower(btrim(new.provider));
-  new.payment_method := lower(btrim(new.payment_method));
   new.currency := upper(btrim(new.currency));
   new.idempotency_key := btrim(new.idempotency_key);
   if tg_op = 'INSERT' then
@@ -884,9 +882,9 @@ begin
     -- Make intent creation visible as a write conflict to old commercial snapshots.
     update public.orders set updated_at = now() where id = new.order_id;
   else
-    if (new.order_id, new.provider, new.payment_method, new.amount, new.currency, new.idempotency_key, new.expires_at)
+    if (new.order_id, new.provider, new.amount, new.currency, new.idempotency_key, new.expires_at)
        is distinct from
-       (old.order_id, old.provider, old.payment_method, old.amount, old.currency, old.idempotency_key, old.expires_at) then
+       (old.order_id, old.provider, old.amount, old.currency, old.idempotency_key, old.expires_at) then
       raise exception 'payment intent commercial fields are immutable';
     end if;
     if old.provider_reference is not null
@@ -1121,8 +1119,7 @@ begin
   join commerce.refund_requests r on r.id = l.refund_request_id
   where l.order_item_id = new.order_item_id
     and r.status in ('requested', 'submitted', 'processing');
-  if v_item.refunded_quantity + v_active_qty + new.quantity
-     + private.zero_value_cancelled_quantity(v_item.id) > v_item.quantity then
+  if v_item.refunded_quantity + v_active_qty + new.quantity > v_item.quantity then
     raise exception 'refund request line exceeds available quantity';
   end if;
   v_expected := private.proportional_refund(v_item.line_total, v_item.quantity, new.quantity,
@@ -1378,7 +1375,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb DEFAULT '{}'::jsonb, payment_method text DEFAULT 'paypal'::text) RETURNS jsonb
+CREATE FUNCTION public.create_payment_intent(order_id uuid, provider text, idempotency_key text, metadata jsonb DEFAULT '{}'::jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1388,7 +1385,6 @@ declare
   v_intent commerce.payment_intents;
   v_provider text := lower(btrim(provider));
   v_key text := btrim(idempotency_key);
-  v_payment_method text := lower(btrim(payment_method));
 begin
   if coalesce(v_provider, '') = '' or coalesce(v_key, '') = '' then
     raise exception 'provider and idempotency_key are required';
@@ -1406,8 +1402,8 @@ begin
   select * into v_intent from commerce.payment_intents i
   where i.order_id = v_order.id and i.provider = v_provider and i.idempotency_key = v_key;
   if found then
-    if (v_intent.order_id, v_intent.amount, v_intent.currency, v_intent.payment_method)
-       is distinct from (v_order.id, v_order.total, v_order.currency, v_payment_method) then
+    if (v_intent.order_id, v_intent.amount, v_intent.currency)
+       is distinct from (v_order.id, v_order.total, v_order.currency) then
       raise exception 'idempotency key was used for another payment intent';
     end if;
   else
@@ -1423,17 +1419,15 @@ begin
       raise exception 'checkout reservation is not active';
     end if;
     insert into commerce.payment_intents
-      (order_id, provider, amount, currency, idempotency_key, metadata, expires_at, payment_method)
+      (order_id, provider, amount, currency, idempotency_key, metadata, expires_at)
     values (v_order.id, v_provider, v_order.total, v_order.currency, v_key, metadata,
-            case when v_quote.id is not null then v_quote.expires_at else v_order.payment_expires_at end,
-            v_payment_method)
+            case when v_quote.id is not null then v_quote.expires_at else v_order.payment_expires_at end)
     returning * into v_intent;
   end if;
 
   return jsonb_build_object(
     'id', v_intent.id, 'order_id', v_intent.order_id,
-    'provider', v_intent.provider, 'payment_method', v_intent.payment_method,
-    'status', v_intent.status,
+    'provider', v_intent.provider, 'status', v_intent.status,
     'amount', v_intent.amount, 'currency', v_intent.currency,
     'provider_reference', v_intent.provider_reference,
     'expires_at', v_intent.expires_at,
@@ -1442,7 +1436,7 @@ begin
 end;
 $$;
 
-CREATE FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb DEFAULT '{}'::jsonb, payment_method text DEFAULT 'paypal'::text) RETURNS jsonb
+CREATE FUNCTION public.create_payment_intent_for_customer(order_id uuid, actor_id uuid, provider text, idempotency_key text, metadata jsonb DEFAULT '{}'::jsonb) RETURNS jsonb
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
     AS $$
@@ -1462,8 +1456,7 @@ begin
     create_payment_intent_for_customer.provider,
     create_payment_intent_for_customer.idempotency_key,
     coalesce(create_payment_intent_for_customer.metadata, '{}'::jsonb)
-      || jsonb_build_object('actor_id', create_payment_intent_for_customer.actor_id),
-    create_payment_intent_for_customer.payment_method
+      || jsonb_build_object('actor_id', create_payment_intent_for_customer.actor_id)
   );
   select * into v_intent from commerce.payment_intents i
   where i.order_id = create_payment_intent_for_customer.order_id
@@ -2004,7 +1997,7 @@ begin
   end if;
   with candidates as materialized (
     select i.id,jsonb_build_object('id',i.id,'order_id',i.order_id,'provider',i.provider,
-      'payment_method',i.payment_method,'status',i.status,'amount',i.amount::text,'currency',i.currency,
+      'status',i.status,'amount',i.amount::text,'currency',i.currency,
       'expires_at',i.expires_at,'provider_capture_requested_at',i.provider_capture_requested_at,
       'last_provider_poll_at',i.last_provider_poll_at,'provider_poll_attempts',i.provider_poll_attempts,
       'created_at',i.created_at,'updated_at',i.updated_at) as dto

@@ -53,14 +53,15 @@ export async function signup(email = `t_${crypto.randomUUID()}@test.com`): Promi
   return { token: data.access_token, userId: data.user.id, customerId: customer.data, email };
 }
 
-export async function makeAdmin(userId: string) {
+export async function setRole(userId: string, role: 'admin' | 'customer') {
   const res = await api(`/rest/v1/profiles?id=eq.${userId}`, {
     service: true,
     method: 'PATCH',
-    body: { role: 'admin' },
+    body: { role },
   });
-  if (res.status >= 400) throw new Error(`makeAdmin failed: ${JSON.stringify(res.data)}`);
+  if (res.status >= 400) throw new Error(`setRole failed: ${JSON.stringify(res.data)}`);
 }
+export const makeAdmin = (userId: string) => setRole(userId, 'admin');
 
 // ---------- 领域快捷方法 ----------
 export async function variantBySku(sku: string): Promise<string> {

@@ -39,7 +39,7 @@ test('Admin links use fixed routes and validated UUIDs, never merchant text or A
     ).toEqual([`${origin}/${path}/${id}`, `${origin}/${path}/${other}`]);
     expect(JSON.stringify(adminRecordLinks(origin, `get_admin_${entity}`, row))).not.toContain('evil');
   }
-  expect(adminRecordLinks(origin, 'get_admin_user', { id })).toEqual([]);
+  expect(adminRecordLinks(origin, 'get_admin_shop_settings', { id })).toEqual([]);
   expect(adminRecordLinks(origin, 'create_product', { id })).toEqual([]);
   expect(adminRecordLinks(origin, 'get_admin_order', null)).toEqual([]);
   expect(adminRecordLinks(undefined, 'get_admin_order', { id })).toEqual([]);

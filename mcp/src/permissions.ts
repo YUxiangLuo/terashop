@@ -4,9 +4,7 @@ export type { AdminScope } from '../../shared/admin-contracts';
 const read: readonly AdminScope[] = Object.freeze(['store:read']);
 const write: readonly AdminScope[] = Object.freeze(['store:write']);
 const payments: readonly AdminScope[] = Object.freeze(['store:write', 'store:payments']);
-const access: readonly AdminScope[] = Object.freeze(['store:write', 'store:access']);
 const privacy: readonly AdminScope[] = Object.freeze(['store:write', 'store:privacy']);
-const accountPrivacy: readonly AdminScope[] = Object.freeze(['store:write', 'store:access', 'store:privacy']);
 
 export const toolScopes: Readonly<Record<string, readonly AdminScope[]>> = Object.freeze({
   stage_media_upload: write,
@@ -93,7 +91,6 @@ export const toolScopes: Readonly<Record<string, readonly AdminScope[]>> = Objec
   get_order_checkout_quote: read,
   cancel_checkout_quote: write,
   cancel_order: write,
-  cancel_zero_value_order_item: write,
   mark_order_paid: payments,
   preview_manual_refund: read,
   commit_manual_refund: payments,
@@ -109,10 +106,6 @@ export const toolScopes: Readonly<Record<string, readonly AdminScope[]>> = Objec
   get_admin_review: read,
   delete_review: write,
   moderate_review: write,
-  set_user_role: access,
-  list_admin_users: read,
-  get_admin_user: read,
-  anonymize_user: accountPrivacy,
   list_admin_outbox_events: read,
   list_admin_payment_provider_events: read,
   get_admin_operations_summary: read,

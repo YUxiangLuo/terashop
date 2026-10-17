@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  lineAvailable,
   paypalAmount,
   readOrderAction,
   saveOrderAction,
@@ -56,21 +55,6 @@ describe("admin order action safety helpers", () => {
       expect(() => paypalAmount(value)).toThrow();
   });
 
-  test("uses authoritative available quantity including zero-value cancellations", () => {
-    const balance = {
-      lines: [
-        {
-          order_item_id: orderId,
-          ordered_quantity: 9,
-          fulfilled_quantity: 2,
-          cancelled_quantity: 4,
-          available_quantity: 3,
-        },
-      ],
-    };
-    expect(lineAvailable(balance as never, orderId)).toBe(3);
-    expect(lineAvailable(balance as never, "unknown")).toBe(0);
-  });
   test("refuses retained write bodies missing original keys or containing extra fields", () => {
     const storage = new MemoryStorage();
     for (const args of [

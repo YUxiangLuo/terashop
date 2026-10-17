@@ -112,7 +112,7 @@ test('长时间未知的退款不再 POST 或释放预留；可信绑定后仍�
   expect(calls).toBe(1);
 });
 
-test('报价和便捷下单共享 50 行/100 件限制及 5 个活跃 checkout 配额，并发不能超额', async () => {
+test('报价和便捷下单共享 50 行/100 件限制，同键重放返回原报价', async () => {
   const f = await fixture();
   for (const name of ['create_order', 'create_checkout_quote']) {
     const result = await rpc(name, {
@@ -128,16 +128,8 @@ test('报价和便捷下单共享 50 行/100 件限制及 5 个活跃 checkout �
   }
   const quoteCommand = { items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS, idempotency_key: crypto.randomUUID() };
   const quote = await checked<{ id: string }>(rpc('create_checkout_quote', quoteCommand, buyer.token));
-  const results = await Promise.all(Array.from({ length: 9 }, (_, i) => {
-    const name = ['create_order', 'create_checkout_quote'][i % 2];
-    return rpc(name, { items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS,
-      idempotency_key: crypto.randomUUID() }, buyer.token);
-  }));
-  expect(results.filter(r => r.status === 200)).toHaveLength(4);
-  for (const r of results.filter(r => r.status !== 200)) expect(r.data).toMatchObject({ message: expect.stringContaining('too many active checkouts') });
-  expect((await rpc('create_checkout_quote', quoteCommand, buyer.token)).status).toBe(200); // Replay consumes no quota.
+  expect(await checked<{ id: string }>(rpc('create_checkout_quote', quoteCommand, buyer.token))).toMatchObject({ id: quote.id });
   expect((await rpc('create_order_from_quote', { quote_id: quote.id }, buyer.token)).status).toBe(200);
-  expect((await rpc('create_order', { idempotency_key: crypto.randomUUID(), items: [{ variant_id: f.variantId, quantity: 1 }], address: TEST_ADDRESS }, buyer.token)).status).toBe(400);
 });
 
 test('便捷下单及意图沿用报价期限，过期仅释放预占；未知 capture 的迟到成功只对账', async () => {

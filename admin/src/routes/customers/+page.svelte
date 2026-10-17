@@ -74,7 +74,7 @@
       >Refresh customers</button
     ><button
       class="primary"
-      onclick={() => goto(`/customers/new?request=${crypto.randomUUID()}`)}
+      onclick={() => goto("/customers/new")}
       >New customer</button
     >
   </div>

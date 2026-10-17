@@ -4,7 +4,6 @@
   import { page } from "$app/state";
   import { supabase, message, type Location } from "./api";
   import type { Json } from "../../../types/database";
-  import { locationReceipt } from "./write-receipts";
   let { id, creating }: { id: string; creating: boolean } = $props();
   let location = $state.raw<Location | null>(null);
   let fields = $state({
@@ -63,10 +62,7 @@
       });
       if (result.error) throw result.error;
       if (!alive) return;
-      const value =
-        result.data === null
-          ? null
-          : (locationReceipt(result.data, id, null) as unknown as Location);
+      const value = result.data as unknown as Location | null;
       if (!value && !creating) throw Error("Warehouse not found.");
       install(value);
       // Capture the current default alongside the target revision. Never refresh this
@@ -137,13 +133,7 @@
         : await supabase.rpc("create_location", { location_id: id, changes });
       if (result.error) throw result.error;
       if (!alive) return;
-      install(
-        locationReceipt(
-          result.data,
-          id,
-          location?.revision ?? null,
-        ) as unknown as Location,
-      );
+      install(result.data as unknown as Location);
       if (defaultLocation?.id === id) defaultLocation = location;
       notice = "Warehouse saved. Inventory quantities are unchanged.";
     } catch (cause) {
@@ -182,13 +172,7 @@
       });
       if (result.error) throw result.error;
       if (!alive) return;
-      install(
-        locationReceipt(
-          result.data,
-          id,
-          location.revision,
-        ) as unknown as Location,
-      );
+      install(result.data as unknown as Location);
       defaultLocation = location;
       notice = "Default warehouse changed. Inventory quantities are unchanged.";
     } catch (cause) {

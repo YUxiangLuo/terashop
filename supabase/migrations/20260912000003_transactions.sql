@@ -100,89 +100,10 @@ begin
 end;
 $$;
 
-CREATE FUNCTION private.zero_value_cancelled_quantity(p_item_id uuid) RETURNS integer
-    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-  select coalesce(sum(quantity),0)::integer from commerce.zero_value_cancellations where order_item_id = p_item_id;
-$$;
-
 CREATE FUNCTION private.order_has_payment_hold(p_order_id uuid) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
   select exists (select 1 from commerce.provider_money_movements
     where order_id=p_order_id and reconciliation_status='action_required');
-$$;
-
-CREATE FUNCTION private.validate_zero_value_cancellation() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_order public.orders; v_item public.order_items; v_available integer;
-begin
-  select * into v_order from public.orders where id = new.order_id for update nowait;
-  if not found or v_order.status <> 'open' or v_order.financial_status = 'pending' then
-    raise exception 'zero-value cancellation requires an open settled order';
-  end if;
-  update public.orders set updated_at = now() where id = new.order_id;
-  select * into v_item from public.order_items where id = new.order_item_id and order_id = new.order_id;
-  if not found or v_item.line_total <> 0 or exists (
-    select 1 from commerce.order_tax_lines where order_item_id = new.order_item_id and amount <> 0
-  ) then raise exception 'only zero-value, zero-tax order items can be cancelled without refund'; end if;
-  select available_quantity into v_available from private.order_item_fulfillment_balance(new.order_item_id);
-  if new.quantity > v_available then raise exception 'cancellation exceeds unshipped unreserved quantity'; end if;
-  if new.restocked_quantity <> 0 then raise exception 'cancellation restock quantity is derived'; end if;
-  new.restocked_quantity := case when exists (
-    select 1 from public.inventory_movements where order_id = new.order_id and variant_id = v_item.variant_id
-      and reason = 'order' and delta < 0
-  ) then new.quantity else 0 end;
-  return new;
-end;
-$$;
-
-CREATE FUNCTION private.apply_zero_value_cancellation() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_variant uuid;
-begin
-  if new.restocked_quantity > 0 then
-    select variant_id into v_variant from public.order_items where id = new.order_item_id;
-    perform private.recover_order_stock(new.order_id,v_variant,new.restocked_quantity,null,new.actor_id,new.reason);
-  end if;
-  perform private.refresh_order_fulfillment(new.order_id);
-  update public.orders o set status='cancelled', cancelled_at=now()
-  where o.id=new.order_id and o.total=0 and not exists (
-    select 1 from public.order_items i cross join lateral private.order_item_fulfillment_balance(i.id) b
-    where i.order_id=o.id and b.cancelled_quantity < b.ordered_quantity
-  );
-  insert into public.order_events(order_id,actor_id,type,data)
-    values(new.order_id,new.actor_id,'zero_value_cancelled',jsonb_build_object(
-      'cancellation_id',new.id,'order_item_id',new.order_item_id,'quantity',new.quantity,'restocked_quantity',new.restocked_quantity));
-  perform private.enqueue_outbox_event('order',new.order_id,'order.zero_value_cancelled',
-    jsonb_build_object('cancellation_id',new.id,'order_id',new.order_id,'order_item_id',new.order_item_id,'quantity',new.quantity),
-    'zero-value-cancellation:' || new.id);
-  return new;
-end;
-$$;
-
-CREATE FUNCTION public.cancel_zero_value_order_item(order_id uuid, order_item_id uuid, quantity integer,
-    idempotency_key text, reason text DEFAULT NULL) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_order public.orders; v_row commerce.zero_value_cancellations;
-begin
-  select * into v_order from public.orders o where o.id=cancel_zero_value_order_item.order_id
-    and (o.customer_id=public.current_customer_id() or public.is_admin() or auth.role()='service_role') for update;
-  if not found then raise exception 'order not found'; end if;
-  if coalesce(length(btrim(idempotency_key)),0) not between 1 and 200 or quantity is null or quantity <= 0 then
-    raise exception 'positive quantity and idempotency_key (1 to 200 characters) are required';
-  end if;
-  select * into v_row from commerce.zero_value_cancellations c
-    where c.order_id=v_order.id and c.idempotency_key=btrim(cancel_zero_value_order_item.idempotency_key);
-  if found then
-    if (v_row.order_item_id,v_row.quantity,v_row.reason) is distinct from (order_item_id,quantity,reason) then
-      raise exception 'idempotency key was used with different cancellation parameters';
-    end if;
-  else
-    insert into commerce.zero_value_cancellations(order_id,order_item_id,quantity,idempotency_key,reason,actor_id)
-      values(v_order.id,order_item_id,quantity,btrim(idempotency_key),reason,auth.uid()) returning * into v_row;
-  end if;
-  return jsonb_build_object('id',v_row.id,'order_id',v_row.order_id,'order_item_id',v_row.order_item_id,
-    'quantity',v_row.quantity,'restocked_quantity',v_row.restocked_quantity,'created_at',v_row.created_at);
-end;
 $$;
 
 CREATE FUNCTION private.return_line_received(p_id uuid) RETURNS bigint
@@ -605,7 +526,7 @@ begin
   select coalesce(sum(rl.quantity), 0), coalesce(sum(rl.amount), 0)
   into v_refunded_quantity, v_refunded_item_amount
   from commerce.refund_lines rl where rl.order_item_id = v_order_item_id;
-  if v_refunded_quantity + private.zero_value_cancelled_quantity(v_order_item_id) > v_ordered_quantity
+  if v_refunded_quantity > v_ordered_quantity
      or v_refunded_item_amount > v_item_amount then
     raise exception 'cumulative refund lines exceed order item %', v_order_item_id;
   end if;
@@ -777,7 +698,7 @@ CREATE FUNCTION private.order_item_fulfillment_balance(p_order_item_id uuid, p_u
              select sum(rl.cancelled_quantity) from commerce.refund_lines rl
              join commerce.refunds r on r.id = rl.refund_id and r.status = 'succeeded'
              where rl.order_item_id = oi.id
-           ), 0)::integer + private.zero_value_cancelled_quantity(oi.id) as ledger_cancelled,
+           ), 0)::integer as ledger_cancelled,
            coalesce((
              select sum(l.cancelled_quantity) from commerce.refund_request_lines l
              join commerce.refund_requests r on r.id = l.refund_request_id
@@ -1187,8 +1108,7 @@ begin
       select coalesce(sum(l.quantity),0), coalesce(sum(l.amount),0) into v_used_quantity, v_used
         from commerce.refund_request_lines l join commerce.refund_requests r on r.id = l.refund_request_id
         where l.order_item_id = v_line.id and r.status in ('requested','submitted','processing');
-      if v_line.refunded_quantity + v_used_quantity + v_quantity
-         + private.zero_value_cancelled_quantity(v_line.id) > v_line.quantity then
+      if v_line.refunded_quantity + v_used_quantity + v_quantity > v_line.quantity then
         raise exception 'refund quantity exceeds available request balance for item %', v_line.id;
       end if;
       v_line_amount := private.proportional_refund(v_line.line_total, v_line.quantity, v_quantity,

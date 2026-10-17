@@ -71,8 +71,7 @@ try {
   const admin = await signup(`parity-admin-${run}@example.test`);
   await makeAdmin(admin.userId);
   const buyer = await signup(`parity-buyer-${run}@example.test`);
-  const target = await signup(`parity-target-${run}@example.test`);
-  for (const u of [admin, buyer, target])
+  for (const u of [admin, buyer])
     cleanup.defer(() =>
       checked(
         api(`/auth/v1/admin/users/${u.userId}`, {
@@ -86,14 +85,8 @@ try {
     onHand: 20,
     cleanup,
   });
-  const zeroProduct = await stockedProduct(admin, {
-    price: 0,
-    onHand: 10,
-    cleanup,
-  });
   const unpaid = await fixtureOrder(product, buyer),
-    cancel = await fixtureOrder(product, buyer),
-    zero = await fixtureOrder(zeroProduct, buyer, 2);
+    cancel = await fixtureOrder(product, buyer);
   const call = <T = any>(name: string, args: unknown) =>
     checked<T>(rpc(name, args, admin.token));
   const settings = await call("get_admin_shop_settings", {});
@@ -176,7 +169,7 @@ try {
   await evalBrowser(
     `(() => { const original=window.fetch.bind(window);window.parityBodies=[];window.fetch=async(...args)=>{const response=await original(...args);if(String(args[0]?.url??args[0]).includes('/rpc/mark_order_paid')){window.parityBodies.push(JSON.parse(args[1].body));if(window.parityBodies.length===1&&response.ok)throw Error('Lost payment receipt');}return response;};})()`,
   );
-  await browser("check", "input[type=checkbox] >> nth=2");
+  await browser("check", "input[type=checkbox] >> nth=1");
   await approve("Mark order paid");
   await wait("Unresolved mark-paid");
   await approve("Retry retained request");
@@ -207,7 +200,7 @@ try {
     `(() => {const original=window.fetch.bind(window);window.paypalBodies=[];window.fetch=async(...args)=>{if(String(args[0]?.url??args[0]).includes('/functions/v1/paypal-create-refund')){window.paypalBodies.push(JSON.parse(args[1].body));throw Error('Provider fixture unavailable');}return original(...args);};})()`,
   );
   await fill("USD amount", "3.25");
-  await browser("check", "input[type=checkbox] >> nth=3");
+  await browser("check", "input[type=checkbox] >> nth=2");
   await approve("Issue PayPal refund");
   await wait("Unresolved paypal-refund");
   await approve("Retry retained request");
@@ -229,66 +222,6 @@ try {
   assert.equal(
     (await call("get_admin_order", { order_id: cancel.id })).status,
     "cancelled",
-  );
-  await open(`/orders/${zero.id}/actions`);
-  await wait("Current facts");
-  await browser(
-    "select",
-    "fieldset section:nth-of-type(2) select",
-    zero.itemId,
-  );
-  await fill("Quantity", "1");
-  await fill("Reason", "Zero consideration cancellation");
-  await browser("check", "input[type=checkbox] >> nth=1");
-  await approve("Cancel zero-value units");
-  await wait("Action confirmed");
-  assert.equal(
-    (await call("get_order_fulfillment_balance", { order_id: zero.id }))
-      .lines[0].cancelled_quantity,
-    1,
-  );
-
-  await open("/users");
-  await fill("Email contains", target.email);
-  await click("Apply filters");
-  await wait(target.email);
-  await capture("users-mobile");
-  await open(`/users/${target.userId}`);
-  await wait("Current profile");
-  await browser("select", "select", "admin");
-  await browser(
-    "fill",
-    "section.card input >> nth=0",
-    `${target.userId} admin`,
-  );
-  await click("Set exact role");
-  await wait("Role changed.");
-  assert.equal(
-    (await call("get_admin_user", { user_id: target.userId })).role,
-    "admin",
-  );
-  await click("Reload original user");
-  await browser("wait", "--fn", "!document.querySelector('select').disabled");
-  await browser("select", "select", "customer");
-  await browser(
-    "fill",
-    "section.card input >> nth=0",
-    `${target.userId} customer`,
-  );
-  await click("Set exact role");
-  await wait("Role changed.");
-  await click("Reload original user");
-  await browser("wait", "--fn", "!document.querySelector('select').disabled");
-  await browser(
-    "fill",
-    "section.card input >> nth=1",
-    `ANONYMIZE ${target.userId}`,
-  );
-  await approve("Anonymize user");
-  await wait("Anonymization submitted.");
-  assert.ok(
-    (await call("get_admin_user", { user_id: target.userId }))
-      .customer_anonymized_at,
   );
   await open(`/reviews/${reviewId}`);
   await wait("Review moderation");
@@ -609,7 +542,7 @@ try {
       .anonymized_at,
   );
   console.log(
-    "PASS: settings, order cancellation/payment/zero-value units, exact PayPal boundary retry, users/roles/privacy, review moderation/deletion, metadata CRUD and aggregate ownership, reports, variant position, public media recovery/hash inspection, historical transfer lookup and outbox redrive.",
+    "PASS: settings, order cancellation/payment, exact PayPal boundary retry, review moderation/deletion, metadata CRUD and aggregate ownership, reports, variant position, public media recovery/hash inspection, historical transfer lookup and outbox redrive.",
   );
 } catch (cause) {
   console.error(await browser("snapshot"));

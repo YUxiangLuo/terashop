@@ -33,7 +33,7 @@ test('human approval binds identity, exact arguments, expiry, state and single d
         p_action: 'create',
         p_binding: binding,
         p_user_id: owner.userId,
-        p_scopes: ['store:read', 'store:write', 'store:access', 'store:privacy', 'store:payments'],
+        p_scopes: ['store:read', 'store:write', 'store:privacy', 'store:payments'],
       },
       undefined,
       true,
@@ -45,8 +45,8 @@ test('human approval binds identity, exact arguments, expiry, state and single d
     p_issuer: binding.issuer,
     p_resource: binding.resource,
     p_project: project,
-    p_tool_name: 'set_user_role',
-    p_arguments: { user_id: target.userId, role: 'admin' },
+    p_tool_name: 'anonymize_customer',
+    p_arguments: { customer_id: target.customerId },
   };
   const invoke = (args: object) => rpc('mcp_action_approval_command', { ...base, ...args }, undefined, true);
   const stage = async (extra = {}) => {
@@ -61,6 +61,19 @@ test('human approval binds identity, exact arguments, expiry, state and single d
   const decide = (id: string, decision = 'approved', token = owner.token) =>
     rpc('decide_my_mcp_action_approval', { p_id: id, p_decision: decision }, token);
   const consume = (id: string, extra = {}) => invoke({ p_action: 'consume', p_approval_id: id, ...extra });
+
+  // Hold the target lock, change the customer, then release the waiting consumer.
+  // A pre-lock snapshot comparison would incorrectly authorize the changed target.
+  const changed = await stage();
+  await checked(decide(changed));
+  const raced = await heldTransactionRace(
+    db,
+    (tx) => tx`select id from public.customers where id=${target.customerId}::uuid for update`,
+    () => consume(changed),
+    (tx) => tx`update public.customers set phone='+1 555 0100' where id=${target.customerId}::uuid`,
+  );
+  expect(raced.status).toBe(409);
+
   const id = await stage();
   expect(
     (
@@ -90,14 +103,14 @@ test('human approval binds identity, exact arguments, expiry, state and single d
   expect(
     (
       await consume(id, {
-        p_arguments: { ...base.p_arguments, role: 'customer' },
+        p_arguments: { customer_id: other.customerId },
       })
     ).status,
   ).toBe(409);
   expect((await consume(id, { p_user_id: other.userId })).status).toBe(403);
   const concurrent = await Promise.all([consume(id), consume(id)]);
   expect(concurrent.map((r) => r.status).sort()).toEqual([200, 409]);
-  expect((concurrent.find((r) => r.status === 200)!.data as any).result.role).toBe('admin');
+  expect((concurrent.find((r) => r.status === 200)!.data as any).result.anonymized_at).toEqual(expect.any(String));
   expect((await consume(id)).status).toBe(409);
 
   const rejected = await stage();
@@ -107,18 +120,6 @@ test('human approval binds identity, exact arguments, expiry, state and single d
   await checked(decide(expired));
   await db`update private.mcp_action_approvals set expires_at=now()-interval '1 second' where id=${expired}::uuid`;
   expect((await consume(expired)).status).toBe(409);
-
-  // Hold the target lock, change its profile, then release the waiting consumer.
-  // A pre-lock snapshot comparison would incorrectly authorize the changed target.
-  const changed = await stage();
-  await checked(decide(changed));
-  const raced = await heldTransactionRace(
-    db,
-    (tx) => tx`select id from public.profiles where id=${target.userId}::uuid for update`,
-    () => consume(changed),
-    (tx) => tx`update public.profiles set email='changed@example.test' where id=${target.userId}::uuid`,
-  );
-  expect(raced.status).toBe(409);
 
   // Provider scope is explicit and retains its original business idempotency key.
   const payment = {
@@ -141,7 +142,7 @@ test('human approval binds identity, exact arguments, expiry, state and single d
     state: 'consumed',
   });
 
-  // Lost atomic dispatch response must never lead to another role mutation.
+  // Lost atomic dispatch response must never lead to another anonymization.
   const lost = await stage();
   await checked(decide(lost));
   const host = createActionApprovalHost(
@@ -149,7 +150,7 @@ test('human approval binds identity, exact arguments, expiry, state and single d
       ...binding,
       supabaseUrl: API,
       serviceRoleKey: SERVICE_KEY,
-      scopes: ['store:write', 'store:access'],
+      scopes: ['store:write', 'store:privacy'],
       introspectionEndpoint: `${binding.issuer}/introspect`,
       introspectionClientId: 'test',
       introspectionClientSecret: 'unused',
@@ -161,7 +162,7 @@ test('human approval binds identity, exact arguments, expiry, state and single d
       throw Error('lost after commit');
     },
   );
-  await expect(host('set_user_role', { ...base.p_arguments, approval_id: lost })).rejects.toMatchObject({
+  await expect(host('anonymize_customer', { ...base.p_arguments, approval_id: lost })).rejects.toMatchObject({
     outcomeUnknown: true,
   });
   expect((await consume(lost)).status).toBe(409);
@@ -171,97 +172,94 @@ test('human approval binds identity, exact arguments, expiry, state and single d
   expect((await consume(revoked)).status).toBe(403);
 }, 60000);
 
-for (const tool of ['anonymize_customer', 'anonymize_user'] as const) {
-  test(`${tool} rejects an approved snapshot after a concurrent cart edit, then permits fresh approval`, async () => {
-    const owner = await signup(),
-      target = await signup();
-    await makeAdmin(owner.userId);
-    const binding = {
-      issuer: 'https://auth.example',
-      resource: 'https://mcp.example/mcp',
-      project,
-      subject: owner.userId,
-      session_id: crypto.randomUUID(),
-      client_id: 'test-agent',
-    };
-    const grant = await checked<{ id: string }>(
-      rpc(
-        'mcp_grant_command',
-        {
-          p_action: 'create',
-          p_binding: binding,
-          p_user_id: owner.userId,
-          p_scopes: ['store:write', 'store:access', 'store:privacy'],
-        },
-        undefined,
-        true,
-      ),
-    );
-    const cart = await checked<{ id: string; version: number }>(
-      rpc(
-        'create_cart',
-        {
-          idempotency_key: crypto.randomUUID(),
-        },
-        target.token,
-      ),
-    );
-    const base = {
-      p_grant_id: grant.id,
-      p_user_id: owner.userId,
-      p_issuer: binding.issuer,
-      p_resource: binding.resource,
-      p_project: project,
-      p_tool_name: tool,
-      p_arguments:
-        tool === 'anonymize_customer' ? { customer_id: target.customerId } : { p_user_id: target.userId },
-    };
-    const stageAndApprove = async () => {
-      const id = crypto.randomUUID();
-      await checked(
-        rpc(
-          'mcp_action_approval_command',
-          { ...base, p_action: 'stage', p_approval_id: id },
-          undefined,
-          true,
-        ),
-      );
-      await checked(rpc('decide_my_mcp_action_approval', { p_id: id, p_decision: 'approved' }, owner.token));
-      return id;
-    };
-    const consume = (id: string) =>
+test('anonymize_customer rejects an approved snapshot after a concurrent cart edit, then permits fresh approval', async () => {
+  const owner = await signup(),
+    target = await signup();
+  await makeAdmin(owner.userId);
+  const binding = {
+    issuer: 'https://auth.example',
+    resource: 'https://mcp.example/mcp',
+    project,
+    subject: owner.userId,
+    session_id: crypto.randomUUID(),
+    client_id: 'test-agent',
+  };
+  const grant = await checked<{ id: string }>(
+    rpc(
+      'mcp_grant_command',
+      {
+        p_action: 'create',
+        p_binding: binding,
+        p_user_id: owner.userId,
+        p_scopes: ['store:write', 'store:privacy'],
+      },
+      undefined,
+      true,
+    ),
+  );
+  const cart = await checked<{ id: string; version: number }>(
+    rpc(
+      'create_cart',
+      {
+        idempotency_key: crypto.randomUUID(),
+      },
+      target.token,
+    ),
+  );
+  const base = {
+    p_grant_id: grant.id,
+    p_user_id: owner.userId,
+    p_issuer: binding.issuer,
+    p_resource: binding.resource,
+    p_project: project,
+    p_tool_name: 'anonymize_customer',
+    p_arguments: { customer_id: target.customerId },
+  };
+  const stageAndApprove = async () => {
+    const id = crypto.randomUUID();
+    await checked(
       rpc(
         'mcp_action_approval_command',
-        { ...base, p_action: 'consume', p_approval_id: id },
+        { ...base, p_action: 'stage', p_approval_id: id },
         undefined,
         true,
-      );
-    const old = await stageAndApprove();
-    const result = await heldTransactionRace(
-      db,
-      (tx) => tx`select id from public.customers where id=${target.customerId}::uuid for update`,
-      () => consume(old),
-      async (tx) => {
-        await tx`select set_config('request.jwt.claims',${JSON.stringify({ role: 'authenticated', sub: target.userId })},true)`;
-        await tx`select public.update_cart(${cart.id}::uuid,${cart.version},'[]'::jsonb,note=>'Edited after approval')`;
-      },
+      ),
     );
-    expect(result.status).toBe(409);
-    expect(await checked(rpc('get_cart', { cart_id: cart.id }, target.token))).toMatchObject({
-      id: cart.id,
-      version: cart.version + 1,
-      note: 'Edited after approval',
-    });
-    expect(
-      (await checked<any[]>(rpc('list_my_mcp_action_approvals', { p_id: old }, owner.token)))[0].state,
-    ).toBe('approved');
-    const fresh = await stageAndApprove();
-    expect(await checked(consume(fresh))).toMatchObject({
-      id: fresh,
-      state: 'consumed',
-    });
-    const [{ count }] = await db`select count(*)::int as count from commerce.carts where id=${cart.id}::uuid`;
-    expect(count).toBe(0);
-    expect((await consume(fresh)).status).toBe(409);
-  }, 60000);
-}
+    await checked(rpc('decide_my_mcp_action_approval', { p_id: id, p_decision: 'approved' }, owner.token));
+    return id;
+  };
+  const consume = (id: string) =>
+    rpc(
+      'mcp_action_approval_command',
+      { ...base, p_action: 'consume', p_approval_id: id },
+      undefined,
+      true,
+    );
+  const old = await stageAndApprove();
+  const result = await heldTransactionRace(
+    db,
+    (tx) => tx`select id from public.customers where id=${target.customerId}::uuid for update`,
+    () => consume(old),
+    async (tx) => {
+      await tx`select set_config('request.jwt.claims',${JSON.stringify({ role: 'authenticated', sub: target.userId })},true)`;
+      await tx`select public.update_cart(${cart.id}::uuid,${cart.version},'[]'::jsonb,note=>'Edited after approval')`;
+    },
+  );
+  expect(result.status).toBe(409);
+  expect(await checked(rpc('get_cart', { cart_id: cart.id }, target.token))).toMatchObject({
+    id: cart.id,
+    version: cart.version + 1,
+    note: 'Edited after approval',
+  });
+  expect(
+    (await checked<any[]>(rpc('list_my_mcp_action_approvals', { p_id: old }, owner.token)))[0].state,
+  ).toBe('approved');
+  const fresh = await stageAndApprove();
+  expect(await checked(consume(fresh))).toMatchObject({
+    id: fresh,
+    state: 'consumed',
+  });
+  const [{ count }] = await db`select count(*)::int as count from commerce.carts where id=${cart.id}::uuid`;
+  expect(count).toBe(0);
+  expect((await consume(fresh)).status).toBe(409);
+}, 60000);

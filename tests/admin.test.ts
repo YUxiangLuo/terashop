@@ -31,14 +31,6 @@ const state = async (order: FixtureOrder) => (await checked<Array<Record<string,
 // Every test constructs the exact lifecycle state it exercises. Running a
 // single case, or shuffling this file, must not require earlier tests to pass.
 describe('权限边界', () => {
-  test('非 admin 不能 set_user_role', async () => {
-    const result = await rpc('set_user_role', { user_id: customer.userId, role: 'admin' }, customer.token);
-    expect(result.data).toMatchObject({ message: 'admin only' });
-  });
-  test('admin 可用 set_user_role 管理角色', async () => {
-    expect(await checked(rpc('set_user_role', { user_id: customer.userId, role: 'customer' }, admin.token)))
-      .toMatchObject({ role: 'customer' });
-  });
   test('非 admin 不能 mark_order_paid / create_fulfillment / adjust_inventory', async () => {
     const order = await givenOrder();
     for (const [name, body] of [
@@ -219,19 +211,3 @@ describe('修复：管理端写路径收拢', () => {
     expect(r.status).toBe(403);
   });
 });
-
-// Retained from the original review; grouped by business domain.
-test('不能降级最后一个 admin', async () => {
-    const solo = await signup();
-    const admins = await checked<Array<{ id: string }>>(api('/rest/v1/profiles?role=eq.admin&select=id', { service: true }));
-    // Restore EVERY original administrator, including after assertion failure.
-    resources.defer(() => checked(api(`/rest/v1/profiles?id=eq.${solo.userId}`, { service: true, method: 'PATCH', body: { role: 'customer' } })));
-    for (const admin of admins) resources.defer(() => makeAdmin(admin.id));
-    await makeAdmin(solo.userId);
-    for (const admin of admins) await checked(api(`/rest/v1/profiles?id=eq.${admin.id}`, {
-      service: true, method: 'PATCH', body: { role: 'customer' },
-    }));
-    const result = await rpc('set_user_role', { user_id: solo.userId, role: 'customer' }, solo.token);
-    expect(result.status).toBe(400);
-    expect(result.data).toMatchObject({ message: 'cannot demote the last admin' });
-  });

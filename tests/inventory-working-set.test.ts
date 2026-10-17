@@ -98,7 +98,7 @@ test('实际库存 SQL 与旧列表只查询目标预占，不随历史报价扫
   await withRollback(database, async sql => {
     const f = await fixture(sql);
     // Clone valid one-line commercial snapshots and terminate each quote, with
-    // every trigger enabled. Fixture-only SQL avoids customer checkout quotas.
+    // every trigger enabled. Fixture-only SQL avoids one checkout RPC per quote.
     await sql`create temporary table reservation_template on commit drop as
       select ${f.q}::uuid quote_id`;
     await sql.unsafe(`create function pg_temp.reservation_history(n integer) returns void language plpgsql as $$

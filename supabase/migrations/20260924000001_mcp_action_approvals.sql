@@ -3,7 +3,7 @@ begin;
 create table private.mcp_action_approvals (
   id uuid primary key, user_id uuid not null, grant_id uuid not null,
   client_id text not null, issuer text not null, resource text not null, project text not null,
-  tool_name text not null check (tool_name in ('refund_paypal','commit_manual_refund','set_user_role','anonymize_customer','anonymize_user')),
+  tool_name text not null check (tool_name in ('refund_paypal','commit_manual_refund','anonymize_customer')),
   arguments jsonb not null check (jsonb_typeof(arguments)='object'), snapshot jsonb not null,
   state text not null default 'pending' check (state in ('pending','approved','rejected','consuming','consumed')),
   created_at timestamptz not null default clock_timestamp(), expires_at timestamptz not null,
@@ -16,8 +16,6 @@ create index mcp_action_approvals_owner on private.mcp_action_approvals(user_id,
 create function private.mcp_approval_snapshot(p_tool text,p_args jsonb) returns jsonb
 language sql stable security definer set search_path='' as $$
  select to_jsonb(private.command_request_hash(case p_tool
-  when 'set_user_role' then coalesce((select to_jsonb(p) from public.profiles p where p.id=(p_args->>'user_id')::uuid),'null'::jsonb)
-  when 'anonymize_user' then coalesce((select jsonb_build_object('profile',to_jsonb(p),'customer',to_jsonb(c)) from public.profiles p left join public.customers c on c.auth_user_id=p.id where p.id=(p_args->>'p_user_id')::uuid),'null'::jsonb)
   when 'anonymize_customer' then coalesce((select jsonb_build_object('customer',to_jsonb(c),
     'addresses',(select jsonb_agg(to_jsonb(a) order by a.id) from public.addresses a where a.customer_id=c.id))
     from public.customers c where c.id=(p_args->>'customer_id')::uuid),'null'::jsonb)
@@ -32,25 +30,19 @@ declare a private.mcp_action_approvals; g private.mcp_grants; snap jsonb; result
 begin
  if auth.role() is distinct from 'service_role' then raise exception using errcode='42501',message='trusted MCP host required'; end if;
  if p_action is null or p_action not in ('stage','consume','finish') or p_approval_id is null or p_tool_name is null
-   or p_tool_name not in ('refund_paypal','commit_manual_refund','set_user_role','anonymize_customer','anonymize_user')
+   or p_tool_name not in ('refund_paypal','commit_manual_refund','anonymize_customer')
    or jsonb_typeof(p_arguments) is distinct from 'object' or octet_length(p_arguments::text)>65536
    then raise exception using errcode='22023',message='invalid bounded approval command'; end if;
- -- Host schemas validate payment payloads. SQL dispatch is limited to three exact signatures.
- if (p_tool_name='set_user_role' and (not (p_arguments ?& array['user_id','role'])
-     or p_arguments - array['user_id','role'] <> '{}' or p_arguments->>'role' not in ('admin','customer')))
-   or (p_tool_name='anonymize_customer' and (not p_arguments ? 'customer_id' or p_arguments - 'customer_id' <> '{}'))
-   or (p_tool_name='anonymize_user' and (not p_arguments ? 'p_user_id' or p_arguments - 'p_user_id' <> '{}'))
+ -- Host schemas validate payment payloads. SQL dispatch is limited to one exact signature.
+ if p_tool_name='anonymize_customer' and (not p_arguments ? 'customer_id' or p_arguments - 'customer_id' <> '{}')
    then raise exception using errcode='22023',message='invalid action arguments'; end if;
- required:=case p_tool_name when 'set_user_role' then array['store:write','store:access']
-   when 'anonymize_customer' then array['store:write','store:privacy']
-   when 'anonymize_user' then array['store:write','store:access','store:privacy']
+ required:=case p_tool_name when 'anonymize_customer' then array['store:write','store:privacy']
    else array['store:write','store:payments'] end;
  select * into g from private.mcp_grants where id=p_grant_id and user_id=p_user_id and state='active'
    and binding->>'issuer'=p_issuer and binding->>'resource'=p_resource and binding->>'project'=p_project for share;
  if not found then raise exception using errcode='42501',message='active bound grant required'; end if;
  if not g.scopes @> required then raise exception using errcode='42501',message='required scopes missing'; end if;
- -- Same serialization boundary as public.set_user_role; hold the actor role through dispatch.
- perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('tera-headless:set-user-role',0));
+ -- Hold the actor role through dispatch.
  perform 1 from public.profiles where id=p_user_id and role='admin' for share;
  if not found then raise exception using errcode='42501',message='current admin required'; end if;
  if p_action='stage' then
@@ -71,22 +63,15 @@ begin
  end if;
  if a.state<>'approved' or a.expires_at<=clock_timestamp() then raise exception using errcode='PT409',message='approval unavailable or expired'; end if;
  -- Compare after row locking, not before waiting on a concurrent business edit.
- if p_tool_name='set_user_role' then
-   perform 1 from public.profiles where id=(p_arguments->>'user_id')::uuid for update;
- elsif p_tool_name='anonymize_customer' then
+ if p_tool_name='anonymize_customer' then
    perform 1 from public.customers where id=(p_arguments->>'customer_id')::uuid for update;
- elsif p_tool_name='anonymize_user' then
-   perform 1 from public.customers where auth_user_id=(p_arguments->>'p_user_id')::uuid for update;
-   perform 1 from public.profiles where id=(p_arguments->>'p_user_id')::uuid for update;
  end if;
  snap:=private.mcp_approval_snapshot(p_tool_name,p_arguments);
  if a.snapshot<>snap then raise exception using errcode='PT409',message='approved state changed'; end if;
  update private.mcp_action_approvals set state='consuming',consumed_at=clock_timestamp() where id=a.id;
- if p_tool_name in ('set_user_role','anonymize_customer','anonymize_user') then
+ if p_tool_name='anonymize_customer' then
    perform set_config('request.jwt.claims',jsonb_build_object('role','authenticated','sub',p_user_id)::text,true);
-   if p_tool_name='set_user_role' then result:=to_jsonb(private.set_user_role((p_arguments->>'user_id')::uuid,p_arguments->>'role'));
-   elsif p_tool_name='anonymize_customer' then result:=to_jsonb(public.anonymize_customer((p_arguments->>'customer_id')::uuid));
-   else result:=to_jsonb(public.anonymize_user((p_arguments->>'p_user_id')::uuid)); end if;
+   result:=to_jsonb(public.anonymize_customer((p_arguments->>'customer_id')::uuid));
    update private.mcp_action_approvals set state='consumed' where id=a.id;
  end if;
  return jsonb_build_object('id',a.id,'state',case when result is null then 'consuming' else 'consumed' end,'result',result);
