@@ -44,8 +44,9 @@ begin
   v_plan := private.plan_refund(v_order.id, items, amount, shipping_amount, v_available);
   v_components := v_plan -> 'components';
   for v_line in select value from jsonb_array_elements(v_plan -> 'lines') loop
-    select least((v_line ->> 'quantity')::integer, b.available_quantity) into v_cancelled
-      from private.order_item_fulfillment_balance((v_line ->> 'order_item_id')::uuid) b;
+    select least((v_line ->> 'quantity')::integer - (v_line ->> 'restock_shipped_quantity')::integer, b.available_quantity)
+      into v_cancelled from private.order_item_fulfillment_balance((v_line ->> 'order_item_id')::uuid) b;
+    perform private.assert_shipped_restock((v_line ->> 'order_item_id')::uuid, (v_line ->> 'restock_shipped_quantity')::integer);
     v_restocked := case when restock and exists (
       select 1 from public.inventory_movements im join public.order_items oi on oi.variant_id = im.variant_id
       where oi.id = (v_line ->> 'order_item_id')::uuid and im.order_id = v_order.id and im.reason = 'order' and im.delta < 0
@@ -80,7 +81,7 @@ returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
   v_subject constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
   v_key text := btrim(idempotency_key);
-  v_items jsonb := case when items is null then null else private.canonical_order_item_quantities(items) end;
+  v_items jsonb := case when items is null then null else private.canonical_refund_items(items) end;
   v_hash text;
   v_record commerce.command_idempotency;
   v_preview jsonb;

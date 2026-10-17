@@ -34,7 +34,7 @@ begin
         ('update_customer_address','customer'),('delete_customer_address','customer'),
         ('get_admin_order','order'),('update_order_admin_note','order'),('cancel_order','order'),('mark_order_paid','order'),
         ('refund_paypal','order'),('preview_manual_refund','order'),('commit_manual_refund','order'),
-        ('get_order_pricing','order'),('get_order_ledger','order'),('get_order_returns','order'),('create_fulfillment','order'),('create_return','order'),
+        ('get_order_pricing','order'),('get_order_ledger','order'),('create_fulfillment','order'),
         ('get_admin_location','location'),('update_location','location'),('set_default_location','location'),
         ('get_admin_promotion','promotion'),('update_promotion','promotion'),
         ('get_admin_checkout_quote','checkout_quote'),('cancel_checkout_quote','checkout_quote'),

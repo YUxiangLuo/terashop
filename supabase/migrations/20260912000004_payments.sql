@@ -27,7 +27,8 @@ begin
     raise exception 'provider refund reference mismatch';
   end if;
   select * into v_order from public.orders o where o.id = v_request.order_id for update;
-  if v_request.restock_requested then
+  if v_request.restock_requested or exists (select 1 from commerce.refund_request_lines l
+    where l.refund_request_id = v_request.id and l.restock_shipped_quantity > 0) then
     perform private.lock_order_inventory(array[v_order.id]);
   end if;
 
@@ -66,8 +67,8 @@ begin
         refunded_amount = oi.refunded_amount + v_line.amount
     where oi.id = v_line.order_item_id;
 
-    insert into commerce.refund_lines (refund_id, order_id, order_item_id, quantity, amount)
-    values (v_refund_id, v_order.id, v_line.order_item_id, v_line.quantity, v_line.amount);
+    insert into commerce.refund_lines (refund_id, order_id, order_item_id, quantity, amount, restock_shipped_quantity)
+    values (v_refund_id, v_order.id, v_line.order_item_id, v_line.quantity, v_line.amount, v_line.restock_shipped_quantity);
   end loop;
 
   -- Item tax components were copied by the refund-line trigger; retain shipping
@@ -815,7 +816,8 @@ CREATE FUNCTION private.refund_request_json(p_request commerce.refund_requests) 
     'failure_message', p_request.failure_message,
     'lines', coalesce((
       select jsonb_agg(jsonb_build_object(
-        'order_item_id', l.order_item_id, 'quantity', l.quantity, 'amount', l.amount
+        'order_item_id', l.order_item_id, 'quantity', l.quantity, 'amount', l.amount,
+        'restock_shipped_quantity', l.restock_shipped_quantity
       ) order by l.order_item_id)
       from commerce.refund_request_lines l where l.refund_request_id = p_request.id
     ), '[]'::jsonb),
@@ -1510,7 +1512,7 @@ begin
   end if;
 
   v_items := case when items is null then null
-                  else private.canonical_order_item_quantities(items) end;
+                  else private.canonical_refund_items(items) end;
   if v_items is not null and jsonb_array_length(v_items) > 100 then
     raise exception 'refund request is limited to 100 lines';
   end if;
@@ -1569,10 +1571,11 @@ begin
   for v_item in select value from jsonb_array_elements(v_lines)
   loop
     insert into commerce.refund_request_lines
-      (refund_request_id, order_id, order_item_id, quantity, amount)
+      (refund_request_id, order_id, order_item_id, quantity, amount, restock_shipped_quantity)
     values (
       v_request.id, v_order.id, (v_item ->> 'order_item_id')::uuid,
-      (v_item ->> 'quantity')::integer, (v_item ->> 'amount')::numeric
+      (v_item ->> 'quantity')::integer, (v_item ->> 'amount')::numeric,
+      (v_item ->> 'restock_shipped_quantity')::integer
     );
   end loop;
   for v_item in select value from jsonb_array_elements(v_plan -> 'components') loop

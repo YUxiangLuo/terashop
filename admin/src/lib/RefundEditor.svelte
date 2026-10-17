@@ -27,6 +27,7 @@
     pending = $state<PreviewedRefund | null>(null);
   let mode = $state<"amount" | "items">("amount"),
     quantities = $state<Record<string, string>>({}),
+    returned = $state<Record<string, string>>({}),
     shipping = $state(""),
     restock = $state(false),
     preview = $state.raw<{ scope: RefundScope; result: RefundPreview } | null>(
@@ -48,7 +49,8 @@
       confirmed ||
       !!shipping ||
       restock ||
-      Object.values(quantities).some(Boolean),
+      Object.values(quantities).some(Boolean) ||
+      Object.values(returned).some(Boolean),
   );
   let displayedPreview = $derived(pending?.preview ?? preview?.result);
   onMount(() => {
@@ -108,6 +110,7 @@
       reason = "";
       confirmed = false;
       quantities = {};
+      returned = {};
       shipping = "";
       restock = false;
       mode = "amount";
@@ -148,6 +151,7 @@
         quantities,
         shipping,
         restock,
+        returned,
       );
       const response = await supabase.rpc("preview_manual_refund", scope);
       if (!alive) return;
@@ -278,9 +282,9 @@
   <p>
     This form only records an already completed offline refund for manual-only
     orders. It does not send money. Item refunds include their tax and may
-    cancel unshipped quantities. Stock release only restores cancelled unshipped
-    stock, never physically returned goods. Real PayPal refunds are not
-    available here.
+    cancel unshipped quantities. Stock release restores cancelled unshipped
+    stock; shipped units the customer sent back are restocked only when entered
+    per line. Real PayPal refunds are not available here.
   </p>
   {#if block}<p class="notice">{block}</p>{/if}
   <form
@@ -324,7 +328,23 @@
             bind:value={quantities[line.id]}
             placeholder="0"
           />
+          <label for={`refund-returned-${line.id}`} class="small"
+            >Shipped units returned by the customer to put back on hand</label
+          >
+          <input
+            id={`refund-returned-${line.id}`}
+            data-refund-returned
+            inputmode="numeric"
+            bind:value={returned[line.id]}
+            placeholder="0"
+          />
         {/each}
+        <p class="muted">
+          Returned units count toward the refunded quantity, are never treated as
+          unshipped cancellations and are restocked at the warehouse that
+          originally shipped them. They cannot exceed shipped units not already
+          restocked.
+        </p>
         {#if pricing?.shipping_line}
           <label for="refund-shipping"
             >Net shipping to refund (USD, excluding tax)</label
@@ -364,7 +384,7 @@
       {#each displayedPreview.lines as line}<li>
           {refundItemLabel(pricing, line.order_item_id)} · {line.quantity} units ·
           Net {money(line.amount)} · Cancel {line.cancelled_quantity} · Release stock
-          {line.restocked_quantity}
+          {line.restocked_quantity} · Restock returned {line.restock_shipped_quantity}
         </li>{/each}
       {#each displayedPreview.components as component}<li>
           {refundComponentLabel(pricing, component)}: {money(component.amount)}
@@ -380,7 +400,7 @@
             bind:checked={confirmed}
             required
           /> I confirm this exact amount has been refunded offline and approve the
-          displayed cancellation and stock effects.</label
+          displayed cancellation, stock release and returned-unit restock.</label
         ><button class="primary" disabled={!confirmed} onclick={submit}
           >Record manual refund</button
         >
@@ -399,8 +419,8 @@
   {#if pricingError}<p class="notice" role="status">{pricingError}</p>{/if}
   <p class="muted">
     Item amounts are net of discounts and exclude tax. Tax and shipping are
-    separate components. Stock released means cancelled unshipped stock, not
-    received returns.
+    separate components. Stock released means cancelled unshipped stock;
+    restocked returned means shipped units the customer sent back.
   </p>
   {#if !ready || pending}<p class="muted">
       Last loaded facts only; unresolved requests may not appear yet.
@@ -425,7 +445,7 @@
         {#each refund.lines as line}<li>
             {refundItemLabel(pricing, line.order_item_id)}: {line.quantity} units
             · Net {money(line.amount)} · Cancelled {line.cancelled_quantity} · Stock
-            released {line.restocked_quantity}
+            released {line.restocked_quantity} · Restocked returned {line.restock_shipped_quantity}
             <span class="small source-id">Item ID: {line.order_item_id}</span>
           </li>{/each}{#each refund.components as component}<li>
             {refundComponentLabel(pricing, component)}: {money(

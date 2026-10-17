@@ -673,9 +673,11 @@ CREATE TABLE commerce.refund_lines (
     restocked_quantity integer DEFAULT 0 NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     cancelled_quantity integer DEFAULT 0 NOT NULL,
+    restock_shipped_quantity integer DEFAULT 0 NOT NULL,
     CONSTRAINT refund_lines_amount_check CHECK ((amount >= (0)::numeric)),
     CONSTRAINT refund_lines_check CHECK (restocked_quantity >= 0 AND restocked_quantity <= cancelled_quantity),
     CONSTRAINT refund_lines_check1 CHECK (((cancelled_quantity >= 0) AND (cancelled_quantity <= quantity))),
+    CONSTRAINT refund_lines_restock_shipped_check CHECK (restock_shipped_quantity >= 0 AND cancelled_quantity + restock_shipped_quantity <= quantity),
     CONSTRAINT refund_lines_quantity_check CHECK ((quantity > 0))
 );
 
@@ -687,8 +689,10 @@ CREATE TABLE commerce.refund_request_lines (
     amount numeric(12,2) NOT NULL CONSTRAINT refund_request_lines_amount_finite CHECK (amount NOT IN ('NaN'::numeric, 'Infinity'::numeric, '-Infinity'::numeric)),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     cancelled_quantity integer DEFAULT 0 NOT NULL,
+    restock_shipped_quantity integer DEFAULT 0 NOT NULL,
     CONSTRAINT refund_request_lines_amount_check CHECK ((amount >= (0)::numeric)),
     CONSTRAINT refund_request_lines_check CHECK (((cancelled_quantity >= 0) AND (cancelled_quantity <= quantity))),
+    CONSTRAINT refund_request_lines_restock_shipped_check CHECK (restock_shipped_quantity >= 0 AND cancelled_quantity + restock_shipped_quantity <= quantity),
     CONSTRAINT refund_request_lines_quantity_check CHECK ((quantity > 0))
 );
 
@@ -746,7 +750,7 @@ CREATE TABLE public.inventory_movements (
     note text,
     transfer_id uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT inventory_movements_reason_check CHECK ((reason = ANY (ARRAY['order'::text, 'cancel'::text, 'restock'::text, 'adjust'::text, 'return'::text, 'transfer_out'::text, 'transfer_in'::text]))),
+    CONSTRAINT inventory_movements_reason_check CHECK ((reason = ANY (ARRAY['order'::text, 'cancel'::text, 'restock'::text, 'adjust'::text, 'transfer_out'::text, 'transfer_in'::text]))),
     CONSTRAINT inventory_movements_transfer_check CHECK (
       (transfer_id IS NOT NULL) = (reason IN ('transfer_out','transfer_in'))
       AND (transfer_id IS NULL OR (order_id IS NULL AND on_hand_after >= 0
@@ -1590,92 +1594,6 @@ CREATE TABLE private.order_validation_queue (
 );
 ALTER TABLE private.order_validation_queue ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON private.order_validation_queue FROM PUBLIC, anon, authenticated, service_role;
-
--- Return authorization, physical receipt, and inspection decisions are not refunds.
--- A return is scoped to one existing shipment; multiple shipments use multiple returns.
-CREATE TABLE commerce.returns (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    order_id uuid NOT NULL,
-    fulfillment_id uuid NOT NULL,
-    status text NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed','cancelled')),
-    reason text CHECK (length(reason) <= 500),
-    idempotency_key text NOT NULL CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 200),
-    request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
-    actor_id uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    closed_at timestamptz,
-    CHECK ((status = 'open') = (closed_at IS NULL)),
-    CHECK (closed_at >= created_at),
-    UNIQUE (fulfillment_id, idempotency_key),
-    UNIQUE (id, order_id, fulfillment_id),
-    UNIQUE (id, order_id),
-    FOREIGN KEY (fulfillment_id, order_id) REFERENCES public.fulfillments(id, order_id) ON DELETE RESTRICT
-);
-CREATE TABLE commerce.return_lines (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    return_id uuid NOT NULL,
-    order_id uuid NOT NULL,
-    fulfillment_id uuid NOT NULL,
-    order_item_id uuid NOT NULL,
-    quantity integer NOT NULL CHECK (quantity > 0),
-    UNIQUE (return_id, order_item_id),
-    UNIQUE (id, return_id, order_id),
-    FOREIGN KEY (return_id, order_id, fulfillment_id) REFERENCES commerce.returns(id, order_id, fulfillment_id) ON DELETE RESTRICT,
-    FOREIGN KEY (fulfillment_id, order_item_id) REFERENCES commerce.fulfillment_lines(fulfillment_id, order_item_id) ON DELETE RESTRICT
-);
-CREATE TABLE commerce.return_receipts (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    return_id uuid NOT NULL,
-    order_id uuid NOT NULL,
-    location_id uuid NOT NULL REFERENCES public.locations(id) ON DELETE RESTRICT,
-    idempotency_key text NOT NULL CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 200),
-    request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
-    note text CHECK (length(note) <= 2000),
-    actor_id uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
-    received_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (return_id, idempotency_key),
-    UNIQUE (id, return_id, order_id),
-    UNIQUE (id, order_id),
-    FOREIGN KEY (return_id, order_id) REFERENCES commerce.returns(id, order_id) ON DELETE RESTRICT
-);
-CREATE TABLE commerce.return_receipt_lines (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    receipt_id uuid NOT NULL,
-    return_id uuid NOT NULL,
-    order_id uuid NOT NULL,
-    return_line_id uuid NOT NULL,
-    quantity integer NOT NULL CHECK (quantity > 0),
-    UNIQUE (receipt_id, return_line_id),
-    UNIQUE (id, receipt_id, order_id),
-    FOREIGN KEY (receipt_id, return_id, order_id) REFERENCES commerce.return_receipts(id, return_id, order_id) ON DELETE RESTRICT,
-    FOREIGN KEY (return_line_id, return_id, order_id) REFERENCES commerce.return_lines(id, return_id, order_id) ON DELETE RESTRICT
-);
-CREATE TABLE commerce.return_dispositions (
-    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    receipt_line_id uuid NOT NULL,
-    receipt_id uuid NOT NULL,
-    order_id uuid NOT NULL,
-    quantity integer NOT NULL CHECK (quantity > 0),
-    disposition text NOT NULL CHECK (disposition IN ('restock','discard')),
-    inventory_movement_id bigint UNIQUE REFERENCES public.inventory_movements(id) ON DELETE RESTRICT,
-    idempotency_key text NOT NULL CHECK (length(btrim(idempotency_key)) BETWEEN 1 AND 200),
-    request_hash text NOT NULL CHECK (request_hash ~ '^[0-9a-f]{64}$'),
-    note text CHECK (length(note) <= 2000),
-    actor_id uuid REFERENCES public.profiles(id) ON DELETE SET NULL,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    CHECK ((disposition = 'restock') = (inventory_movement_id IS NOT NULL)),
-    UNIQUE (receipt_line_id, idempotency_key),
-    FOREIGN KEY (receipt_line_id, receipt_id, order_id) REFERENCES commerce.return_receipt_lines(id, receipt_id, order_id) ON DELETE RESTRICT
-);
-CREATE INDEX returns_order_idx ON commerce.returns(order_id, created_at, id);
-CREATE INDEX return_lines_shipment_idx ON commerce.return_lines(fulfillment_id, order_item_id);
-CREATE INDEX return_receipt_lines_return_line_idx ON commerce.return_receipt_lines(return_line_id);
-CREATE INDEX return_dispositions_order_idx ON commerce.return_dispositions(order_id);
-ALTER TABLE commerce.returns ENABLE ROW LEVEL SECURITY;
-ALTER TABLE commerce.return_lines ENABLE ROW LEVEL SECURITY;
-ALTER TABLE commerce.return_receipts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE commerce.return_receipt_lines ENABLE ROW LEVEL SECURITY;
-ALTER TABLE commerce.return_dispositions ENABLE ROW LEVEL SECURITY;
 
 -- Indexes
 

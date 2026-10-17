@@ -386,70 +386,47 @@ test('MCP rejects stale refund stock effects and replays a confirmed refund only
   expect(ledger.refunds).toHaveLength(1);
 });
 
-test('MCP 收货不增加可售库存，处置重放只回库一次，纯金额退款不再次回库', async () => {
+test('MCP 退款按行回库已发货退回件，重放只回库一次，纯金额退款不再次回库', async () => {
   const product = await stockedProduct(admin, { onHand: 8, price: 12.5, cleanup });
   const order = await fixtureOrder(product, buyer, 3);
   await toolData(session.client, 'mark_order_paid', {
     order_id: order.id,
     idempotency_key: crypto.randomUUID(),
   });
-  const fulfillment = await toolData<{ id: string }>(session.client, 'create_fulfillment', {
+  await toolData(session.client, 'create_fulfillment', {
     order_id: order.id,
     items: [{ order_item_id: order.itemId, quantity: 3 }],
     idempotency_key: crypto.randomUUID(),
   });
-  const authorization = await toolData<{ id: string; lines: Array<{ id: string }> }>(
-    session.client,
-    'create_return',
-    {
-      fulfillment_id: fulfillment.id,
-      items: [{ order_item_id: order.itemId, quantity: 2 }],
-      idempotency_key: crypto.randomUUID(),
-    },
-  );
-  const [location] = await checked<Array<{ id: string }>>(
-    api('/rest/v1/locations?is_default=eq.true&select=id', { token: admin.token }),
-  );
-  const receipt = await toolData<{ lines: Array<{ id: string; undisposed_quantity: number }> }>(
-    session.client,
-    'receive_return',
-    {
-      return_id: authorization.id,
-      location_id: location.id,
-      items: [{ return_line_id: authorization.lines[0].id, quantity: 2 }],
-      idempotency_key: crypto.randomUUID(),
-    },
-  );
-  expect(receipt.lines[0].undisposed_quantity).toBe(2);
   expect(await stockOf(product.sku)).toBe(5);
-  const disposition = {
-    receipt_line_id: receipt.lines[0].id,
-    quantity: 1,
-    disposition: 'restock',
-    idempotency_key: crypto.randomUUID(),
+  const returnScope = {
+    order_id: order.id,
+    items: [{ order_item_id: order.itemId, quantity: 2, restock_shipped_quantity: 1 }],
+    restock: false,
   };
-  await toolData(session.client, 'dispose_return_receipt', disposition);
-  await toolData(session.client, 'dispose_return_receipt', disposition);
-  expect(await stockOf(product.sku)).toBe(6);
-  await toolData(session.client, 'dispose_return_receipt', {
-    ...disposition,
-    disposition: 'discard',
-    idempotency_key: crypto.randomUUID(),
-  });
-  await toolData(session.client, 'close_return', { return_id: authorization.id });
-  const summary = await toolData<{ returns: Array<{ status: string }> }>(
+  const returnPreview = await toolData<{ preview_token: string; lines: Array<Record<string, number>> }>(
     session.client,
-    'get_order_returns',
-    { order_id: order.id },
+    'preview_manual_refund',
+    returnScope,
   );
-  expect(summary.returns[0].status).toBe('closed');
-  const refundScope = { order_id: order.id, amount: 25, restock: false };
+  expect(returnPreview.lines[0]).toMatchObject({ quantity: 2, cancelled_quantity: 0, restocked_quantity: 0, restock_shipped_quantity: 1 });
+  expect(await stockOf(product.sku)).toBe(5);
+  const returnCommand = {
+    ...returnScope,
+    preview_token: returnPreview.preview_token,
+    idempotency_key: crypto.randomUUID(),
+    reason: 'Customer returned one unit',
+  };
+  const returned = await toolData<{ refund: { id: string } }>(session.client, 'commit_manual_refund', returnCommand);
+  expect(await toolData<typeof returned>(session.client, 'commit_manual_refund', returnCommand)).toEqual(returned);
+  expect(await stockOf(product.sku)).toBe(6);
+  const refundScope = { order_id: order.id, amount: 12.5, restock: false };
   const preview = await toolData<{ preview_token: string; amount: number }>(
     session.client,
     'preview_manual_refund',
     refundScope,
   );
-  expect(preview.amount).toBe(25);
+  expect(preview.amount).toBe(12.5);
   const refundCommand = {
     ...refundScope,
     preview_token: preview.preview_token,
@@ -464,10 +441,10 @@ test('MCP 收货不增加可售库存，处置重放只回库一次，纯金额�
   expect(await toolData<typeof refund>(session.client, 'commit_manual_refund', refundCommand)).toEqual(
     refund,
   );
-  expect(refund).toMatchObject({ refund: { amount: 25, restock_requested: false } });
+  expect(refund).toMatchObject({ refund: { amount: 12.5, restock_requested: false } });
   expect(await stockOf(product.sku)).toBe(6);
   expect(await toolData(session.client, 'get_order_ledger', { order_id: order.id })).toMatchObject({
-    balances: { captured: 37.5, refunded: 25 },
+    balances: { captured: 37.5, refunded: 37.5 },
   });
 });
 

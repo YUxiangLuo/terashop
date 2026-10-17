@@ -91,10 +91,16 @@ export function manualRefundBlock(
 export interface RefundScope {
   order_id: string;
   amount?: number;
-  items?: { order_item_id: string; quantity: number }[];
+  items?: RefundItem[];
   shipping_amount?: number;
   restock: boolean;
 }
+// restock_shipped_quantity: shipped units the customer sent back that return to stock.
+export type RefundItem = {
+  order_item_id: string;
+  quantity: number;
+  restock_shipped_quantity?: number;
+};
 export interface RefundPreview {
   order_id: string;
   currency: "USD";
@@ -124,6 +130,30 @@ const quantity = (v: unknown): v is number =>
   typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 2147483647;
 const token = (v: unknown): v is string =>
   typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+// Parse per-line refund quantities plus optional returned shipped units to restock.
+export function refundItems(
+  quantities: Record<string, string>,
+  returned: Record<string, string>,
+): RefundItem[] {
+  for (const [id, v] of Object.entries(returned))
+    if (v !== "" && v !== "0" && !quantities[id])
+      throw Error("Returned units to restock require a refund quantity on the same line.");
+  return Object.entries(quantities)
+    .filter(([, v]) => v !== "" && v !== "0")
+    .map(([order_item_id, v]) => {
+      if (!/^[1-9]\d*$/.test(v) || !quantity(Number(v)))
+        throw Error("Refund quantities must be positive whole numbers.");
+      const back = returned[order_item_id] ?? "";
+      if (back !== "" && (!/^\d+$/.test(back) || !quantity(Number(back))))
+        throw Error("Returned units to restock must be whole numbers.");
+      if (Number(back) > Number(v))
+        throw Error("Returned units to restock cannot exceed the refunded quantity.");
+      return Number(back) > 0
+        ? { order_item_id, quantity: Number(v), restock_shipped_quantity: Number(back) }
+        : { order_item_id, quantity: Number(v) };
+    })
+    .sort((a, b) => a.order_item_id.localeCompare(b.order_item_id));
+}
 export function refundScope(
   order_id: string,
   mode: "amount" | "items",
@@ -131,20 +161,14 @@ export function refundScope(
   quantities: Record<string, string>,
   shipping: string,
   restock: boolean,
+  returned: Record<string, string> = {},
 ): RefundScope {
   if (mode === "amount") {
     const value = shippingMoney(amount);
     if (value <= 0) throw Error("Enter a positive refund amount.");
     return { order_id, amount: value, restock: false };
   }
-  const items = Object.entries(quantities)
-    .filter(([, v]) => v !== "" && v !== "0")
-    .map(([order_item_id, v]) => {
-      if (!/^[1-9]\d*$/.test(v) || !quantity(Number(v)))
-        throw Error("Refund quantities must be positive whole numbers.");
-      return { order_item_id, quantity: Number(v) };
-    })
-    .sort((a, b) => a.order_item_id.localeCompare(b.order_item_id));
+  const items = refundItems(quantities, returned);
   if (items.length > 100) throw Error("Select at most 100 item lines.");
   const shipping_amount = shipping.trim() ? shippingMoney(shipping) : undefined;
   if (shipping_amount === 0)
@@ -187,7 +211,9 @@ export function isRefundPreview(v: unknown): v is RefundPreview {
         quantity(l.cancelled_quantity) &&
         l.cancelled_quantity <= l.quantity &&
         quantity(l.restocked_quantity) &&
-        l.restocked_quantity <= l.cancelled_quantity,
+        l.restocked_quantity <= l.cancelled_quantity &&
+        quantity(l.restock_shipped_quantity) &&
+        l.cancelled_quantity + l.restock_shipped_quantity <= l.quantity,
     )
   )
     return false;
@@ -227,7 +253,8 @@ export function previewMatchesScope(
       preview.lines.some(
         (line) =>
           line.order_item_id === item.order_item_id &&
-          line.quantity === item.quantity,
+          line.quantity === item.quantity &&
+          line.restock_shipped_quantity === (item.restock_shipped_quantity ?? 0),
       ),
     ) &&
     preview.components
@@ -291,11 +318,14 @@ export function isRefundOperation(v: unknown): v is PreviewedRefund {
         (i) =>
           object(i) &&
           Object.keys(i).every((k) =>
-            ["order_item_id", "quantity"].includes(k),
+            ["order_item_id", "quantity", "restock_shipped_quantity"].includes(k),
           ) &&
           uuid(i.order_item_id) &&
           quantity(i.quantity) &&
-          i.quantity > 0,
+          i.quantity > 0 &&
+          (i.restock_shipped_quantity === undefined ||
+            (quantity(i.restock_shipped_quantity) &&
+              i.restock_shipped_quantity <= i.quantity)),
       ) ||
       new Set(r.items.map((i) => i.order_item_id)).size !== r.items.length)
   )
@@ -349,6 +379,7 @@ export function acknowledgesPreviewedRefund(
       "amount",
       "cancelled_quantity",
       "restocked_quantity",
+      "restock_shipped_quantity",
     ]) &&
     rowsMatch(r.components, p.components, [
       "kind",

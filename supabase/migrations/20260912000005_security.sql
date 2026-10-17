@@ -136,30 +136,7 @@ CREATE TRIGGER refund_requests_no_delete BEFORE DELETE ON commerce.refund_reques
 CREATE TRIGGER refund_requests_no_truncate BEFORE TRUNCATE ON commerce.refund_requests FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
 CREATE TRIGGER refund_requests_provider_reversal_guard BEFORE INSERT ON commerce.refund_requests FOR EACH ROW EXECUTE FUNCTION private.prevent_refund_after_provider_reversal();
 CREATE CONSTRAINT TRIGGER refund_requests_require_lines AFTER INSERT ON commerce.refund_requests DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_refund_composition();
-CREATE TRIGGER returns_validate BEFORE INSERT OR UPDATE ON commerce.returns FOR EACH ROW EXECUTE FUNCTION private.validate_return_fact();
-CREATE TRIGGER returns_no_delete BEFORE DELETE OR TRUNCATE ON commerce.returns FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
-CREATE TRIGGER return_lines_validate BEFORE INSERT ON commerce.return_lines FOR EACH ROW EXECUTE FUNCTION private.validate_return_fact();
-CREATE TRIGGER return_lines_immutable BEFORE UPDATE OR DELETE ON commerce.return_lines FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
-CREATE TRIGGER return_lines_no_truncate BEFORE TRUNCATE ON commerce.return_lines FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
-CREATE TRIGGER return_receipts_validate BEFORE INSERT ON commerce.return_receipts FOR EACH ROW EXECUTE FUNCTION private.validate_return_fact();
-CREATE TRIGGER return_receipts_immutable BEFORE UPDATE OR DELETE ON commerce.return_receipts FOR EACH ROW EXECUTE FUNCTION private.protect_audit_row();
-CREATE TRIGGER return_receipts_no_truncate BEFORE TRUNCATE ON commerce.return_receipts FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
-CREATE TRIGGER return_receipt_lines_validate BEFORE INSERT ON commerce.return_receipt_lines FOR EACH ROW EXECUTE FUNCTION private.validate_return_fact();
-CREATE TRIGGER return_receipt_lines_immutable BEFORE UPDATE OR DELETE ON commerce.return_receipt_lines FOR EACH ROW EXECUTE FUNCTION private.protect_immutable_row();
-CREATE TRIGGER return_receipt_lines_no_truncate BEFORE TRUNCATE ON commerce.return_receipt_lines FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
-CREATE TRIGGER return_dispositions_validate BEFORE INSERT ON commerce.return_dispositions FOR EACH ROW EXECUTE FUNCTION private.validate_return_fact();
-CREATE TRIGGER return_dispositions_immutable BEFORE UPDATE OR DELETE ON commerce.return_dispositions FOR EACH ROW EXECUTE FUNCTION private.protect_audit_row();
-CREATE TRIGGER return_dispositions_no_truncate BEFORE TRUNCATE ON commerce.return_dispositions FOR EACH STATEMENT EXECUTE FUNCTION private.protect_immutable_row();
-CREATE CONSTRAINT TRIGGER returns_facts AFTER INSERT OR UPDATE ON commerce.returns DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_return_facts();
-CREATE CONSTRAINT TRIGGER return_lines_facts AFTER INSERT ON commerce.return_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_return_facts();
-CREATE CONSTRAINT TRIGGER return_receipts_facts AFTER INSERT ON commerce.return_receipts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_return_facts();
-CREATE CONSTRAINT TRIGGER return_receipt_lines_facts AFTER INSERT ON commerce.return_receipt_lines DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_return_facts();
-CREATE CONSTRAINT TRIGGER return_dispositions_facts AFTER INSERT ON commerce.return_dispositions DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_return_facts();
-CREATE CONSTRAINT TRIGGER fulfillments_return_facts AFTER UPDATE ON public.fulfillments DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION private.assert_return_facts();
-CREATE TRIGGER returns_event AFTER INSERT OR UPDATE OF status ON commerce.returns FOR EACH ROW EXECUTE FUNCTION private.return_fact_to_outbox();
-CREATE TRIGGER return_receipts_event AFTER INSERT ON commerce.return_receipts FOR EACH ROW EXECUTE FUNCTION private.return_fact_to_outbox();
-CREATE TRIGGER return_dispositions_event AFTER INSERT ON commerce.return_dispositions FOR EACH ROW EXECUTE FUNCTION private.return_fact_to_outbox();
-CREATE TRIGGER refund_lines_restock_cancellation AFTER INSERT ON commerce.refund_lines FOR EACH ROW EXECUTE FUNCTION private.restock_refund_cancellation();
+CREATE TRIGGER refund_lines_restock AFTER INSERT ON commerce.refund_lines FOR EACH ROW EXECUTE FUNCTION private.restock_refund_line();
 CREATE TRIGGER refund_lines_tax_components AFTER INSERT ON commerce.refund_lines FOR EACH ROW EXECUTE FUNCTION private.refund_line_taxes();
 CREATE TRIGGER refund_request_lines_tax_components AFTER INSERT ON commerce.refund_request_lines FOR EACH ROW EXECUTE FUNCTION private.refund_line_taxes();
 CREATE TRIGGER refund_components_validate BEFORE INSERT ON commerce.refund_components FOR EACH ROW EXECUTE FUNCTION private.validate_refund_component();
@@ -617,16 +594,8 @@ GRANT ALL ON FUNCTION public.set_updated_at() TO service_role;
 GRANT ALL ON FUNCTION public.update_order_address(order_id uuid, address jsonb, address_id uuid) TO service_role, authenticated;
 GRANT ALL ON FUNCTION public.validate_metafield_value() TO service_role;
 GRANT ALL ON FUNCTION public.validate_promotion_params() TO service_role;
-REVOKE ALL ON FUNCTION private.lock_order_inventory(uuid[],uuid), private.recover_order_stock(uuid,uuid,integer,uuid,uuid,text),
-  private.restock_refund_cancellation(), private.canonical_return_quantities(jsonb,text), private.return_line_received(uuid),
-  private.lock_return_command(uuid,text), private.return_json(commerce.returns), private.return_receipt_json(commerce.return_receipts),
-  private.return_disposition_json(commerce.return_dispositions), private.validate_return_fact(), private.assert_return_facts(),
-  private.return_fact_to_outbox() FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.create_return(uuid,jsonb,text,text), public.receive_return(uuid,uuid,jsonb,text,text),
-  public.dispose_return_receipt(uuid,integer,text,text,text), public.close_return(uuid,boolean), public.get_order_returns(uuid) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.create_return(uuid,jsonb,text,text), public.receive_return(uuid,uuid,jsonb,text,text),
-  public.dispose_return_receipt(uuid,integer,text,text,text), public.close_return(uuid,boolean) TO authenticated;
-GRANT EXECUTE ON FUNCTION public.get_order_returns(uuid) TO authenticated,service_role;
+REVOKE ALL ON FUNCTION private.lock_order_inventory(uuid[]), private.recover_order_stock(uuid,uuid,integer,text,uuid,text),
+  private.assert_shipped_restock(uuid,integer,uuid), private.restock_refund_line(), private.canonical_refund_items(jsonb) FROM PUBLIC;
 
 -- Existing objects also use least privilege; clients cannot TRUNCATE, attach triggers or advance sequences.
 GRANT ALL ON TABLE public.categories, public.locations, public.metafield_definitions, public.metafields, public.metaobject_definitions, public.metaobjects, public.product_categories, public.product_images, public.products, public.product_option_values, public.product_options, public.promotion_targets, public.promotions, public.shipping_methods, public.tax_rates, public.variant_option_values, public.addresses, public.profiles, public.product_reviews, public.discount_redemptions, public.inventory_levels, public.inventory_movements, public.fulfillments, public.order_events, public.order_items, public.order_promotions, public.product_listing, public.orders, public.product_variants TO service_role;

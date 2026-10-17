@@ -1,6 +1,6 @@
 # Admin MCP
 
-管理员的 Agent 接口，使用官方 TypeScript MCP SDK v2。已实现 **stdio 和直接 HTTPS 的无状态 Streamable HTTP**，共 108 个显式工具（52 个只读、56 个写入）。本地代表性链路已验收；**公网、目标 Agent 客户端和真实 PayPal Sandbox 尚未验收**。
+管理员的 Agent 接口，使用官方 TypeScript MCP SDK v2。已实现 **stdio 和直接 HTTPS 的无状态 Streamable HTTP**，共 103 个显式工具（51 个只读、52 个写入）。本地代表性链路已验收；**公网、目标 Agent 客户端和真实 PayPal Sandbox 尚未验收**。
 
 普通业务使用当前管理员 JWT 调用 Supabase 受控 RPC，数据库负责授权、事务、幂等、库存与资金规则。远程宿主另持 service-role 用于受限授权、凭据、审计及审批 RPC；不提供任意 SQL、表名、RPC 或业务失败后的提权回退。
 
@@ -74,7 +74,7 @@ MCP 客户端配置示意（占位符需由宿主安全配置替换，不自动�
 | 扩展内容、评价 | Metafields、Metaobjects、审核及受限删除；不代写客户评价 |
 | 订单、报价 | 查询、备注、事件、价格/账本/履约余额、取消；取消报价可能连带取消未付款订单 |
 | 资金 | 手工收付款仅记账；`refund_paypal` 才调用真实渠道，服务端决定 sandbox/live |
-| 履约、退货 | 发货与物流更新、退货授权、分批实收、回库/报废；退货和退款独立 |
+| 履约、退货回库 | 发货与物流更新；退回的已发货商品通过退款行 `restock_shipped_quantity` 回库，无独立退货流程 |
 | 媒体 | 私有暂存、永久公开、关联、受限私有删除及恢复；兼容旧公开上传 |
 | 统计、设置、导出 | 受限区间汇总、名称/展示时区、固定字段分页 JSON；不是到账证明或冻结快照 |
 | 运维 | 脱敏 Inbox/Outbox/对账查询及 Outbox 重投；不开放 Worker、原始渠道资金或 Inbox 重放 |

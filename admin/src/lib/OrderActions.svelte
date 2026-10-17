@@ -40,7 +40,8 @@
   let refundShipping = $state(""),
     refundReason = $state(""),
     refundRestock = $state(false);
-  let refundItems = $state<Record<string, string>>({});
+  let refundItems = $state<Record<string, string>>({}),
+    refundReturned = $state<Record<string, string>>({});
   let confirmed = $state<Record<string, boolean>>({}),
     key = "",
     alive = true;
@@ -51,7 +52,8 @@
       !!refundShipping ||
       !!refundReason ||
       Object.values(confirmed).some(Boolean) ||
-      Object.values(refundItems).some(Boolean),
+      Object.values(refundItems).some(Boolean) ||
+      Object.values(refundReturned).some(Boolean),
   );
 
   onMount(() => {
@@ -192,12 +194,28 @@
             .map(([order_item_id, q]) => ({
               order_item_id,
               quantity: Number(q),
+              restock_shipped_quantity: Number(refundReturned[order_item_id] ?? 0),
             }));
           if (
             !items.length ||
             items.some((x) => !Number.isInteger(x.quantity) || x.quantity < 1)
           )
             throw Error("Select positive whole item quantities.");
+          if (
+            items.some(
+              (x) =>
+                !Number.isInteger(x.restock_shipped_quantity) ||
+                x.restock_shipped_quantity < 0 ||
+                x.restock_shipped_quantity > x.quantity,
+            ) ||
+            Object.entries(refundReturned).some(
+              ([order_item_id, q]) =>
+                Number(q) > 0 && !(Number(refundItems[order_item_id]) > 0),
+            )
+          )
+            throw Error(
+              "Returned units to restock must be whole numbers within each line's refunded quantity.",
+            );
           args.items = items;
           if (refundShipping.trim())
             args.shipping_amount = paypalAmount(refundShipping);
@@ -471,7 +489,19 @@
               step="1"
               bind:value={refundItems[line.id]}
             /></label
-          >{/each}<label
+          ><label class="small"
+            >Shipped units of {line.name} returned to put back on hand<input
+              aria-label={`Returned ${line.name} to restock`}
+              type="number"
+              min="0"
+              max={line.quantity}
+              step="1"
+              bind:value={refundReturned[line.id]}
+            /></label
+          >{/each}<p class="muted">
+            Returned units are restocked at the original warehouse only after
+            PayPal confirms the refund, up to shipped units not already restocked.
+          </p><label
           >Additional net shipping USD (optional)<input
             inputmode="decimal"
             bind:value={refundShipping}

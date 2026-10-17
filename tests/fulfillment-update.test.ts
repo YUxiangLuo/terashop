@@ -65,21 +65,26 @@ test('不同键并发拒绝旧版本；service 写入也推进版本且记录物
   expect((await api(`/rest/v1/fulfillments?id=eq.${fulfillment.id}`, { service: true, method: 'PATCH', body: { version: 1 } })).status).toBe(400);
 });
 
-test('取消重算订单但不回库；退货保护失败不消耗键且不留下版本和审计变更', async () => {
+test('取消重算订单但不回库；退款保护失败不消耗键且不留下版本和审计变更', async () => {
   const { order, fulfillment } = await shipment();
   const before = await stockOf(product.sku);
-  const ret = await checked<{ id: string }>(rpc('create_return', { fulfillment_id: fulfillment.id,
-    items: [{ order_item_id: order.itemId, quantity: 1 }], idempotency_key: crypto.randomUUID() }, admin.token));
   const body = input(fulfillment.id, { status: 'cancelled', tracking_number: 'CANCELLED' });
-  expect((await rpc('update_fulfillment', body, admin.token)).status).toBe(400);
-  expect(await database`select id from public.order_events where order_id=${order.id}::uuid and type in ('fulfillment_cancelled','fulfillment_tracking_updated')`).toHaveLength(0);
-  await checked(rpc('close_return', { return_id: ret.id, cancel: true }, admin.token));
   expect(await checked(rpc('update_fulfillment', body, admin.token))).toMatchObject({ status: 'cancelled', version: 2 });
   expect(await stockOf(product.sku)).toBe(before);
   const rows = await checked<Array<{ status: string; fulfillment_status: string }>>(api(`/rest/v1/orders?id=eq.${order.id}&select=status,fulfillment_status`, { token: admin.token }));
   expect(rows[0]).toEqual({ status: 'open', fulfillment_status: 'unfulfilled' });
   const lines: { quantity: number; order_item_id: string }[] = await database`select quantity,order_item_id from commerce.fulfillment_lines where fulfillment_id=${fulfillment.id}::uuid`;
   expect(lines).toEqual([{ quantity: 2, order_item_id: order.itemId }]);
+
+  const refunded = await shipment();
+  await checked(rpc('refund_order', { order_id: refunded.order.id, idempotency_key: crypto.randomUUID(),
+    items: [{ order_item_id: refunded.order.itemId, quantity: 1, restock_shipped_quantity: 1 }] }, admin.token));
+  const guarded = input(refunded.fulfillment.id, { status: 'cancelled', tracking_number: 'CANCELLED' });
+  const rejected = await rpc('update_fulfillment', guarded, admin.token);
+  expect(rejected.status).toBe(400);
+  expect(JSON.stringify(rejected.data)).toContain('refunded items');
+  expect(await database`select id from public.order_events where order_id=${refunded.order.id}::uuid and type in ('fulfillment_cancelled','fulfillment_tracking_updated')`).toHaveLength(0);
+  expect(await checked(rpc('update_fulfillment', { ...guarded, changes: { tracking_number: 'KEPT' } }, admin.token))).toMatchObject({ status: 'shipped', version: 2 });
 });
 
 test('拒绝非法字段、越权、缺失资源；降级后不能重放', async () => {

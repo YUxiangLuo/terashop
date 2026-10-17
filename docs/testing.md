@@ -31,7 +31,9 @@ bun run test:current tests/admin.test.ts --rerun-each=2 --randomize --seed=6149
 
 `tests/admin-retry.test.ts` 覆盖客户创建、库存调整和手工收款的同键跨管理员并发、参数冲突、权限与键长度校验，以及失败回滚、默认仓变化、客户匿名化和退款后的重放。并发用例实际等待数据库锁竞争，并断言资金、库存和事件只写一次；不是仅检查 HTTP 成功。
 
-`tests/fulfillment-update.test.ts` 覆盖履约状态／物流更新：同键及不同键并发、旧版本和旧 REPEATABLE READ 快照、service 写入版本保护、字段／权限校验、审计与 Outbox、退货取消保护、失败后同键重试及取消不回库。
+`tests/fulfillment-update.test.ts` 覆盖履约状态／物流更新：同键及不同键并发、旧版本和旧 REPEATABLE READ 快照、service 写入版本保护、字段／权限校验、审计与 Outbox、退款取消保护、失败后同键重试及取消不回库。
+
+`tests/refund-restock.test.ts` 覆盖退款行 `restock_shipped_quantity`：手工退款按原扣减仓写一条 `restock` 流水且幂等重放不重复回库、单行与累计上限拒绝后无资金/库存事实、纯金额退款不回库，以及 PayPal 请求只预留、失败释放、成功 finalize 才回库且重复事件不重复。
 
 `tests/admin-operations.test.ts` 覆盖运维摘要分页、同时间戳游标、敏感字段排除、Inbox 自动重试次数边界，以及 Outbox 管理员身份绑定、并发重投审计和 Worker 状态保护；同时验证 Worker 命令不对管理员开放。
 

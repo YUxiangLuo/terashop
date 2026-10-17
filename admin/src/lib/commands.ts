@@ -24,10 +24,6 @@ export function commandKey(
     | "shipment"
     | "fulfillment-update"
     | "transfer"
-    | "return"
-    | "return-receipt"
-    | "return-disposition"
-    | "return-close"
     | "quote-cancel"
     | "manual-refund",
   resource: string,

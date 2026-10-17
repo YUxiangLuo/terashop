@@ -90,7 +90,7 @@
     <label
       >Movement reason<select bind:value={reason}
         ><option value="">All reasons</option
-        >{#each ["order", "cancel", "restock", "adjust", "return", "transfer_out", "transfer_in"] as value}<option
+        >{#each ["order", "cancel", "restock", "adjust", "transfer_out", "transfer_in"] as value}<option
             {value}>{statusLabel(value)}</option
           >{/each}</select
       ></label

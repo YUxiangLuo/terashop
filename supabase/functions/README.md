@@ -56,7 +56,7 @@ PAYMENT.REFUND.PENDING
 PAYMENT.REFUND.FAILED
 ```
 
-部署时必须使用配套数据库和 handler：Capture/Refund 的发出保护及资源关联见 [ADR-009/011](../../docs/architecture-decisions.md#adr-009支付信任边界与-outbox)，退款金额与回库合同见 [API](../../docs/api.md#支付与退款)。运维不得绕过保护重发扣款、释放不明退款额度或把退款当作实收退货。
+部署时必须使用配套数据库和 handler：Capture/Refund 的发出保护及资源关联见 [ADR-009/011](../../docs/architecture-decisions.md#adr-009支付信任边界与-outbox)，退款金额与回库合同见 [API](../../docs/api.md#支付与退款)，已发货退回件只在渠道退款成功入账时按退款行 `restock_shipped_quantity` 回库，见 [退货回库](../../docs/api.md#退货回库)。运维不得绕过保护重发扣款或释放不明退款额度。
 `PAYMENT.CAPTURE.REFUNDED` 携带 Refund 资源，按退款 ID 和 `links.up` 的 Capture ID 保存资金事实；未绑定本地请求时进入待关联/对账，不猜商品取消量。渠道 HTTP 禁止重定向；401 最多刷新 token 重试一次，其他失败由原幂等命令恢复。
 Postback 验签保留原始事件 JSON 表示；解析对象仅用于业务归一化。创建 Order、Capture、Refund 的渠道键分别为 `ord_`、`cap_`、`ref_` 加相应去连字符 UUID。当前未部署基线统一采用此合同；已有在途渠道请求不得在升级时换键重发。
 Webhook 入箱后处理失败返回 500；已识别的瞬时数据库故障保留为 received / transient_database_error 并确认收件，按 `next_attempt_at` 退避后由 Inbox Worker 重试。即便渠道停止重试，也必须能恢复本地入账。

@@ -11,7 +11,7 @@
 | `00_schema.sql` | schema、表、约束、索引、RLS 开关与默认权限；Auth 基础对象由 Supabase 提供 |
 | `01_catalog.sql` | 目录/发布、扩展、客户、地址、评价、管理员判定、库存调整 |
 | `02_checkout.sql` | Cart、计价/税分摊、价格快照、订单、Quote 与预占 |
-| `03_transactions.sql` | 账本、履约、退款、Return/Receipt/处置、快照保护、Outbox |
+| `03_transactions.sql` | 账本、履约、退款（含已发货退回件回库）、快照保护、Outbox |
 | `04_payments.sql` | 支付意图、渠道 Inbox、外部资金与对账 |
 | `05_security.sql` | 视图、业务/Auth 触发器、RLS policy、显式 API 权限 |
 

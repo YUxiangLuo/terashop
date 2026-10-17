@@ -245,7 +245,6 @@
       </p>{/if}
   </div>
   <a class="button" href={`/orders/${id}/actions`}>Order & payment actions</a>
-  <a class="button" href={`/orders/${id}/returns`}>Manage returns</a>
   <a class="button" href={`/orders/${id}/refunds`}>Refund ledger</a>
   <button onclick={reload} disabled={busy || fulfillmentBusy}
     >Reload order</button

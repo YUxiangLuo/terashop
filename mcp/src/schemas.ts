@@ -337,7 +337,7 @@ export const inventoryMovementPage = z.strictObject({
         location_id: id,
         delta: z.number().int(),
         on_hand_after: z.number().int(),
-        reason: z.enum(['order', 'cancel', 'restock', 'adjust', 'return', 'transfer_out', 'transfer_in']),
+        reason: z.enum(['order', 'cancel', 'restock', 'adjust', 'transfer_out', 'transfer_in']),
         order_id: id.nullable(),
         actor_id: id.nullable(),
         note: z.string().nullable(),
@@ -440,6 +440,7 @@ export const orderLedger = z.strictObject({
           amount: money,
           cancelled_quantity: quantity,
           restocked_quantity: quantity,
+          restock_shipped_quantity: quantity,
         }),
       ),
     }),
@@ -463,66 +464,6 @@ export const fulfillmentBalance = z.strictObject({
     }),
   ),
 });
-export const returnDisposition = z.strictObject({
-  id,
-  receipt_line_id: id,
-  quantity: quantity.positive(),
-  disposition: z.enum(['restock', 'discard']),
-  inventory_movement_id: bigintString.nullable(),
-  note: z.string().nullable(),
-  created_at: timestamp,
-});
-export const returnReceipt = z.strictObject({
-  id,
-  return_id: id,
-  order_id: id,
-  location_id: id,
-  note: z.string().nullable(),
-  received_at: timestamp,
-  lines: z.array(
-    z.strictObject({
-      id,
-      return_line_id: id,
-      quantity: quantity.positive(),
-      undisposed_quantity: quantity,
-      dispositions: z.array(returnDisposition),
-    }),
-  ),
-});
-export const returnAuthorization = z.strictObject({
-  id,
-  order_id: id,
-  fulfillment_id: id,
-  status: z.enum(['open', 'closed', 'cancelled']),
-  reason: z.string().nullable(),
-  created_at: timestamp,
-  closed_at: timestamp.nullable(),
-  lines: z.array(
-    z.strictObject({
-      id,
-      order_item_id: id,
-      quantity: quantity.positive(),
-      received_quantity: quantity,
-      receivable_quantity: quantity,
-    }),
-  ),
-  receipts: z.array(returnReceipt),
-});
-export const orderReturns = z.strictObject({
-  order_id: id,
-  lines: z.array(
-    z.strictObject({
-      fulfillment_id: id,
-      order_item_id: id,
-      shipped_quantity: quantity,
-      authorized_unreceived_quantity: quantity,
-      received_quantity: quantity,
-      available_quantity: quantity,
-    }),
-  ),
-  returns: z.array(returnAuthorization),
-});
-
 const decimalAmount = z.string().regex(/^(0|[1-9][0-9]*)\.[0-9]{2}$/);
 export const paymentSummary = z.strictObject({
   start_at: timestamp,
@@ -1287,10 +1228,21 @@ export const productChanges = z.strictObject({
     .optional(),
 });
 
+// restock_shipped_quantity: shipped units the customer sent back that return to stock.
+export const refundItems = z
+  .array(
+    z
+      .strictObject({ order_item_id: id, quantity: version, restock_shipped_quantity: quantity.optional() })
+      .refine((v) => (v.restock_shipped_quantity ?? 0) <= v.quantity, {
+        message: 'restock_shipped_quantity cannot exceed quantity',
+      }),
+  )
+  .min(1)
+  .max(100);
 export const manualRefund = z
   .strictObject({
     order_id: id,
-    items: itemQuantities.optional(),
+    items: refundItems.optional(),
     amount: money.positive().multipleOf(0.01).optional(),
     shipping_amount: money.positive().multipleOf(0.01).optional(),
     restock: z.boolean(),
@@ -1344,7 +1296,7 @@ export const paypalRefund = z
     idempotency_key: key,
     amount: paypalMoney.optional(),
     shipping_amount: paypalMoney.optional(),
-    items: itemQuantities.optional(),
+    items: refundItems.optional(),
     reason: z.string().max(1000).optional(),
     restock: z.boolean().optional(),
   })

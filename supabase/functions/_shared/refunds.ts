@@ -12,7 +12,13 @@ export interface RefundRequestDto {
   parent_provider_reference: string;
 }
 
-function normalizeItems(value: unknown): Array<{ order_item_id: string; quantity: number }> | null {
+interface RefundItem {
+  order_item_id: string;
+  quantity: number;
+  restock_shipped_quantity: number;
+}
+
+function normalizeItems(value: unknown): RefundItem[] | null {
   if (value === undefined || value === null) return null;
   if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
     throw new HttpError('items must be a non-empty array with at most 100 lines');
@@ -26,7 +32,11 @@ function normalizeItems(value: unknown): Array<{ order_item_id: string; quantity
     if (!Number.isSafeInteger(row.quantity) || Number(row.quantity) <= 0) {
       throw new HttpError('Refund quantity must be a positive integer');
     }
-    return { order_item_id: id, quantity: Number(row.quantity) };
+    const restock = row.restock_shipped_quantity ?? 0;
+    if (!Number.isSafeInteger(restock) || Number(restock) < 0 || Number(restock) > Number(row.quantity)) {
+      throw new HttpError('restock_shipped_quantity must be an integer between 0 and quantity');
+    }
+    return { order_item_id: id, quantity: Number(row.quantity), restock_shipped_quantity: Number(restock) };
   });
 }
 

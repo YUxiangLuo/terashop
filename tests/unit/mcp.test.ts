@@ -5,7 +5,6 @@ import {
   uploadProductMedia,
   paypalRefund,
   orderLedger,
-  returnDisposition,
 } from '../../mcp/src/schemas';
 import { mcpSession, toolData } from '../support/mcp';
 import { toolScopes, requiredToolScopes, permitsTool, type AdminScope } from '../../mcp/src/permissions';
@@ -96,8 +95,8 @@ test('scope inventory exactly covers all tools and requires every sensitive perm
 test('scope discovery intersects the write switch; hidden tools cannot be called', async () => {
   const { backend, calls } = fakeBackend(() => Response.json(null));
   for (const [allowWrites, scopes, expectedCount] of [
-    [true, ['store:read'], 52],
-    [true, ['store:write'], 52],
+    [true, ['store:read'], 51],
+    [true, ['store:write'], 48],
     [true, ['store:payments', 'store:privacy'], 0],
     [false, ['store:write', 'store:privacy'], 0],
   ] as [boolean, AdminScope[], number][]) {
@@ -1809,52 +1808,8 @@ test('履约、库存和仓库输出逐字段校验，保留负可用量与精�
   }
 });
 
-test('退货嵌套合同保留收货与处置，拒绝审计字段泄漏；所有新合同写失败不重试', async () => {
-  const id = crypto.randomUUID(),
-    at = '2026-09-20T11:12:13.123456+00:00';
-  const disposition = {
-    id,
-    receipt_line_id: id,
-    quantity: 1,
-    disposition: 'restock',
-    inventory_movement_id: '9007199254740993',
-    note: null,
-    created_at: at,
-  };
-  const receipt = {
-    id,
-    return_id: id,
-    order_id: id,
-    location_id: id,
-    note: null,
-    received_at: at,
-    lines: [{ id, return_line_id: id, quantity: 2, undisposed_quantity: 1, dispositions: [disposition] }],
-  };
-  const authorization = {
-    id,
-    order_id: id,
-    fulfillment_id: id,
-    status: 'closed',
-    reason: null,
-    created_at: at,
-    closed_at: at,
-    lines: [{ id, order_item_id: id, quantity: 3, received_quantity: 2, receivable_quantity: 0 }],
-    receipts: [receipt],
-  };
-  const returns = {
-    order_id: id,
-    returns: [authorization],
-    lines: [
-      {
-        fulfillment_id: id,
-        order_item_id: id,
-        shipped_quantity: 4,
-        authorized_unreceived_quantity: 0,
-        received_quantity: 2,
-        available_quantity: 2,
-      },
-    ],
-  };
+test('履约余额合同拒绝审计字段泄漏与类型漂移', async () => {
+  const id = crypto.randomUUID();
   const balance = {
     order_id: id,
     payment_hold: true,
@@ -1874,71 +1829,20 @@ test('退货嵌套合同保留收货与处置，拒绝审计字段泄漏；所�
   const { backend, calls } = fakeBackend(() => Response.json(response));
   const session = await mcpSession(backend, true);
   try {
-    const cases = [
-      ['get_order_returns', { order_id: id }, returns, false],
-      ['get_order_fulfillment_balance', { order_id: id }, balance, false],
-      [
-        'create_return',
-        { fulfillment_id: id, items: [{ order_item_id: id, quantity: 3 }], idempotency_key: 'retained' },
-        authorization,
-        true,
-      ],
-      [
-        'receive_return',
-        {
-          return_id: id,
-          location_id: id,
-          items: [{ return_line_id: id, quantity: 2 }],
-          idempotency_key: 'retained',
-        },
-        receipt,
-        true,
-      ],
-      [
-        'dispose_return_receipt',
-        { receipt_line_id: id, quantity: 1, disposition: 'restock', idempotency_key: 'retained' },
-        disposition,
-        true,
-      ],
-      ['close_return', { return_id: id }, authorization, true],
-    ] as const;
-    for (const [name, args, expected, mutation] of cases) {
-      response = expected;
-      expect(await toolData<typeof expected>(session.client, name, args)).toEqual(expected);
-      response = { ...expected, request_hash: 'SECRET' };
-      const before = calls.length;
-      const failed = await session.client.callTool({ name, arguments: args });
-      expect(failed.isError).toBe(true);
-      expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
-        code: 'INVALID_BACKEND_RESPONSE',
-        outcome_unknown: mutation,
-      });
-      expect(JSON.stringify(failed)).not.toContain('SECRET');
-      expect(calls.length - before).toBe(3);
-    }
-    for (const invalid of [
-      { ...disposition, inventory_movement_id: 9007199254740992 },
-      { ...disposition, disposition: 'refund' },
-      { ...disposition, quantity: -1 },
-      { ...disposition, actor_id: 'SECRET' },
-    ]) {
-      response = {
-        ...returns,
-        returns: [
-          {
-            ...authorization,
-            receipts: [{ ...receipt, lines: [{ ...receipt.lines[0], dispositions: [invalid] }] }],
-          },
-        ],
-      };
-      const failed = await session.client.callTool({
-        name: 'get_order_returns',
-        arguments: { order_id: id },
-      });
-      expect(failed.isError).toBe(true);
-      expect(JSON.stringify(failed)).toContain('INVALID_BACKEND_RESPONSE');
-      expect(JSON.stringify(failed)).not.toContain('SECRET');
-    }
+    response = balance;
+    expect(await toolData<typeof balance>(session.client, 'get_order_fulfillment_balance', { order_id: id })).toEqual(
+      balance,
+    );
+    response = { ...balance, request_hash: 'SECRET' };
+    const before = calls.length;
+    const failed = await session.client.callTool({ name: 'get_order_fulfillment_balance', arguments: { order_id: id } });
+    expect(failed.isError).toBe(true);
+    expect(JSON.parse((failed.content as Array<{ text: string }>)[0].text)).toMatchObject({
+      code: 'INVALID_BACKEND_RESPONSE',
+      outcome_unknown: false,
+    });
+    expect(JSON.stringify(failed)).not.toContain('SECRET');
+    expect(calls.length - before).toBe(3);
     response = { ...balance, payment_hold: 'false' };
     expect(
       (await session.client.callTool({ name: 'get_order_fulfillment_balance', arguments: { order_id: id } }))
@@ -2024,12 +1928,8 @@ test('账本保留负调整和既有渠道引用，但拒绝额外支付秘密�
   }
 });
 
-test('账本与退货库存流水 ID 使用精确规范 bigint 字符串，拒绝数值和越界', () => {
-  const schemas = [
-    orderLedger.shape.adjustments.element.shape.id,
-    returnDisposition.shape.inventory_movement_id,
-  ];
-  for (const schema of schemas) {
+test('账本调整 ID 使用精确规范 bigint 字符串，拒绝数值和越界', () => {
+  for (const schema of [orderLedger.shape.adjustments.element.shape.id]) {
     for (const value of [
       '0',
       '1',
@@ -2054,7 +1954,6 @@ test('账本与退货库存流水 ID 使用精确规范 bigint 字符串，拒�
     ])
       expect(schema.safeParse(value).success).toBe(false);
   }
-  expect(returnDisposition.shape.inventory_movement_id.parse(null)).toBeNull();
   expect(orderLedger.shape.adjustments.element.shape.id.safeParse(null).success).toBe(false);
 });
 
@@ -2130,8 +2029,8 @@ test('MCP 默认只读；写工具显式启用，不能调用未注册或 servic
   try {
     const readTools = (await readonly.client.listTools()).tools;
     const writeTools = (await write.client.listTools()).tools;
-    expect(readTools.length).toBe(52);
-    expect(writeTools.length).toBe(108);
+    expect(readTools.length).toBe(51);
+    expect(writeTools.length).toBe(103);
     expect(writeTools.find((tool) => tool.name === 'cancel_checkout_quote')?.annotations).toMatchObject({
       readOnlyHint: false,
       destructiveHint: true,

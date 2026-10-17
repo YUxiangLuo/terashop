@@ -4,14 +4,14 @@ begin;
 set local check_function_bodies = false;
 
 -- Every restock/cancel command uses the same inventory lock order as checkout.
-CREATE FUNCTION private.lock_order_inventory(p_order_ids uuid[], p_location_id uuid DEFAULT NULL) RETURNS void
+CREATE FUNCTION private.lock_order_inventory(p_order_ids uuid[]) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 declare v_stock record;
 begin
   for v_stock in
-    select im.variant_id, coalesce(p_location_id, im.location_id) as location_id from public.inventory_movements im
+    select im.variant_id, im.location_id from public.inventory_movements im
     where im.order_id = any(p_order_ids) and im.reason = 'order' and im.delta < 0
-    group by im.variant_id, coalesce(p_location_id, im.location_id) order by im.variant_id, coalesce(p_location_id, im.location_id)
+    group by im.variant_id, im.location_id order by im.variant_id, im.location_id
   loop
     insert into public.inventory_levels (variant_id, location_id, on_hand)
     values (v_stock.variant_id, v_stock.location_id, 0)
@@ -22,80 +22,114 @@ begin
 end;
 $$;
 
--- Recover only an actual deduction. NULL destination releases unshipped stock
--- to original locations; a receipt supplies its explicit inspection destination.
+-- Recover only an actual deduction, at the locations it was consumed from.
+-- 'cancel' releases unshipped units; 'restock' puts shipped units back on hand.
 CREATE FUNCTION private.recover_order_stock(p_order_id uuid, p_variant_id uuid, p_quantity integer,
-    p_location_id uuid, p_actor_id uuid, p_note text) RETURNS bigint
+    p_reason text, p_actor_id uuid, p_note text) RETURNS void
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 declare v_deducted bigint; v_recovered bigint; v_source record; v_take integer; v_left integer := p_quantity;
-  v_on_hand integer; v_movement bigint;
+  v_on_hand integer;
 begin
   if p_quantity is null or p_quantity <= 0 then raise exception 'stock recovery requires a positive quantity'; end if;
+  if p_reason is null or p_reason not in ('cancel','restock') then raise exception 'invalid stock recovery reason'; end if;
   perform 1 from public.orders where id = p_order_id for update nowait;
-  if p_location_id is not null and not exists (select 1 from public.locations where id = p_location_id and is_active) then
-    raise exception 'receipt location is not active';
-  end if;
   select coalesce(sum(-delta::bigint),0) into v_deducted from public.inventory_movements
     where order_id = p_order_id and variant_id = p_variant_id and reason = 'order' and delta < 0;
   select coalesce(sum(delta::bigint),0) into v_recovered from public.inventory_movements
-    where order_id = p_order_id and variant_id = p_variant_id and reason in ('cancel','return') and delta > 0;
+    where order_id = p_order_id and variant_id = p_variant_id and reason in ('cancel','restock') and delta > 0;
   if p_quantity > v_deducted - v_recovered then raise exception 'stock recovery exceeds original deduction'; end if;
-  perform private.lock_order_inventory(array[p_order_id], p_location_id);
+  perform private.lock_order_inventory(array[p_order_id]);
   for v_source in
-    select coalesce(p_location_id, im.location_id) as location_id, sum(-im.delta::bigint) as quantity
+    select im.location_id, sum(-im.delta::bigint) as quantity
     from public.inventory_movements im where im.order_id = p_order_id and im.variant_id = p_variant_id
       and im.reason = 'order' and im.delta < 0
-    group by coalesce(p_location_id, im.location_id) order by coalesce(p_location_id, im.location_id)
+    group by im.location_id order by im.location_id
   loop
-    if p_location_id is null then
-      select coalesce(sum(delta::bigint),0) into v_recovered from public.inventory_movements
-        where order_id = p_order_id and variant_id = p_variant_id and location_id = v_source.location_id
-          and reason in ('cancel','return') and delta > 0;
-      v_take := least(v_left, greatest(v_source.quantity - v_recovered, 0));
-    else v_take := v_left; end if;
+    select coalesce(sum(delta::bigint),0) into v_recovered from public.inventory_movements
+      where order_id = p_order_id and variant_id = p_variant_id and location_id = v_source.location_id
+        and reason in ('cancel','restock') and delta > 0;
+    v_take := least(v_left, greatest(v_source.quantity - v_recovered, 0));
     if v_take > 0 then
       update public.inventory_levels set on_hand = on_hand + v_take
         where variant_id = p_variant_id and location_id = v_source.location_id returning on_hand into v_on_hand;
       insert into public.inventory_movements(variant_id, location_id, delta, on_hand_after, reason, order_id, actor_id, note)
-        values (p_variant_id, v_source.location_id, v_take, v_on_hand,
-          case when p_location_id is null then 'cancel' else 'return' end, p_order_id, p_actor_id, p_note) returning id into v_movement;
+        values (p_variant_id, v_source.location_id, v_take, v_on_hand, p_reason, p_order_id, p_actor_id, p_note);
       v_left := v_left - v_take;
     end if;
     exit when v_left = 0;
   end loop;
   if v_left <> 0 then raise exception 'stock recovery could not be allocated'; end if;
-  return v_movement;
 end;
 $$;
 
-CREATE FUNCTION private.restock_refund_cancellation() RETURNS trigger
+-- Shipped units come back only through an explicit per-line refund quantity.
+-- The cap is shipped units minus units already restocked or reserved by active
+-- provider refund requests; the order row lock serializes every refund writer.
+CREATE FUNCTION private.assert_shipped_restock(p_order_item_id uuid, p_quantity integer, p_exclude_request_id uuid DEFAULT NULL) RETURNS void
+    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
+declare v_item public.order_items; v_shipped bigint; v_used bigint;
+begin
+  if p_quantity = 0 then return; end if;
+  select * into strict v_item from public.order_items where id = p_order_item_id;
+  if not exists (select 1 from public.inventory_movements im where im.order_id = v_item.order_id
+    and im.variant_id = v_item.variant_id and im.reason = 'order' and im.delta < 0) then
+    raise exception 'restock_shipped_quantity requires an inventory-tracked order item';
+  end if;
+  select coalesce(sum(fl.quantity),0) into v_shipped from commerce.fulfillment_lines fl
+    join public.fulfillments f on f.id = fl.fulfillment_id
+    where fl.order_item_id = p_order_item_id and f.status in ('shipped','delivered');
+  select coalesce(sum(rl.restock_shipped_quantity),0) + coalesce((
+      select sum(l.restock_shipped_quantity) from commerce.refund_request_lines l
+      join commerce.refund_requests r on r.id = l.refund_request_id
+      where l.order_item_id = p_order_item_id and r.status in ('requested','submitted','processing')
+        and r.id is distinct from p_exclude_request_id), 0)
+    into v_used from commerce.refund_lines rl where rl.order_item_id = p_order_item_id;
+  if v_used + p_quantity > v_shipped then
+    raise exception 'restock_shipped_quantity exceeds shipped units not yet restocked for item %', p_order_item_id;
+  end if;
+end;
+$$;
+
+CREATE FUNCTION private.restock_refund_line() RETURNS trigger
     LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
 declare v_refund commerce.refunds; v_variant uuid;
 begin
-  if new.restocked_quantity = 0 then return new; end if;
+  if new.restocked_quantity = 0 and new.restock_shipped_quantity = 0 then return new; end if;
   select * into strict v_refund from commerce.refunds where id = new.refund_id;
   select variant_id into v_variant from public.order_items where id = new.order_item_id;
-  perform private.recover_order_stock(new.order_id, v_variant, new.restocked_quantity, null, v_refund.actor_id, v_refund.reason);
+  if new.restocked_quantity > 0 then
+    perform private.recover_order_stock(new.order_id, v_variant, new.restocked_quantity, 'cancel', v_refund.actor_id, v_refund.reason);
+  end if;
+  if new.restock_shipped_quantity > 0 then
+    perform private.recover_order_stock(new.order_id, v_variant, new.restock_shipped_quantity, 'restock', v_refund.actor_id, v_refund.reason);
+  end if;
   return new;
 end;
 $$;
 
-CREATE FUNCTION private.canonical_return_quantities(p_items jsonb, p_key text) RETURNS jsonb
+-- Refund items extend order-item quantities with an optional count of shipped
+-- units the customer sent back and the store puts back on hand.
+CREATE FUNCTION private.canonical_refund_items(p_items jsonb) RETURNS jsonb
     LANGUAGE plpgsql STABLE SET search_path TO '' AS $$
 declare v_items jsonb;
 begin
-  if p_key not in ('order_item_id','return_line_id') or p_key is null then raise exception 'invalid return quantity key'; end if;
-  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) not between 1 and 100 then
-    raise exception 'return items must contain 1 to 100 lines';
+  v_items := private.canonical_order_item_quantities(p_items);
+  if exists (select 1 from jsonb_array_elements(p_items) e, jsonb_object_keys(e) k
+    where k not in ('order_item_id','quantity','restock_shipped_quantity')) then
+    raise exception 'unsupported refund item field';
   end if;
-  if exists (select 1 from jsonb_array_elements(p_items) e where jsonb_typeof(e) <> 'object') then raise exception 'return item must be an object'; end if;
-  if exists (select 1 from jsonb_array_elements(p_items) e, jsonb_object_keys(e) k where k not in (p_key, 'quantity')) then
-    raise exception 'unsupported return item field';
+  if exists (select 1 from jsonb_array_elements(p_items) e where e ? 'restock_shipped_quantity'
+    and coalesce(e ->> 'restock_shipped_quantity', '') !~ '^[0-9]{1,9}$') then
+    raise exception 'restock_shipped_quantity must be a non-negative integer';
   end if;
-  select jsonb_agg(jsonb_build_object('order_item_id', e -> p_key, 'quantity', e -> 'quantity')) into v_items from jsonb_array_elements(p_items) e;
-  v_items := private.canonical_order_item_quantities(v_items);
-  select jsonb_agg(jsonb_build_object(p_key, e -> 'order_item_id', 'quantity', e -> 'quantity') order by (e ->> 'order_item_id')::uuid)
-    into v_items from jsonb_array_elements(v_items) e;
+  select jsonb_agg(c.value || jsonb_build_object('restock_shipped_quantity', coalesce((
+      select sum((e ->> 'restock_shipped_quantity')::integer) from jsonb_array_elements(p_items) e
+      where (e ->> 'order_item_id')::uuid = (c.value ->> 'order_item_id')::uuid), 0)) order by c.ordinality)
+    into v_items from jsonb_array_elements(v_items) with ordinality c;
+  if exists (select 1 from jsonb_array_elements(v_items) e
+    where (e ->> 'restock_shipped_quantity')::bigint > (e ->> 'quantity')::bigint) then
+    raise exception 'restock_shipped_quantity cannot exceed refunded quantity';
+  end if;
   return v_items;
 end;
 $$;
@@ -104,275 +138,6 @@ CREATE FUNCTION private.order_has_payment_hold(p_order_id uuid) RETURNS boolean
     LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
   select exists (select 1 from commerce.provider_money_movements
     where order_id=p_order_id and reconciliation_status='action_required');
-$$;
-
-CREATE FUNCTION private.return_line_received(p_id uuid) RETURNS bigint
-    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-  select coalesce(sum(quantity),0) from commerce.return_receipt_lines where return_line_id = p_id;
-$$;
-
-CREATE FUNCTION private.lock_return_command(p_order_id uuid, p_key text) RETURNS void
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-begin
-  if not public.is_admin() then raise exception 'admin only'; end if;
-  if coalesce(btrim(p_key),'') = '' or length(btrim(p_key)) > 200 then raise exception 'idempotency_key is required (1 to 200 characters)'; end if;
-  perform 1 from public.orders where id = p_order_id for update;
-  if not found then raise exception 'order not found'; end if;
-  -- Order -> return/receipt -> inventory. A real version also fences old RR snapshots.
-  update public.orders set updated_at = now() where id = p_order_id;
-end;
-$$;
-
-CREATE FUNCTION private.return_disposition_json(p_row commerce.return_dispositions) RETURNS jsonb
-    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-  select jsonb_build_object('id',p_row.id,'receipt_line_id',p_row.receipt_line_id,'quantity',p_row.quantity,
-    'disposition',p_row.disposition,'inventory_movement_id',p_row.inventory_movement_id::text,'note',p_row.note,'created_at',p_row.created_at);
-$$;
-
-CREATE FUNCTION private.return_receipt_json(p_row commerce.return_receipts) RETURNS jsonb
-    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-  select jsonb_build_object('id',p_row.id,'return_id',p_row.return_id,'order_id',p_row.order_id,'location_id',p_row.location_id,
-    'note',p_row.note,'received_at',p_row.received_at,'lines',coalesce((select jsonb_agg(jsonb_build_object(
-      'id',l.id,'return_line_id',l.return_line_id,'quantity',l.quantity,
-      'undisposed_quantity',l.quantity - (select coalesce(sum(d.quantity),0) from commerce.return_dispositions d where d.receipt_line_id=l.id),
-      'dispositions',coalesce((select jsonb_agg(private.return_disposition_json(d) order by d.created_at,d.id)
-        from commerce.return_dispositions d where d.receipt_line_id=l.id),'[]')) order by l.return_line_id)
-      from commerce.return_receipt_lines l where l.receipt_id=p_row.id),'[]'));
-$$;
-
-CREATE FUNCTION private.return_json(p_row commerce.returns) RETURNS jsonb
-    LANGUAGE sql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-  select jsonb_build_object('id',p_row.id,'order_id',p_row.order_id,'fulfillment_id',p_row.fulfillment_id,'status',p_row.status,
-    'reason',p_row.reason,'created_at',p_row.created_at,'closed_at',p_row.closed_at,
-    'lines',coalesce((select jsonb_agg(jsonb_build_object('id',l.id,'order_item_id',l.order_item_id,'quantity',l.quantity,
-      'received_quantity',private.return_line_received(l.id),
-      'receivable_quantity',case when p_row.status='open' then l.quantity-private.return_line_received(l.id) else 0 end)
-      order by l.order_item_id) from commerce.return_lines l where l.return_id=p_row.id),'[]'),
-    'receipts',coalesce((select jsonb_agg(private.return_receipt_json(r) order by r.received_at,r.id)
-      from commerce.return_receipts r where r.return_id=p_row.id),'[]'));
-$$;
-
-CREATE FUNCTION private.validate_return_fact() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare
-  v_row jsonb := to_jsonb(new);
-  v_order_id uuid := (v_row ->> 'order_id')::uuid;
-  v_return commerce.returns;
-  v_receipt commerce.return_receipts;
-  v_line commerce.return_receipt_lines;
-  v_return_line commerce.return_lines;
-  v_variant uuid;
-  v_used bigint;
-begin
-  -- Immutable facts allow only the existing one-way actor erasure exception.
-  if tg_op = 'UPDATE' and tg_table_name = 'returns' then
-    if to_jsonb(old) ->> 'actor_id' is not null and v_row ->> 'actor_id' is null and v_row-'actor_id' = to_jsonb(old)-'actor_id' then return new; end if;
-    if v_row-array['status','closed_at'] is distinct from to_jsonb(old)-array['status','closed_at']
-      or to_jsonb(old) ->> 'status' <> 'open' or v_row ->> 'status' not in ('closed','cancelled') then raise exception 'return authorization is immutable except closing'; end if;
-    new := jsonb_populate_record(new,jsonb_build_object('closed_at',now()));
-  end if;
-  perform 1 from public.orders where id = v_order_id for update nowait;
-  if not found then raise exception 'return order not found'; end if;
-  update public.orders set updated_at=now() where id=v_order_id;
-  if tg_table_name = 'returns' then
-    if tg_op = 'INSERT' and (v_row ->> 'status' <> 'open' or not exists (
-      select 1 from public.fulfillments f where f.id=(v_row ->> 'fulfillment_id')::uuid and f.order_id=v_order_id and f.status in ('shipped','delivered')
-    )) then raise exception 'return requires a shipped or delivered fulfillment'; end if;
-    if v_row ->> 'status' = 'cancelled' and exists (select 1 from commerce.return_receipts where return_id=(v_row ->> 'id')::uuid) then
-      raise exception 'received return cannot be cancelled; close the remainder';
-    end if;
-  elsif tg_table_name = 'return_lines' then
-    select * into v_return from commerce.returns where id=(v_row ->> 'return_id')::uuid;
-    if v_return.status is distinct from 'open' then raise exception 'return is not open'; end if;
-  elsif tg_table_name = 'return_receipts' then
-    select * into v_return from commerce.returns where id=(v_row ->> 'return_id')::uuid;
-    if v_return.status is distinct from 'open' then raise exception 'return is not open'; end if;
-    if not exists (select 1 from public.locations where id=(v_row ->> 'location_id')::uuid and is_active) then
-      raise exception 'receipt location is not active';
-    end if;
-  elsif tg_table_name = 'return_receipt_lines' then
-    select * into v_return_line from commerce.return_lines where id=(v_row ->> 'return_line_id')::uuid;
-    select * into v_return from commerce.returns where id=v_return_line.return_id;
-    if v_return.status is distinct from 'open' then raise exception 'return is not open'; end if;
-    if private.return_line_received(v_return_line.id) + (v_row ->> 'quantity')::integer > v_return_line.quantity then
-      raise exception 'receipt quantity exceeds return authorization';
-    end if;
-  elsif tg_table_name = 'return_dispositions' then
-    select * into strict v_line from commerce.return_receipt_lines where id=(v_row ->> 'receipt_line_id')::uuid;
-    select * into strict v_receipt from commerce.return_receipts where id=v_line.receipt_id;
-    if (v_row ->> 'receipt_id')::uuid <> v_receipt.id or v_order_id <> v_receipt.order_id then raise exception 'disposition receipt ownership mismatch'; end if;
-    select coalesce(sum(quantity),0) into v_used from commerce.return_dispositions where receipt_line_id=v_line.id;
-    if (v_row ->> 'quantity')::integer > v_line.quantity-v_used then raise exception 'disposition exceeds undisposed receipt quantity'; end if;
-    if v_row ->> 'inventory_movement_id' is not null then raise exception 'inventory movement is assigned by disposition'; end if;
-    if v_row ->> 'disposition' = 'restock' then
-      select oi.variant_id into v_variant from commerce.return_lines l join public.order_items oi on oi.id=l.order_item_id where l.id=v_line.return_line_id;
-      new := jsonb_populate_record(new,jsonb_build_object('inventory_movement_id',private.recover_order_stock(
-        v_order_id,v_variant,(v_row ->> 'quantity')::integer,v_receipt.location_id,(v_row ->> 'actor_id')::uuid,v_row ->> 'note')));
-    end if;
-  end if;
-  return new;
-end;
-$$;
-
-CREATE FUNCTION private.assert_return_facts() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_order_id uuid := new.order_id; v_return commerce.returns; v_receipt commerce.return_receipts; v_items jsonb;
-begin
-  for v_return in select * from commerce.returns where order_id=v_order_id loop
-    select jsonb_agg(jsonb_build_object('order_item_id',order_item_id,'quantity',quantity) order by order_item_id)
-      into v_items from commerce.return_lines where return_id=v_return.id;
-    if v_items is null or v_return.request_hash is distinct from private.command_request_hash(jsonb_build_object(
-      'fulfillment_id',v_return.fulfillment_id,'items',v_items,'reason',v_return.reason)) then
-      raise exception 'return lines do not match authorization fingerprint';
-    end if;
-    if v_return.status='cancelled' and exists (select 1 from commerce.return_receipts where return_id=v_return.id) then
-      raise exception 'cancelled return has receipts';
-    end if;
-  end loop;
-  if exists (
-    select 1 from commerce.return_lines l join commerce.returns r on r.id=l.return_id
-    join commerce.fulfillment_lines fl on (fl.fulfillment_id,fl.order_item_id)=(l.fulfillment_id,l.order_item_id)
-    join public.fulfillments f on f.id=fl.fulfillment_id where l.order_id=v_order_id
-    group by fl.fulfillment_id,fl.order_item_id,fl.quantity,f.status
-    having sum(case when r.status='open' then l.quantity else private.return_line_received(l.id) end)
-      > case when f.status in ('shipped','delivered') then fl.quantity else 0 end
-  ) then raise exception 'return commitments exceed shipped quantity'; end if;
-  if exists (select 1 from commerce.return_lines l where l.order_id=v_order_id and private.return_line_received(l.id)>l.quantity) then
-    raise exception 'receipt quantity exceeds return authorization';
-  end if;
-  for v_receipt in select * from commerce.return_receipts where order_id=v_order_id loop
-    select jsonb_agg(jsonb_build_object('return_line_id',return_line_id,'quantity',quantity) order by return_line_id)
-      into v_items from commerce.return_receipt_lines where receipt_id=v_receipt.id;
-    if v_items is null or v_receipt.request_hash is distinct from private.command_request_hash(jsonb_build_object(
-      'return_id',v_receipt.return_id,'location_id',v_receipt.location_id,'items',v_items,'note',v_receipt.note)) then
-      raise exception 'receipt lines do not match receipt fingerprint';
-    end if;
-  end loop;
-  if exists (select 1 from commerce.return_receipt_lines l where l.order_id=v_order_id and
-    (select coalesce(sum(quantity),0) from commerce.return_dispositions where receipt_line_id=l.id)>l.quantity) then
-    raise exception 'disposition exceeds undisposed receipt quantity';
-  end if;
-  if exists (select 1 from commerce.return_dispositions d
-    join commerce.return_receipt_lines rl on rl.id=d.receipt_line_id
-    join commerce.return_lines l on l.id=rl.return_line_id join public.order_items oi on oi.id=l.order_item_id
-    join commerce.return_receipts r on r.id=d.receipt_id left join public.inventory_movements im on im.id=d.inventory_movement_id
-    where d.order_id=v_order_id and (
-      d.request_hash is distinct from private.command_request_hash(jsonb_build_object('receipt_line_id',d.receipt_line_id,'quantity',d.quantity,'disposition',d.disposition,'note',d.note))
-      or (d.disposition='restock' and (im.order_id,im.variant_id,im.location_id,im.delta,im.reason)
-        is distinct from (d.order_id,oi.variant_id,r.location_id,d.quantity,'return'::text))
-    )) then raise exception 'disposition does not match its fingerprint or stock movement'; end if;
-  return null;
-end;
-$$;
-
-CREATE FUNCTION private.return_fact_to_outbox() RETURNS trigger
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_row jsonb := to_jsonb(new); v_type text;
-begin
-  v_type := case tg_table_name when 'returns' then 'return.' || (v_row ->> 'status')
-    when 'return_receipts' then 'return.received' else 'return.disposed' end;
-  insert into public.order_events(order_id,actor_id,type,data) values (
-    (v_row ->> 'order_id')::uuid, case when tg_op='UPDATE' then auth.uid() else (v_row ->> 'actor_id')::uuid end,
-    v_type,jsonb_build_object('resource_id',v_row -> 'id','return_id',case when tg_table_name='returns' then v_row -> 'id' else v_row -> 'return_id' end,
-      'receipt_id',v_row -> 'receipt_id','disposition',v_row -> 'disposition','quantity',v_row -> 'quantity'));
-  return new;
-end;
-$$;
-
-CREATE FUNCTION public.create_return(fulfillment_id uuid, items jsonb, idempotency_key text, reason text DEFAULT NULL) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_order uuid; v_return commerce.returns; v_items jsonb; v_hash text; v_key text := btrim(idempotency_key);
-begin
-  select order_id into v_order from public.fulfillments where id=create_return.fulfillment_id;
-  perform private.lock_return_command(v_order,v_key);
-  v_items := private.canonical_return_quantities(items,'order_item_id');
-  v_hash := private.command_request_hash(jsonb_build_object('fulfillment_id',fulfillment_id,'items',v_items,'reason',reason));
-  select * into v_return from commerce.returns r where r.fulfillment_id=create_return.fulfillment_id and r.idempotency_key=v_key;
-  if found then
-    if v_return.request_hash<>v_hash then raise exception 'idempotency key was used with different return parameters'; end if;
-    return private.return_json(v_return);
-  end if;
-  insert into commerce.returns(order_id,fulfillment_id,idempotency_key,request_hash,reason,actor_id)
-    values (v_order,fulfillment_id,v_key,v_hash,reason,auth.uid()) returning * into v_return;
-  insert into commerce.return_lines(return_id,order_id,fulfillment_id,order_item_id,quantity)
-    select v_return.id,v_order,fulfillment_id,(e ->> 'order_item_id')::uuid,(e ->> 'quantity')::integer from jsonb_array_elements(v_items) e;
-  return private.return_json(v_return);
-end;
-$$;
-
-CREATE FUNCTION public.receive_return(return_id uuid, location_id uuid, items jsonb, idempotency_key text, note text DEFAULT NULL) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_order uuid; v_receipt commerce.return_receipts; v_items jsonb; v_hash text; v_key text := btrim(idempotency_key);
-begin
-  select order_id into v_order from commerce.returns where id=receive_return.return_id;
-  perform private.lock_return_command(v_order,v_key);
-  v_items := private.canonical_return_quantities(items,'return_line_id');
-  v_hash := private.command_request_hash(jsonb_build_object('return_id',return_id,'location_id',location_id,'items',v_items,'note',note));
-  select * into v_receipt from commerce.return_receipts r where r.return_id=receive_return.return_id and r.idempotency_key=v_key;
-  if found then
-    if v_receipt.request_hash<>v_hash then raise exception 'idempotency key was used with different receipt parameters'; end if;
-    return private.return_receipt_json(v_receipt);
-  end if;
-  insert into commerce.return_receipts(return_id,order_id,location_id,idempotency_key,request_hash,note,actor_id)
-    values (return_id,v_order,location_id,v_key,v_hash,note,auth.uid()) returning * into v_receipt;
-  insert into commerce.return_receipt_lines(receipt_id,return_id,order_id,return_line_id,quantity)
-    select v_receipt.id,return_id,v_order,(e ->> 'return_line_id')::uuid,(e ->> 'quantity')::integer from jsonb_array_elements(v_items) e;
-  return private.return_receipt_json(v_receipt);
-end;
-$$;
-
-CREATE FUNCTION public.dispose_return_receipt(receipt_line_id uuid, quantity integer, disposition text, idempotency_key text, note text DEFAULT NULL) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_line commerce.return_receipt_lines; v_disposition commerce.return_dispositions; v_key text := btrim(idempotency_key); v_hash text;
-begin
-  select * into v_line from commerce.return_receipt_lines where id=dispose_return_receipt.receipt_line_id;
-  perform private.lock_return_command(v_line.order_id,v_key);
-  v_hash := private.command_request_hash(jsonb_build_object('receipt_line_id',receipt_line_id,'quantity',quantity,'disposition',disposition,'note',note));
-  select * into v_disposition from commerce.return_dispositions d where d.receipt_line_id=dispose_return_receipt.receipt_line_id and d.idempotency_key=v_key;
-  if found then
-    if v_disposition.request_hash<>v_hash then raise exception 'idempotency key was used with different disposition parameters'; end if;
-    return private.return_disposition_json(v_disposition);
-  end if;
-  insert into commerce.return_dispositions(receipt_line_id,receipt_id,order_id,quantity,disposition,idempotency_key,request_hash,note,actor_id)
-    values (receipt_line_id,v_line.receipt_id,v_line.order_id,quantity,disposition,v_key,v_hash,note,auth.uid()) returning * into v_disposition;
-  return private.return_disposition_json(v_disposition);
-end;
-$$;
-
-CREATE FUNCTION public.close_return(return_id uuid, cancel boolean DEFAULT false) RETURNS jsonb
-    LANGUAGE plpgsql SECURITY DEFINER SET search_path TO '' AS $$
-declare v_return commerce.returns; v_order uuid; v_status text := case when cancel then 'cancelled' else 'closed' end;
-begin
-  select order_id into v_order from commerce.returns where id=close_return.return_id;
-  perform private.lock_return_command(v_order,'return.close');
-  if cancel is null then raise exception 'cancel must be a boolean'; end if;
-  select * into strict v_return from commerce.returns where id=close_return.return_id;
-  if v_return.status = v_status then return private.return_json(v_return); end if;
-  update commerce.returns set status=v_status where id=v_return.id returning * into v_return;
-  return private.return_json(v_return);
-end;
-$$;
-
-CREATE FUNCTION public.get_order_returns(order_id uuid) RETURNS jsonb
-    LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path TO '' AS $$
-declare v_returns jsonb; v_lines jsonb;
-begin
-  if not exists (select 1 from public.orders o where o.id=get_order_returns.order_id
-    and (o.customer_id=public.current_customer_id() or public.is_admin() or auth.role()='service_role')) then raise exception 'order not found'; end if;
-  select coalesce(jsonb_agg(private.return_json(r) order by r.created_at,r.id),'[]') into v_returns
-    from commerce.returns r where r.order_id=get_order_returns.order_id;
-  select coalesce(jsonb_agg(jsonb_build_object('fulfillment_id',fl.fulfillment_id,'order_item_id',fl.order_item_id,
-    'shipped_quantity',case when f.status in ('shipped','delivered') then fl.quantity else 0 end,
-    'authorized_unreceived_quantity',b.authorized,'received_quantity',b.received,
-    'available_quantity',case when f.status in ('shipped','delivered') then fl.quantity-b.authorized-b.received else 0 end)
-    order by fl.fulfillment_id,fl.order_item_id),'[]') into v_lines
-  from commerce.fulfillment_lines fl join public.fulfillments f on f.id=fl.fulfillment_id
-  cross join lateral (select coalesce(sum(case when r.status='open' then l.quantity-private.return_line_received(l.id) else 0 end),0) as authorized,
-    coalesce(sum(private.return_line_received(l.id)),0) as received from commerce.return_lines l join commerce.returns r on r.id=l.return_id
-    where l.fulfillment_id=fl.fulfillment_id and l.order_item_id=fl.order_item_id) b
-  where fl.order_id=get_order_returns.order_id;
-  return jsonb_build_object('order_id',order_id,'lines',v_lines,'returns',v_returns);
-end;
 $$;
 
 CREATE FUNCTION private.schedule_order_totals() RETURNS trigger
@@ -458,8 +223,8 @@ begin
   if v_request_id is not null then
     select * into v_request_line from commerce.refund_request_lines l
     where l.refund_request_id = v_request_id and l.order_item_id = new.order_item_id;
-    if not found or (v_request_line.order_id, v_request_line.quantity, v_request_line.amount)
-       is distinct from (new.order_id, new.quantity, new.amount) then
+    if not found or (v_request_line.order_id, v_request_line.quantity, v_request_line.amount, v_request_line.restock_shipped_quantity)
+       is distinct from (new.order_id, new.quantity, new.amount, new.restock_shipped_quantity) then
       raise exception 'refund line does not match its request';
     end if;
     new.cancelled_quantity := v_request_line.cancelled_quantity;
@@ -467,14 +232,17 @@ begin
       raise exception 'reserved refund cancellation is no longer available';
     end if;
   else
-    new.cancelled_quantity := least(new.quantity, v_available);
+    -- Units declared as shipped-and-returned are not unshipped cancellations.
+    new.cancelled_quantity := least(new.quantity - new.restock_shipped_quantity, v_available);
   end if;
+  perform private.assert_shipped_restock(new.order_item_id, new.restock_shipped_quantity, v_request_id);
   if new.restocked_quantity <> 0 then raise exception 'restocked quantity is derived from unshipped cancellation'; end if;
   new.restocked_quantity := case when v_refund.status = 'succeeded' and v_refund.restock_requested and exists (
     select 1 from public.inventory_movements im join public.order_items oi on oi.variant_id = im.variant_id
     where oi.id = new.order_item_id and im.order_id = new.order_id and im.reason = 'order' and im.delta < 0
   ) then new.cancelled_quantity else 0 end;
-  if new.restocked_quantity > 0 and v_refund.payment_transaction_id is null then
+  if (new.restocked_quantity > 0 or new.restock_shipped_quantity > 0)
+     and (v_refund.status <> 'succeeded' or v_refund.payment_transaction_id is null) then
     raise exception 'inventory release requires a successful refund payment';
   end if;
   return new;
@@ -493,7 +261,8 @@ begin
   select b.available_quantity into v_available
   from private.order_item_fulfillment_balance(new.order_item_id) b;
   if not found then raise exception 'refund order item not found'; end if;
-  new.cancelled_quantity := least(new.quantity, v_available);
+  new.cancelled_quantity := least(new.quantity - new.restock_shipped_quantity, v_available);
+  perform private.assert_shipped_restock(new.order_item_id, new.restock_shipped_quantity);
   return new;
 end;
 $$;
@@ -765,10 +534,6 @@ CREATE FUNCTION private.prevent_refunded_fulfillment_cancellation() RETURNS trig
 begin
   if new.status <> 'cancelled' or old.status = 'cancelled' then return new; end if;
   perform 1 from public.orders o where o.id = old.order_id for update nowait;
-  if exists (select 1 from commerce.returns r where r.fulfillment_id=old.id and
-    (r.status='open' or exists (select 1 from commerce.return_receipts where return_id=r.id))) then
-    raise exception 'fulfillment has return authorizations or receipts; cannot cancel';
-  end if;
   if exists (
     select 1 from commerce.fulfillment_lines fl
     join public.order_items oi on oi.id = fl.order_item_id
@@ -781,7 +546,7 @@ begin
       )
     )
   ) then
-    raise exception 'fulfillment has refunded items or active refund requests; use the return flow';
+    raise exception 'fulfillment has refunded items or active refund requests; cannot cancel';
   end if;
   return new;
 end;
@@ -1099,7 +864,7 @@ begin
     raise exception 'refund amount must be finite positive USD with at most two decimal places';
   end if;
   if p_items is not null then
-    v_source := 'items'; v_items := private.canonical_order_item_quantities(p_items);
+    v_source := 'items'; v_items := private.canonical_refund_items(p_items);
     if jsonb_array_length(v_items) > 100 then raise exception 'refund request is limited to 100 lines'; end if;
     for v_item in select value from jsonb_array_elements(v_items) loop
       v_quantity := (v_item ->> 'quantity')::integer;
@@ -1113,7 +878,8 @@ begin
       end if;
       v_line_amount := private.proportional_refund(v_line.line_total, v_line.quantity, v_quantity,
         v_line.refunded_quantity + v_used_quantity, v_line.refunded_amount + v_used);
-      v_lines := v_lines || jsonb_build_array(jsonb_build_object('order_item_id', v_line.id, 'quantity', v_quantity, 'amount', v_line_amount));
+      v_lines := v_lines || jsonb_build_array(jsonb_build_object('order_item_id', v_line.id, 'quantity', v_quantity, 'amount', v_line_amount,
+        'restock_shipped_quantity', (v_item ->> 'restock_shipped_quantity')::integer));
       v_amount := v_amount + v_line_amount;
       for v_tax in select * from commerce.order_tax_lines where order_item_id = v_line.id order by id loop
         v_amount := v_amount + private.item_refund_tax(v_tax.id, v_quantity);
@@ -1329,7 +1095,9 @@ begin
     raise exception 'order is not refundable (current: %)', v_order.financial_status;
   end if;
 
-  if restock then perform private.lock_order_inventory(array[v_order.id]); end if;
+  if restock or exists (select 1 from jsonb_array_elements(items) e where (e ->> 'restock_shipped_quantity')::integer > 0) then
+    perform private.lock_order_inventory(array[v_order.id]);
+  end if;
 
   -- 已退合计（以成功的 refund 支付记录为准）
   select coalesce(sum(p.amount), 0) into v_refunded
@@ -1374,9 +1142,9 @@ begin
   values (v_order.id, v_transaction_id, 'succeeded', v_plan ->> 'source', v_amount, v_order.currency, reason, restock, auth.uid())
   returning id into v_refund_id;
   for v_item in select value from jsonb_array_elements(v_plan -> 'lines') loop
-    insert into commerce.refund_lines(refund_id, order_id, order_item_id, quantity, amount)
+    insert into commerce.refund_lines(refund_id, order_id, order_item_id, quantity, amount, restock_shipped_quantity)
     values (v_refund_id, v_order.id, (v_item ->> 'order_item_id')::uuid, (v_item ->> 'quantity')::integer,
-      (v_item ->> 'amount')::numeric);
+      (v_item ->> 'amount')::numeric, (v_item ->> 'restock_shipped_quantity')::integer);
   end loop;
   for v_component in select value from jsonb_array_elements(v_plan -> 'components') loop
     insert into commerce.refund_components(refund_id, order_id, kind, tax_line_id, shipping_line_id, amount)
@@ -2122,7 +1890,8 @@ begin
         'created_at', r.created_at,
         'lines', (select coalesce(jsonb_agg(jsonb_build_object(
           'order_item_id', rl.order_item_id, 'quantity', rl.quantity,
-          'amount', rl.amount, 'cancelled_quantity', rl.cancelled_quantity, 'restocked_quantity', rl.restocked_quantity
+          'amount', rl.amount, 'cancelled_quantity', rl.cancelled_quantity, 'restocked_quantity', rl.restocked_quantity,
+          'restock_shipped_quantity', rl.restock_shipped_quantity
         ) order by rl.order_item_id), '[]'::jsonb)
         from commerce.refund_lines rl where rl.refund_id = r.id)
       ) order by r.created_at, r.id), '[]'::jsonb)
@@ -2165,7 +1934,7 @@ begin
     raise exception 'idempotency_key is required and must be at most 200 characters';
   end if;
   if items is not null then
-    v_items := private.canonical_order_item_quantities(items);
+    v_items := private.canonical_refund_items(items);
   end if;
   v_request_hash := private.command_request_hash(jsonb_build_object(
     'order_id', order_id, 'items', v_items, 'amount', amount,

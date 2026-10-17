@@ -37,7 +37,7 @@ test('preview has no business writes; exact item effects commit once and replay 
   const args = {order_id:o.id,items:lines(o.itemId,2),restock:true};
   const p = await preview(args);
   expect(p).toMatchObject({amount:20,currency:'USD',available_amount:20,source:'items',restock:true});
-  expect(p.lines).toEqual([{order_item_id:o.itemId,quantity:2,amount:20,cancelled_quantity:2,restocked_quantity:2}]);
+  expect(p.lines).toEqual([{order_item_id:o.itemId,quantity:2,amount:20,cancelled_quantity:2,restocked_quantity:2,restock_shipped_quantity:0}]);
   expect(p.components).toEqual([]);
   expect(await ledger(o.id)).toEqual(before);
   expect(await stockOf(fixture.sku)).toBe(stock);

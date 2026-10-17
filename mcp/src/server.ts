@@ -73,10 +73,6 @@ import {
   metaobjectResult,
   metaobjectPage,
   metadataDeletion,
-  orderReturns,
-  returnAuthorization,
-  returnReceipt,
-  returnDisposition,
   key,
   pageSize,
   search,
@@ -113,7 +109,7 @@ Read before editing. Never change a stale expected revision/version automaticall
 Obtain user approval for financial actions, inventory changes, publication, anonymization, role changes and other destructive actions.
 Tool annotations are hints, not an approval mechanism. Do not repeat uncertain writes with new IDs or idempotency keys.
 Manual payment/refund tools only record bookkeeping; they do not move money at a payment provider.
-Returns, receipts, disposition, refunds and fulfillment cancellation are distinct operations.`;
+Returned goods come back to stock only through a refund line's restock_shipped_quantity; fulfillment cancellation never refunds or restocks.`;
 
 export function createAdminServer(
   backend: AdminBackend,
@@ -603,7 +599,7 @@ export function createAdminServer(
       location_id: id.optional(),
       order_id: id.optional(),
       reason_filter: z
-        .enum(['order', 'cancel', 'restock', 'adjust', 'return', 'transfer_out', 'transfer_in'])
+        .enum(['order', 'cancel', 'restock', 'adjust', 'transfer_out', 'transfer_in'])
         .optional(),
     }),
     false,
@@ -1209,7 +1205,7 @@ export function createAdminServer(
   );
   rpc(
     'preview_manual_refund',
-    'Preview manual-only USD refund bookkeeping without changing business data. Require explicit amount OR items/shipping_amount and explicit restock; never default to remaining balance. Returns exact tax, cancellation and inventory effects. preview_token proves state consistency, NOT human approval. Obtain explicit approval for these effects before commit_manual_refund.',
+    'Preview manual-only USD refund bookkeeping without changing business data. Require explicit amount OR items/shipping_amount and explicit restock; never default to remaining balance. restock releases cancelled unshipped units; per-line restock_shipped_quantity puts already shipped units the customer sent back on hand (capped by shipped units not yet restocked). Returns exact tax, cancellation and inventory effects. preview_token proves state consistency, NOT human approval. Obtain explicit approval for these effects before commit_manual_refund.',
     manualRefund,
     false,
     true,
@@ -1217,7 +1213,7 @@ export function createAdminServer(
   );
   rpc(
     'commit_manual_refund',
-    'MANUAL BOOKKEEPING ONLY: does not move provider money. After explicit approval, submit the exact preview scope/restock and preview_token with a nonblank reason and idempotency_key. Stale preview requires a new preview and renewed confirmation, never automatic replacement. restock only releases cancelled unshipped units, not received returns. After an unknown outcome retain identical arguments and key; inspect the ledger before an approved identical retry. A preview token is not human authorization.',
+    'MANUAL BOOKKEEPING ONLY: does not move provider money. After explicit approval, submit the exact preview scope/restock and preview_token with a nonblank reason and idempotency_key. Stale preview requires a new preview and renewed confirmation, never automatic replacement. restock only releases cancelled unshipped units; per-line restock_shipped_quantity restocks returned shipped units. After an unknown outcome retain identical arguments and key; inspect the ledger before an approved identical retry. A preview token is not human authorization.',
     options.approvals ? commitManualRefund.safeExtend({ approval_id: id.optional() }) : commitManualRefund,
     true,
     true,
@@ -1225,7 +1221,7 @@ export function createAdminServer(
   );
   tool(
     'refund_paypal',
-    'REAL MONEY: issue a PayPal refund through the authenticated Edge function. Obtain explicit approval for order, amount/lines/shipping and any restock. Retain idempotency_key and identical arguments; never retry automatically or generate a new key after uncertainty. Explicit scope required; amounts are positive USD decimal strings with at most two decimals. No implicit full-balance refund. restock only releases cancelled unshipped units, not received returns. Success is a provider observation, not guaranteed local settlement: inspect pending_reconciliation and list_admin_payment_operations plus get_order_ledger before claiming completion. Any Edge failure may follow a durable request or dispatch; read current operations and confirm intent before an identical-key retry. No arbitrary endpoint, provider reference or actor override.',
+    'REAL MONEY: issue a PayPal refund through the authenticated Edge function. Obtain explicit approval for order, amount/lines/shipping and any restock. Retain idempotency_key and identical arguments; never retry automatically or generate a new key after uncertainty. Explicit scope required; amounts are positive USD decimal strings with at most two decimals. No implicit full-balance refund. restock only releases cancelled unshipped units; per-line restock_shipped_quantity restocks returned shipped units, applied only when the provider refund succeeds. Success is a provider observation, not guaranteed local settlement: inspect pending_reconciliation and list_admin_payment_operations plus get_order_ledger before claiming completion. Any Edge failure may follow a durable request or dispatch; read current operations and confirm intent before an identical-key retry. No arbitrary endpoint, provider reference or actor override.',
     options.approvals ? paypalRefund.safeExtend({ approval_id: id.optional() }) : paypalRefund,
     (args) => backend.refundPayPal(args),
     true,
@@ -1250,7 +1246,7 @@ export function createAdminServer(
   );
   rpc(
     'update_fulfillment',
-    'Versioned logistics/status PATCH. Cancellation does not refund or restock. Return/refund guards remain enforced.',
+    'Versioned logistics/status PATCH. Cancellation does not refund or restock. Fulfillments with refunded items or active refund requests cannot be cancelled.',
     z.strictObject({
       fulfillment_id: id,
       expected_version: version,
@@ -1267,67 +1263,6 @@ export function createAdminServer(
     true,
     true,
     fulfillmentResult,
-  );
-
-  rpc(
-    'get_order_returns',
-    'Read returnable balances, authorizations, receipts and dispositions. Independent of financial refunds.',
-    order,
-    false,
-    false,
-    orderReturns,
-  );
-  rpc(
-    'create_return',
-    'Authorize a return against one shipped/delivered fulfillment. Does not receive goods, restock or refund.',
-    z.strictObject({
-      fulfillment_id: id,
-      items: itemQuantities,
-      idempotency_key: key,
-      reason: z.string().max(500).optional(),
-    }),
-    true,
-    true,
-    returnAuthorization,
-  );
-  rpc(
-    'receive_return',
-    'Record physically received quantities at an explicit active warehouse. Does not make stock sellable.',
-    z.strictObject({
-      return_id: id,
-      location_id: id,
-      items: z
-        .array(z.strictObject({ return_line_id: id, quantity: version }))
-        .min(1)
-        .max(100),
-      idempotency_key: key,
-      note: reason,
-    }),
-    true,
-    true,
-    returnReceipt,
-  );
-  rpc(
-    'dispose_return_receipt',
-    'Restock or discard inspected received units. Restock uses the receiving warehouse and original deduction facts; no money movement.',
-    z.strictObject({
-      receipt_line_id: id,
-      quantity: version,
-      disposition: z.enum(['restock', 'discard']),
-      idempotency_key: key,
-      note: reason,
-    }),
-    true,
-    true,
-    returnDisposition,
-  );
-  rpc(
-    'close_return',
-    'Close outstanding return authorization; cancel=true requires no receipts. Existing receipts can still be disposed.',
-    z.strictObject({ return_id: id, cancel: z.boolean().optional() }),
-    true,
-    false,
-    returnAuthorization,
   );
 
   rpc(

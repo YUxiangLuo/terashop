@@ -1558,7 +1558,7 @@ begin
   end if;
   if page_size is null or page_size not between 1 and 100
     or (after_id is not null and (length(after_id)>19 or after_id !~ '^[1-9][0-9]*$'))
-    or (reason_filter is not null and reason_filter not in ('order','cancel','restock','adjust','return','transfer_out','transfer_in')) then
+    or (reason_filter is not null and reason_filter not in ('order','cancel','restock','adjust','transfer_out','transfer_in')) then
     raise exception using errcode='22023', message='invalid inventory movement filters';
   end if;
   begin v_after := after_id::bigint;

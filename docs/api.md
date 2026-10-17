@@ -12,7 +12,7 @@ PostgREST 请求携带 `apikey`；客户/管理员命令另携带 `Authorization
 | 商品与目录管理 | [读取](#storefront--admin-商品读取合同)、[原子编辑](#原子商品编辑)、[底表查询](#现有底表查询)、[促销与扩展](#促销范围与扩展字段管理) |
 | 客户与身份 | [Customer](#customer-与登录身份)、[游客结账](#游客自行结账)、[升级注册](#游客验证邮箱后注册)、[邮箱变更](#注册账户改邮箱重发与过期)、[客户管理](#客户管理查询) |
 | 购物袋与结账 | [可选持久 Cart](#持久-cart可选)、[Quote 流程](#推荐结账流程)、[商业行](#商业行身份)、[金额](#价格明细与税务依据)、[地址](#地址合同) |
-| 订单与售后 | [查询](#客户后台订单查询)、[支付退款](#支付与退款)、[退货收货](#return--receipt--disposition)、[管理命令](#客户与管理员命令)、[便捷下单／手工交易](#便捷下单与手工命令) |
+| 订单与售后 | [查询](#客户后台订单查询)、[支付退款](#支付与退款)、[退货回库](#退货回库)、[管理命令](#客户与管理员命令)、[便捷下单／手工交易](#便捷下单与手工命令) |
 
 本页维护调用合同，不保证示例前台已实现全部功能；前台能力见 [Storefront](../storefront/README.md)，支付 UI 状态和 SDK 流程见 [PayPal 接入](storefront-paypal.md)。
 
@@ -255,7 +255,7 @@ PATCH 省略保留，只允许显式字段，JSONB 文本最多 256 KiB。客户
 
 客户列表仅返回 `id/order_number/status/financial_status/fulfillment_status/currency/total/created_at`；后台列表另有 customer_id 和下单时的 email 快照。不加载商品行、地址、内部备注或精确总数。
 
-详情复用下单返回的安全订单头、持久化 `pricing` 明细和 `fulfillments`（物流字段及关系化 order_item_id/quantity 行）；目录改价不会重算订单快照。Admin 详情额外返回 admin_note。两者不返回支付渠道操作信息；资金账本、退款/退货、履约余额继续用已有专项 RPC，并各自检查权限。
+详情复用下单返回的安全订单头、持久化 `pricing` 明细和 `fulfillments`（物流字段及关系化 order_item_id/quantity 行）；目录改价不会重算订单快照。Admin 详情额外返回 admin_note。两者不返回支付渠道操作信息；资金账本、退款、履约余额继续用已有专项 RPC，并各自检查权限。
 
 客户查询必须能解析出当前活跃 Customer，无会话、失去 Auth 关联或已匿名化均拒绝；有效游客会话可查询自己的订单。不能用请求体客户 ID 或 service role 无身份调用来冒充客户。管理员仍可按商业 Customer ID 查询匿名化客户的历史订单，此数据继续受订单保留政策约束。
 
@@ -287,7 +287,7 @@ PATCH 省略保留，只允许显式字段，JSONB 文本最多 256 KiB。客户
 
 `refund_paypal` 是会移动真实资金的写工具，须开启 MCP 写开关并先取得明确批准；与仅记账的 `refund_order` 不同。固定调用 `/functions/v1/paypal-create-refund`，透传当前管理员 JWT；MCP 不持有 service key 或 PayPal 凭据，Edge 继续负责身份验证、数据库管理员授权及渠道调用。运行环境必须已部署该 Edge 并配置 PayPal；live/sandbox 由服务端配置决定，工具参数不可覆盖。
 
-必填 order_id/idempotency_key，且必须显式提供 amount、items 或 shipping_amount；amount 与另外两者互斥，items 可与 shipping_amount 组合。金额为正十进制字符串，整数部分最多 10 位、小数最多两位，不接受 Number、指数或前导零。items 沿用订单行 UUID/正数量合同，最多 100 行；reason 最多 1000 字符；restock=true 必须有 items，仅回补取消的未发货库存，不代表收到退货。**不允许省略退款范围自动退剩余全额**，实际可退余额及已发货限制由数据库判定。
+必填 order_id/idempotency_key，且必须显式提供 amount、items 或 shipping_amount；amount 与另外两者互斥，items 可与 shipping_amount 组合。金额为正十进制字符串，整数部分最多 10 位、小数最多两位，不接受 Number、指数或前导零。items 为订单行 UUID/正数量，每行可选 `restock_shipped_quantity`（不超过本行数量），最多 100 行；reason 最多 1000 字符；restock=true 必须有 items，仅回补取消的未发货库存；已发货退回件只在渠道退款成功时按 `restock_shipped_quantity` 回库，见 [退货回库](#退货回库)。**不允许省略退款范围自动退剩余全额**，实际可退余额及已发货限制由数据库判定。
 
 返回只含 `refund_request_id/order_id/provider/provider_status/pending_reconciliation`；不转发渠道 reference、processing_status 原文或错误消息。provider_status 为 PENDING/COMPLETED/FAILED/CANCELLED。渠道 COMPLETED 不是本地账本已完成的充分证明，尤其 pending_reconciliation=true 时；使用脱敏支付操作和订单账本核对。工具注解为 destructive/open-world，非自动幂等重放提示；注解和说明不是独立审批机制。
 
@@ -424,7 +424,7 @@ SSG 页面、游客会话、PayPal 返回页及错误重试见 [Storefront PayPa
 
 支付读取统一使用 `get_order_ledger(order_id)` 的 `transactions`：实收 `kind=capture`，退款 `kind=refund`，返回交易 ID、父交易 ID、意图 ID、金额、币种、状态和渠道引用。仅订单客户、管理员及 service 可读，不返回任意 metadata 或原始 payload。
 
-账本 `adjustments[].id` 与退货处置 DTO 的 `inventory_movement_id` 为规范有符号 bigint 十进制字符串（-9223372036854775808 至 9223372036854775807），替代旧数值型合同，禁止转为 JavaScript Number。报废处置仍返回 null；退货嵌套读取、首次执行与幂等重放共用此合同。底层 bigint 存储不变，账本调整仍按数值 ID 升序，非字符串排序。
+账本 `adjustments[].id` 为规范有符号 bigint 十进制字符串（-9223372036854775808 至 9223372036854775807），替代旧数值型合同，禁止转为 JavaScript Number。底层 bigint 存储不变，账本调整仍按数值 ID 升序，非字符串排序。
 
 `/rest/v1/payments` 已移除，`commerce.payment_transactions` 不向 PostgREST 暴露；不可用直写表替代收付款命令。service-only 的 `capture_payment_intent` 仅接收 `payment_intent_id`、`provider_reference`、`idempotency_key`，不再接收 `raw`；生产通过已验证的渠道事件链调用。
 
@@ -437,21 +437,21 @@ SSG 页面、游客会话、PayPal 返回页及错误重试见 [Storefront PayPa
 退款示例：
 
 ```json
-{"order_id":"<uuid>","idempotency_key":"refund-command-id","items":[{"order_item_id":"<uuid>","quantity":1}],"restock":true,"reason":"取消未发货商品"}
+{"order_id":"<uuid>","idempotency_key":"refund-command-id","items":[{"order_item_id":"<uuid>","quantity":2,"restock_shipped_quantity":1}],"restock":true,"reason":"取消未发货商品并回库一件退回商品"}
 ```
 
 手工 `refund_order` 与 PayPal 使用同一组成合同：
 
-- `items` 按独立 `order_item_id` / 数量退**商品净额及对应税**。净额仍在 `refund_lines.amount`，税另列组件，不能把两者重复相加。
+- `items` 按独立 `order_item_id` / 数量退**商品净额及对应税**。净额仍在 `refund_lines.amount`，税另列组件，不能把两者重复相加。每行可选 `restock_shipped_quantity`（非负整数，默认 0），见 [退货回库](#退货回库)；其他字段拒绝。
 - `shipping_amount` 是明确选退的**折后运费、不含税**，可单独传或与 `items` 同传；系统另退对应配送税。省略不退运费，免邮没有正运费可退。
 - `amount` 与 `items` / `shipping_amount` 互斥，保存为 `unallocated`，不猜税、运费或商品数量；三者全省略表示退当前可退余额，同样是未分配金额。
-- 金额必须是有限正 USD、至多两位小数。各净额/税分别按比例舍入并钳制剩余额度，最后一份吸收余数；总额必须大于零且不超过实收可退余额。`restock=true` 必须有商品行，且**只释放本次取消的未发货数量**。已发货部分不会因退款成功自动回库，必须使用下方 Return / Receipt / Disposition。
-- `get_order_ledger.refunds[].lines` 的 `cancelled_quantity` 是未发货取消量，`restocked_quantity` 是其中实际释放的库存量；后者不大于前者。退款恢复库存记 `cancel` 流水，不冒充实物退回。
+- 金额必须是有限正 USD、至多两位小数。各净额/税分别按比例舍入并钳制剩余额度，最后一份吸收余数；总额必须大于零且不超过实收可退余额。`restock=true` 必须有商品行，且**只释放本次取消的未发货数量**。已发货部分只有按行填写 `restock_shipped_quantity` 才回库。
+- `get_order_ledger.refunds[].lines` 的 `cancelled_quantity` 是未发货取消量，`restocked_quantity` 是其中实际释放的库存量（记 `cancel` 流水）；`restock_shipped_quantity` 是本行回库的已发货退回件（记 `restock` 流水）。`cancelled_quantity + restock_shipped_quantity ≤ quantity`。
 - `get_order_ledger.refunds[].components` 与退款请求 DTO 的 `components` 返回 `tax` / `shipping` / `unallocated`、来源 ID、金额；商品行金额 + 组件金额 = 退款总额。异步成功使用请求时的原分摊，不按最新税率或剩余请求重算。
 
 例如只退 4 USD 净运费，传 `{"order_id":"<uuid>","idempotency_key":"shipping-refund-1","shipping_amount":"4.00"}`；若原配送税为 13%，渠道实际收到的本次退款额为 4.52 USD（未发生余数调整时）。
 
-退款请求被接受不等于渠道退款成功；确认前仅预留可退额度/数量，不回库。已发出的退款即使尚无渠道 ID，也不能无确认取消或释放额度。
+退款请求被接受不等于渠道退款成功；确认前仅预留可退额度/数量（含已发货回库量），不回库；渠道成功入账的同一事务才写回库流水。已发出的退款即使尚无渠道 ID，也不能无确认取消或释放额度。
 PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复用同一个键。支付/退款响应 `pending_reconciliation=true` 也可能表示可重试的本地数据库故障，不能当作已完成交易。
 渠道密钥、Webhook 和 Worker 接入见 [支付与部署](../supabase/functions/README.md)。
 
@@ -461,12 +461,12 @@ PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复
 
 | RPC | 参数 / 返回 |
 | --- | --- |
-| `preview_manual_refund` | `order_id`、`items`/`shipping_amount` 或互斥的 `amount`、`restock`（默认 false）。必须显式指定退款范围，不支持全省略即退余额。返回下述试算 DTO |
+| `preview_manual_refund` | `order_id`、`items`（每行可带 `restock_shipped_quantity`）/`shipping_amount` 或互斥的 `amount`、`restock`（默认 false）。必须显式指定退款范围，不支持全省略即退余额。返回下述试算 DTO |
 | `commit_manual_refund` | 相同范围参数，加 `preview_token`、`idempotency_key`、非空 `reason`（最多 2000 字符，客户可见）。返回 `{order_id, preview_token, refund}`，`refund` 与 `get_order_ledger.refunds[]` 同结构，含稳定退款 ID |
 
 试算 DTO：`order_id`、`currency`、`available_amount`（当前成功实收可退余额）、`source`、`amount`（本次含税总额）、`restock`、`lines`、`components`、`preview_token`。
 
-- `lines` 包含 `order_item_id`、`quantity`、商品净额 `amount`、预计 `cancelled_quantity` 和 `restocked_quantity`；后者只释放取消的未发货库存，不替代退货验收。
+- `lines` 包含 `order_item_id`、`quantity`、商品净额 `amount`、预计 `cancelled_quantity`、`restocked_quantity`（释放取消的未发货库存）和 `restock_shipped_quantity`（回库的已发货退回件）。
 - `components` 包含 `kind`、`tax_line_id`、`shipping_line_id`、`amount`，包括商品税、配送税、净运费或未分配金额。商品行净额与全部组件合计等于本次退款总额。
 - 试算在事务内锁定订单、复用既有分摊算法，不插入退款/事件/预占，不修改库存。锁随请求结束释放；试算不是额度预留或执行成功保证。
 - `preview_token` 是当前试算内容的校验值，不是授权凭证或一次性票据，无固定时间有效期。提交在同一事务中重新锁定、重新计算，比较金额、分配、可退余额和库存影响；不匹配或已不具备退款资格则整体拒绝。即使总金额不变，取消/释放数量变化也会拒绝。写入后再核对实际分配与库存数量，发现不一致则整体回滚。
@@ -478,7 +478,7 @@ PayPal 创建 Order 的客户端幂等键按订单隔离；不同订单可以复
 ```ts
 const scope = {
   order_id: orderId,
-  items: [{ order_item_id: itemId, quantity: 1 }],
+  items: [{ order_item_id: itemId, quantity: 1, restock_shipped_quantity: 1 }],
   shipping_amount: 4, // 净运费；试算还会加入相应配送税
   restock: true,
 };
@@ -495,35 +495,15 @@ const result = await supabase.rpc('commit_manual_refund', command);
 
 Admin 商品/运费及金额退款表单使用本合同；不适用于 PayPal Edge 退款，渠道退款需独立接入试算与异步请求校验。数据库回归：`bun run test:current tests/manual-refund-preview.test.ts`，覆盖税费尾差、库存影响、原键恢复、权限、受控并发及旧事务快照。
 
-## Return / Receipt / Disposition
+## 退货回库
 
-三种事实与资金退款分开：Return 是管理员的退货授权，Receipt 是实际收货，Disposition 是验收后处置。当前每个 Return 对应**一次已 shipped/delivered 的 fulfillment**，通过 `order_item_id` 定位该次发货中的商业行；跨发货退回需多个 Return。客户自助申请/审批、退货面单、换货补发、序列号/批次与退货政策自动判定尚未实现。
+本店不单独建退货授权、收货或处置记录：客户寄回已发货商品时，管理员在退款命令的对应商品行填写 `restock_shipped_quantity`，表示本行退款中有这么多件是已发货且已收回、可重新销售的商品。`refund_order`、`preview_manual_refund` / `commit_manual_refund` 与 `paypal-create-refund`（含 MCP `refund_paypal`）使用同一字段与规则：
 
-| RPC | 权限 | 参数 / 行为 |
-| --- | --- | --- |
-| `create_return` | admin | `fulfillment_id`、`items:[{order_item_id,quantity}]`、`idempotency_key`、可选 `reason`；创建 open 授权，不改库存/资金 |
-| `receive_return` | admin | `return_id`、明确的活跃 `location_id`、`items:[{return_line_id,quantity}]`、`idempotency_key`、可选 `note`；可分批实收，不增加可售库存 |
-| `dispose_return_receipt` | admin | `receipt_line_id`、`quantity`、`disposition:"restock"` 或 `"discard"`、`idempotency_key`、可选 `note`；每次处理一条实收行的部分或全部数量 |
-| `close_return` | admin | `return_id`、可选 `cancel`（默认 false）；关闭剩余待收量，true 仅允许取消尚无实收的授权 |
-| `get_order_returns` | 本人 / admin / service | `order_id`；发货行的可退余额、授权/实收、嵌套收货与处置 DTO |
-
-创建/收货每次接受 1–100 条输入行，只允许相应 ID/正整数 quantity，相同 ID 合并，重排/UUID 大小写不影响指纹；未知字段拒绝。reason 至多 500 字符，note 至多 2000 字符，均为客户可见文本，不应存后台秘密。幂等键 1–200 字符，分别按 fulfillment、Return、receipt line 隔离；相同参数返回同一记录（DTO 可包含后续进展），不同参数拒绝。
-
-```http
-POST /rest/v1/rpc/receive_return
-
-{"return_id":"<退货 UUID>","location_id":"<实际收货地点 UUID>","idempotency_key":"receipt-1","items":[{"return_line_id":"<授权行 UUID>","quantity":2}]}
-```
-
-收到的商品可以先待验收；`undisposed_quantity` 是实收量减去已处置量。随后分别调用 `dispose_return_receipt`，例如一件 `restock`、一件 `discard`。这不是所有仓库不可售库存的总账；received_at 是本系统记录收货的时间，不接收任意回填时刻。
-
-- 尚无按 Return 自动生成退款的 RPC。既有按商品数量退款仍**优先取消未发货部分**；不能因为创建了 Return 就假定退款会改为“仅退已发货”。若要保留未发货履约量，可另行选择纯金额退款，但它是 unallocated，不推断商品/税的归属。
-- 发货可退量 = 有效发货数量 − 所有 Return 实收量 − open Return 尚未实收的授权量。退款数量不占用/释放这个独立余额；已退款、纯金额退款或零价商品仍可依法按店铺政策处理退货。
-- 每条授权的累计实收不能超量；每条实收的累计处置不能超量。`restock` 必须有该订单的原始库存扣减事实，增加**实收地点**的可售库存并关联唯一库存流水；不参考变体现在的 track_inventory，也不自动调拨到默认仓（商城结账仍只使用默认仓）。`discard` 不改库存，没有扣减事实的商品不能凭收货新造可售库存。
-- 原始扣减覆盖的恢复总量是额外上限。退款只释放未发货取消量，实收处置只处理已发货退回量；先退款/先收货、事件重放或并发不能重复回库。退货、收货、处置从不自动调用退款，也不重算原价/税。
-- close 释放未实收授权，保留实收占用；即使尚未验收，也可关闭收货后继续处置已有实收。cancel 只允许无实收时使用。终态不可重开/再收货；新退货仍受剩余可退量限制。
-- 存在 open 授权或任何实收的 fulfillment 不可撤销；退回商品不会把原发货改为 cancelled，也不重新赋予发货额度。
-- 事实不可删除/改写，仅审计 actor 可单向匿名化。SQLSTATE `55P03` / `40001` / `40P01` 重试整笔事务。事件 `return.open/closed/cancelled/received/disposed` 进入 Outbox，消费者须幂等；数据库保护见 [ADR-018](architecture-decisions.md#adr-018退货授权实际收货处置与资金分离)。
+- 只适用于商品行退款；纯金额和纯运费退款从不回库。未发货部分仍按原规则自动计算 `cancelled_quantity`，仅 `restock=true` 时释放；声明的已发货退回件不计入取消量，即 `cancelled_quantity = min(quantity − restock_shipped_quantity, 当前可取消未发货量)`，其余未发货商品仍可继续履约。
+- 上限：单行 `restock_shipped_quantity ≤ quantity − cancelled_quantity`；同一订单行在所有成功退款与活动退款请求中的累计回库量 ≤ 该行 shipped/delivered 履约数量。多次退款、幂等重放或重复渠道事件都不会重复回库；超限整笔拒绝，不留资金或库存事实。商品必须有该订单的原始库存扣减事实（未跟踪库存的商品拒绝）。
+- 回库在资金退款成功的同一事务写入 `inventory_movements`（reason `restock`、带 `order_id`），按原扣减流水的仓库分摊，并与取消释放共用原始扣减上限。手工退款立即生效；PayPal 退款在请求时只预留，渠道成功（finalize）时才回库，失败或取消释放预留。
+- 已发货数量不因回库减少：发货确实发生过，`fulfilled_quantity` 不变。存在商品退款或活动退款请求的履约不可取消。
+- 不提供换货、退货面单、批次/序列号或报废记录；收到但不可再售的商品不填写本字段即可。
 
 ## 地址合同
 
@@ -609,7 +589,7 @@ DTO 为 `{name,timezone,currency,revision,updated_at}`，初始 name=`Tera`、ti
 
 - `get_admin_location(location_id)`：不存在返回 null，包含停用仓库。DTO 为 `id/code/name/address/is_default/is_active/revision/created_at`，不返回库存。address 为既有 JSON 值，不保证特定地址格式；编辑令牌为 revision，不是 created_at。
 - `list_admin_locations(page_size=20, after_id=null, active=null, search=null)`：UUID 升序分页，返回 `{items,next_cursor}`；active 省略包含启用与停用，search 按名称/code 不区分大小写的字面子串搜索，去除首尾普通空格，最多 200 字符，`%/_` 不作通配符。is_default 与 is_active 分开表达；默认仓必须同时启用才用于新结账。
-- `list_admin_inventory_movements(page_size=20, after_id=null, variant_id=null, location_id=null, order_id=null, reason_filter=null)`：按流水 bigint ID 倒序返回 `{items,next_cursor}`，筛选按 AND 组合；reason_filter 为 `order/cancel/restock/adjust/return/transfer_out/transfer_in`。每行显式返回 `id/variant_id/location_id/delta/on_hand_after/reason/order_id/actor_id/note/transfer_id/created_at`。actor_id 是可为 null 的 Auth ID，不是客户 ID；note 是不可信商家文本。仅调拨流水带 transfer_id。
+- `list_admin_inventory_movements(page_size=20, after_id=null, variant_id=null, location_id=null, order_id=null, reason_filter=null)`：按流水 bigint ID 倒序返回 `{items,next_cursor}`，筛选按 AND 组合；reason_filter 为 `order/cancel/restock/adjust/transfer_out/transfer_in`。每行显式返回 `id/variant_id/location_id/delta/on_hand_after/reason/order_id/actor_id/note/transfer_id/created_at`。actor_id 是可为 null 的 Auth ID，不是客户 ID；note 是不可信商家文本。仅调拨流水带 transfer_id。
 
 两种列表 page_size 为 1–100，末页 next_cursor 为 null，修改筛选应清除游标。流水 id、next_cursor 和 after_id **均为十进制字符串**，不能转 Number；after_id 范围 1–9223372036854775807，不接受符号、空白或前导零。非法分页/筛选为 `22023`。列表不保证跨请求快照；流水 ID 是分配顺序，不是提交顺序，迟提交行可能被翻页跳过，不能用作可靠消费队列。
 
@@ -835,7 +815,7 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 `update_order_address` 不能修改正常 Quote 转单的地址快照；未付款改址需要取消并重新结账。RPC 位于 public schema 不代表管理员或匿名用户都有执行权限，客户端必须同时遵循授权与业务状态限制。
 
 金额口径：`order_items.total` 为毛额，`line_total` 为扣行折扣后的净额；`orders.discount_total` 只含商品折扣。
-免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payment_transactions.amount` 恒正，方向由 `kind` 表达。退款不等于退货收货：退款 `restock` 仅释放未发货取消量，已发货商品由实际收货后的 disposition 驱动回库。
+免邮收益记录于促销应用与配送分摊中，`shipping_total` 为减免后的运费；`payment_transactions.amount` 恒正，方向由 `kind` 表达。退款 `restock` 仅释放未发货取消量；已发货退回件只按商品行 `restock_shipped_quantity` 回库，见 [退货回库](#退货回库)。
 
 ### 履约状态与物流更新
 
@@ -852,11 +832,11 @@ owner_type 为 product/variant/category/customer/order/shop，客户 ID 为 Cust
 
 - `changes` 必须是非空对象，只允许 `status`、`carrier`、`tracking_number`、`tracking_url`；省略字段不变，只有 `tracking_url` 可传 null 清空，其余字段必须为字符串。商品行、订单归属、时间戳和版本不可由该命令写入。
 - 状态沿用现有状态机：pending → shipped/cancelled，shipped → delivered/cancelled；delivered/cancelled 不可回退。创建入口仍直接 shipped，不新增 pending 创建流程。终态允许修正物流信息。
-- 取消履约只重算订单履约状态，不退款、不自动回库。存在活跃退货授权、收货事实、商品行退款或活跃退款请求时，仍受原有取消保护约束；实际退货入库走 Return/Receipt/Disposition。
+- 取消履约只重算订单履约状态，不退款、不自动回库。存在商品行退款或活跃退款请求时拒绝取消；退回商品入库走退款行的 `restock_shipped_quantity`。
 - 每次实际 UPDATE 由数据库推进版本，service 直写也不例外；命令无变化时不 UPDATE、不递增版本、不发事件。版本冲突返回 `PT409`，应重新读取并确认修改意图，不能自动换版本覆盖。
 - service 直接修改状态或物流时，trigger 以 NOWAIT 获取父订单锁，避免与管理员命令反向等待；竞争返回 `55P03`，调用方应重试整个事务，失败不会留下版本或审计变化。
 - 店铺级 `fulfillment.update` 幂等范围独立于创建；同键参数冲突为 `PT409`。成功重放先校验权限，返回资源当前状态，不再校验旧版本、不重复写入。失败不占键；网络结果不明时必须复用原键、原版本和原参数。
-- 无效键、版本或字段形状返回 `22023`，资源不存在为 `PT404`，非管理员为 `42501`；状态机、退货与退款限制沿用原业务错误。状态事件与 `fulfillment_tracking_updated`（含修改前后物流字段、actor、版本）和 Outbox 在同一事务提交。物流 URL 是外部输入，不表示服务端已验证或抓取该地址。
+- 无效键、版本或字段形状返回 `22023`，资源不存在为 `PT404`，非管理员为 `42501`；状态机与退款限制沿用原业务错误。状态事件与 `fulfillment_tracking_updated`（含修改前后物流字段、actor、版本）和 Outbox 在同一事务提交。物流 URL 是外部输入，不表示服务端已验证或抓取该地址。
 
 ## 管理员运维查询与恢复
 

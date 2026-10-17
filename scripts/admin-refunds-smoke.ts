@@ -189,7 +189,7 @@ try {
   await browser("dialog", "accept");
   await ready();
   // Historical item labels and linked payment records use owned real RPC facts.
-  const itemOrder = await fixtureOrder(fixture, actor, 2);
+  const itemOrder = await fixtureOrder(fixture, actor, 3);
   await checked(
     rpc(
       "mark_order_paid",
@@ -211,7 +211,7 @@ try {
       "create_fulfillment",
       {
         order_id: itemOrder.id,
-        items: [{ order_item_id: itemOrder.itemId, quantity: 1 }],
+        items: [{ order_item_id: itemOrder.itemId, quantity: 2 }],
         idempotency_key: crypto.randomUUID(),
       },
       actor.token,
@@ -266,6 +266,22 @@ try {
   assert.equal(
     (await stock()).reduce((sum, row) => sum + row.on_hand, 0),
     beforeRelease + 1,
+  );
+  // Shipped units the customer sent back return to stock only when entered per line.
+  await browser("select", "#refund-mode", "items");
+  await browser("fill", "[data-refund-item]", "1");
+  await browser("fill", "[data-refund-returned]", "1");
+  await browser("fill", "#refund-reason", "Returned shipped unit");
+  await click("Preview refund");
+  await wait("Cancel 0 · Release stock 0 · Restock returned 1");
+  await browser("check", "#refund-confirm");
+  await click("Record manual refund");
+  await browser("dialog", "accept");
+  await wait("Manual refund bookkeeping confirmed");
+  await ready();
+  assert.equal(
+    (await stock()).reduce((sum, row) => sum + row.on_hand, 0),
+    beforeRelease + 2,
   );
   await browser("set", "viewport", "390", "844");
   await wait(fixture.sku);
@@ -404,7 +420,7 @@ try {
   );
   await browser("screenshot", "/tmp/admin-refund-online-blocked.png", "--full");
   console.log(
-    "Refund smoke passed: exact amount, lost-response replay once, unallocated record, stock/quantities unchanged, stale balance rejected, historical item details, snapshot fallback/recovery, linked transactions, hidden provider reference, PayPal read-only, mobile.",
+    "Refund smoke passed: exact amount, lost-response replay once, unallocated record, stock/quantities unchanged, stale balance rejected, historical item details, returned shipped unit restocked, snapshot fallback/recovery, linked transactions, hidden provider reference, PayPal read-only, mobile.",
   );
 } catch (error) {
   await browser("screenshot", "/tmp/admin-refund-failure.png", "--full").catch(

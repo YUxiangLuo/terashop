@@ -38,6 +38,28 @@ test("refund scope never silently combines amount mode with stale item or shippi
   expect(() => refundScope(id, "items", "", {}, "", false)).toThrow();
   expect(() => refundScope(id, "items", "", {}, "2", true)).toThrow();
 });
+test("returned shipped units ride on their refund line and never exceed it", () => {
+  const item = crypto.randomUUID(),
+    other = crypto.randomUUID();
+  expect(
+    refundScope(id, "items", "", { [item]: "2" }, "", false, { [item]: "2" }),
+  ).toEqual({
+    order_id: id,
+    items: [{ order_item_id: item, quantity: 2, restock_shipped_quantity: 2 }],
+    restock: false,
+  });
+  expect(
+    refundScope(id, "items", "", { [item]: "2" }, "", false, { [item]: "0" }),
+  ).toEqual({
+    order_id: id,
+    items: [{ order_item_id: item, quantity: 2 }],
+    restock: false,
+  });
+  for (const returned of [{ [item]: "3" }, { [item]: "-1" }, { [item]: "1.5" }, { [other]: "1" }])
+    expect(() =>
+      refundScope(id, "items", "", { [item]: "2" }, "", false, returned),
+    ).toThrow();
+});
 test("journal binds exact scope, preview and receipt including tax allocation and stock effects", () => {
   const item = crypto.randomUUID(),
     tax = crypto.randomUUID();
@@ -61,6 +83,7 @@ test("journal binds exact scope, preview and receipt including tax allocation an
         amount: 10,
         cancelled_quantity: 1,
         restocked_quantity: 1,
+        restock_shipped_quantity: 0,
       },
     ],
     components: [
@@ -87,6 +110,12 @@ test("journal binds exact scope, preview and receipt including tax allocation an
     previewMatchesScope(preview, {
       ...scope,
       items: [{ order_item_id: item, quantity: 1 }],
+    }),
+  ).toBe(false);
+  expect(
+    previewMatchesScope(preview, {
+      ...scope,
+      items: [{ order_item_id: item, quantity: 2, restock_shipped_quantity: 1 }],
     }),
   ).toBe(false);
   expect(isRefundOperation(operation)).toBe(true);
@@ -122,6 +151,18 @@ test("journal binds exact scope, preview and receipt including tax allocation an
         refund: {
           ...receipt.refund,
           lines: [{ ...preview.lines[0], restocked_quantity: 0 }],
+        },
+      },
+      operation,
+    ),
+  ).toBe(false);
+  expect(
+    acknowledgesPreviewedRefund(
+      {
+        ...receipt,
+        refund: {
+          ...receipt.refund,
+          lines: [{ ...preview.lines[0], restock_shipped_quantity: 1 }],
         },
       },
       operation,

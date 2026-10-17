@@ -9,6 +9,7 @@ const orderId = '11111111-1111-4111-8111-111111111111';
 const itemId = '22222222-2222-4222-8222-222222222222';
 const base = { order_id: orderId, idempotency_key: ' refund-command ' };
 const item = { order_item_id: itemId, quantity: 1 };
+const parsedItem = { ...item, restock_shipped_quantity: 0 };
 
 describe('PayPal 退款参数', () => {
   test('保留默认值、原始金额及商品行，丢弃额外字段', () => {
@@ -24,7 +25,9 @@ describe('PayPal 退款参数', () => {
     expect(parseRefundRequest({
       ...base, items: [{ ...item, ignored: true }, item], restock: true, reason: '',
       actor_id: 'untrusted', provider: 'untrusted',
-    })).toEqual({ ...expected, items: [item, item], restock: true, reason: '' });
+    })).toEqual({ ...expected, items: [parsedItem, parsedItem], restock: true, reason: '' });
+    expect(parseRefundRequest({ ...base, items: [{ order_item_id: itemId, quantity: 2, restock_shipped_quantity: 2 }] }).items)
+      .toEqual([{ order_item_id: itemId, quantity: 2, restock_shipped_quantity: 2 }]);
     expect(parseRefundRequest({
       ...base, items: null, amount: null, reason: null,
     })).toEqual(expected);
@@ -45,6 +48,9 @@ describe('PayPal 退款参数', () => {
       [{ items: [{ ...item, order_item_id: 'bad' }] }, 'order_item_id must be a UUID'],
       ...[0, -1, 1.5, '1', Number.MAX_SAFE_INTEGER + 1].map(quantity => [
         { items: [{ ...item, quantity }] }, 'Refund quantity must be a positive integer',
+      ] as [Record<string, unknown>, string]),
+      ...[-1, 1.5, '1', 2].map(restock_shipped_quantity => [
+        { items: [{ ...item, restock_shipped_quantity }] }, 'restock_shipped_quantity must be an integer between 0 and quantity',
       ] as [Record<string, unknown>, string]),
       [{ items: [item], amount: '10.00' }, 'Pass either items or amount'],
       [{ amount: {} }, 'amount must be a decimal'],
